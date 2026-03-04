@@ -46,7 +46,7 @@ gym.register(
 )
 
 gym.register(
-    id="Isaac-Flat-Multi-Robot-Stack-Lift-v0",
+    id="Isaac-Flat-MultiRobot-Stack-Lift-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     kwargs={
         "env_cfg_entry_point": f"{__name__}.demo_multi_robot_task_flat_env_cfg:FlatMultiRobotLiftStackEnvCfg",

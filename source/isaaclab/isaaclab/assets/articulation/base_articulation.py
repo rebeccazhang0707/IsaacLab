@@ -1241,6 +1241,8 @@ class BaseArticulation(AssetBase):
         Returns: 1D long tensor (local indices)
         """
         assigned, g2l = self._assigned_envs_tensors
+        if env_ids is None:
+            return torch.arange(len(self._assigned_envs), dtype=torch.long, device=self.device)
         mask = torch.isin(env_ids, assigned)
         return g2l[env_ids[mask]]
 

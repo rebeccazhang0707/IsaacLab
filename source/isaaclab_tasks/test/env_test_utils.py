@@ -84,6 +84,8 @@ def setup_environment(
             "Isaac-MultiRobot-Multi-Task-Joint-Position-v0",
             "Isaac-MultiRobot-Multi-Task-IK-Rel-v0",
             "Isaac-MultiRobot-Flat-Lift-Stack-v0",
+            "Isaac-Flat-Franka-Multi-Task-v0",
+            "Isaac-Flat-MultiRobot-Stack-Lift-v0",
         ]:
             continue
 
