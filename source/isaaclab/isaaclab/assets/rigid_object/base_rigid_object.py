@@ -155,16 +155,29 @@ class BaseRigidObject(AssetBase):
             If None, returns all local indices (shape (len(assigned_envs),)).
         Returns: 1D long tensor (local indices)
         """
-        if env_ids is None:
-            return torch.arange(len(self._assigned_envs), dtype=torch.long, device=self.device)
+        assigned, g2l = self._assigned_envs_tensors
+        mask = torch.isin(env_ids, assigned)
+        return g2l[env_ids[mask]]
 
-        env_ids = env_ids.cpu().tolist()
-        local_list = [
-            self._assigned_envs_to_local_indices[env_id]
-            for env_id in env_ids
-            if env_id in self._assigned_envs_to_local_indices
-        ]
-        return torch.tensor(local_list, dtype=torch.long, device=self.device)
+    @property
+    def _assigned_envs_tensors(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Lazily-built tensor pair: (assigned_set, global_to_local_lut).
+
+        ``assigned_set`` is a 1-D tensor of owned global IDs (for ``torch.isin``).
+        ``global_to_local_lut`` maps ``global_id -> local_index`` for owned IDs
+        (entries for unowned IDs are unused and never accessed).
+        """
+        cached = getattr(self, "_g2l_cached", None)
+        if cached is None:
+            assigned = self._assigned_envs
+            assigned_t = torch.tensor(assigned, dtype=torch.long, device=self.device)
+            size = int(assigned_t.max().item()) + 1 if len(assigned) else 0
+            lut = torch.empty(size, dtype=torch.long, device=self.device)
+            for local_idx, global_idx in enumerate(assigned):
+                lut[global_idx] = local_idx
+            cached = (assigned_t, lut)
+            self._g2l_cached = cached
+        return cached
 
     """
     Operations.
