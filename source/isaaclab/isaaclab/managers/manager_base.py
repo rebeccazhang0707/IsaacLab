@@ -70,7 +70,7 @@ class ManagerTermBase(ABC):
 
     @property
     def num_envs(self) -> int:
-        """Number of environments managed by this term."""
+        """Number of environments."""
         return self._env.num_envs
 
     @property
