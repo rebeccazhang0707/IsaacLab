@@ -39,7 +39,7 @@ class PerRobotMdpTermCache(NamedTuple):
     group_key: str | None
     """Layout group key (for :meth:`filter_and_split` in events)."""
     params: dict[str, Any]
-    """Fully merged params (term params + auto-injected overrides from :class:`RobotInfo`)."""
+    """Fully merged params (term params + auto-injected metadata from ``robot_meta``)."""
 
 
 logger = logging.getLogger(__name__)
@@ -108,22 +108,6 @@ class ManagerTermBase(ABC):
     """
     Operations.
     """
-
-    def robot_metadata(self) -> dict[str, Any]:
-        """Declare per-robot metadata this term contributes to :class:`RobotInfo`.
-
-        Override in ``ActionTerm`` or ``CommandTerm`` subclasses to advertise
-        metadata (e.g. ``ee_body``, ``joint_patterns``, ``command_name``)
-        that should be registered with :meth:`EnvLayout.register_robot_meta`.
-
-        The manager calls this once during :meth:`_prepare_terms` and merges
-        the returned dict into the robot's :class:`RobotInfo`.  Only non-None
-        values are stored.
-
-        Returns:
-            A dict of metadata key-value pairs.  Empty dict by default.
-        """
-        return {}
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         """Resets the manager term.
@@ -407,20 +391,19 @@ class ManagerBase(ABC):
         # check statically if the term's arguments are matched by params
         term_params = list(term_cfg.params.keys())
 
-        # per_robot auto-inject: ``asset_cfg`` and ``command_name`` are always filled from RobotInfo
-        # at dispatch time.  Manually providing them in ``params`` is an error because it would
-        # conflict with the per-robot override.
+        # per_robot auto-inject: any parameter whose name matches a
+        # robot_meta key is filled at dispatch time.  We collect all
+        # such names here so that the static signature check passes.
         per_robot_auto: set[str] = set()
         if term_cfg.per_robot:
             sig_params = inspect.signature(func_static).parameters
-            for auto_key in ("asset_cfg", "command_name"):
-                if auto_key in sig_params:
-                    if auto_key in term_cfg.params:
-                        raise ValueError(
-                            f"Term '{term_name}': per_robot=True but '{auto_key}' is manually specified in params."
-                            f" Remove it — per_robot terms receive '{auto_key}' automatically from RobotInfo."
-                        )
-                    per_robot_auto.add(auto_key)
+            robot_meta = getattr(self._env.cfg, "robot_meta", None) or {}
+            all_meta_keys: set[str] = set()
+            for meta in robot_meta.values():
+                all_meta_keys.update(meta.keys())
+            for key in all_meta_keys:
+                if key in sig_params and key not in term_cfg.params:
+                    per_robot_auto.add(key)
             term_params = term_params + list(per_robot_auto)
 
         args = inspect.signature(func_static).parameters
@@ -485,13 +468,11 @@ class ManagerBase(ABC):
     def _build_per_robot_mdp_term_caches(self, term_cfg: ManagerTermBaseCfg) -> list[PerRobotMdpTermCache]:
         """Build per-robot dispatch caches for a ``per_robot`` MDP term.
 
-        For every :class:`RobotInfo`, this method:
-
-        1. Injects ``asset_cfg`` (via :meth:`RobotInfo.resolved_cfg`) and ``command_name`` when the function
-           signature requires them.
-        2. Auto-injects **any** additional metadata key from :attr:`RobotInfo.meta` that matches a function
-           parameter name not already provided.  This makes the system extensible without code changes here.
-        3. Caches the global env-ID tensor and the layout group key for zero-overhead runtime dispatch.
+        Iterates ``env.cfg.robot_meta`` and auto-injects any metadata
+        value whose key matches a function parameter name not already
+        provided in ``term_cfg.params``.  Values of type
+        :class:`SceneEntityCfg` are resolved against the scene before
+        injection.
 
         Args:
             term_cfg: The term configuration with ``per_robot=True``.
@@ -500,26 +481,25 @@ class ManagerBase(ABC):
             One :class:`PerRobotMdpTermCache` per robot.
         """
         layout = self._env.scene.layout
+        robot_meta = getattr(self._env.cfg, "robot_meta", None) or {}
         func_static = term_cfg.func.__call__ if inspect.isclass(term_cfg.func) else term_cfg.func
         sig_params = inspect.signature(func_static).parameters
-        need_asset_cfg = "asset_cfg" in sig_params
-        need_command = "command_name" in sig_params
 
         caches: list[PerRobotMdpTermCache] = []
-        for robot in layout.robot_infos:
+        for asset_name, meta in robot_meta.items():
             overrides: dict[str, Any] = {}
-            if need_asset_cfg:
-                overrides["asset_cfg"] = robot.resolved_cfg(self._env.scene)
-            if need_command:
-                overrides["command_name"] = robot.command_name
-            for key, value in robot.meta.items():
-                if key in sig_params and key not in overrides and key not in term_cfg.params:
+            for key, value in meta.items():
+                if key in sig_params and key not in term_cfg.params:
+                    if isinstance(value, SceneEntityCfg):
+                        already_resolved = isinstance(value.joint_ids, list) or isinstance(value.body_ids, list)
+                        if not already_resolved:
+                            value.resolve(self._env.scene)
                     overrides[key] = value
 
             caches.append(
                 PerRobotMdpTermCache(
-                    gids=layout.asset_env_ids_t(robot.asset_name),
-                    group_key=layout.group_for_asset(robot.asset_name),
+                    gids=layout.asset_env_ids_t(asset_name),
+                    group_key=layout.group_for_asset(asset_name),
                     params={**term_cfg.params, **overrides},
                 )
             )

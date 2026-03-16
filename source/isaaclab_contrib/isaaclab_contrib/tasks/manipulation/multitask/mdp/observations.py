@@ -9,7 +9,7 @@ Most observations (joint positions, joint velocities, command targets)
 can be expressed with **standard** :mod:`isaaclab.envs.mdp` observation
 functions combined with ``per_robot=True`` on the
 :class:`~isaaclab.managers.ObservationTermCfg`.  The manager automatically
-iterates :attr:`EnvLayout.robot_infos`, auto-injects ``asset_cfg`` /
+iterates ``robot_meta``, auto-injects ``asset_cfg`` /
 ``command_name``, and scatters results into the global tensor.
 
 This module provides only the terms that have **no standard equivalent**:

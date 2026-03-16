@@ -474,10 +474,5 @@ class CommandManager(ManagerBase):
             group_key = term.group_key
             if group_key is not None:
                 layout.register_term(term_name, group_key)
-                asset = getattr(term_cfg, "asset_name", None)
-                if asset is not None:
-                    meta = term.robot_metadata()
-                    meta["command_name"] = term_name
-                    layout.register_robot_meta(asset, **meta)
             # add class to dict
             self._terms[term_name] = term

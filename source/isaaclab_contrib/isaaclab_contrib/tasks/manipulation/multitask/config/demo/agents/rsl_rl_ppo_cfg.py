@@ -11,8 +11,8 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 @configclass
 class MultiRobotReachPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
-    max_iterations = 1000
-    save_interval = 100
+    max_iterations = 2000
+    save_interval = 200
     experiment_name = "multi_robot_reach"
     run_name = ""
     policy = RslRlPpoActorCriticCfg(

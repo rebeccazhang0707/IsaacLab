@@ -7,10 +7,10 @@
 
 **Per-asset functions** (use with ``per_robot=True``):
     Accept ``asset_cfg: SceneEntityCfg`` (auto-injected by the
-    manager from :class:`RobotInfo`) and group-local ``env_ids``.
+    manager from ``robot_meta``) and group-local ``env_ids``.
 
 **Scatter-based functions** (self-dispatching):
-    Iterate :attr:`EnvLayout.robot_infos` and map env-ids internally.
+    Iterate ``robot_meta`` entries and map env-ids internally.
 """
 
 from __future__ import annotations

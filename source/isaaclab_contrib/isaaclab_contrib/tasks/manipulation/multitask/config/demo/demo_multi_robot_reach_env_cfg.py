@@ -38,6 +38,7 @@ from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
@@ -126,43 +127,24 @@ class MultiRobotReachSceneCfg(InteractiveSceneCfg):
             intensity=3000.0,
         ),
     )
-    openarm_robot = OPENARM_UNI_HIGH_PD_CFG.replace(
-        prim_path="{ENV_REGEX_NS}/OpenArm_Robot",
-        task_group=TASK_OPENARM,
-    )
-    openarm_table = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/OpenArm_Table",
+    table = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/Table",
         init_state=AssetBaseCfg.InitialStateCfg(
             pos=(0.5, 0.0, 0.0),
             rot=(0.0, 0.0, 0.707, 0.707),
         ),
         spawn=_TABLE_SPAWN,
+    )
+    openarm_robot = OPENARM_UNI_HIGH_PD_CFG.replace(
+        prim_path="{ENV_REGEX_NS}/OpenArm_Robot",
         task_group=TASK_OPENARM,
     )
     franka_robot = FRANKA_PANDA_HIGH_PD_CFG.replace(
         prim_path="{ENV_REGEX_NS}/Franka_Robot",
         task_group=TASK_FRANKA,
     )
-    franka_table = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/Franka_Table",
-        init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(0.5, 0.0, 0.0),
-            rot=(0.0, 0.0, 0.707, 0.707),
-        ),
-        spawn=_TABLE_SPAWN,
-        task_group=TASK_FRANKA,
-    )
     ur10_robot = UR10_CFG.replace(
         prim_path="{ENV_REGEX_NS}/UR10_Robot",
-        task_group=TASK_UR10,
-    )
-    ur10_table = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/UR10_Table",
-        init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(0.5, 0.0, 0.0),
-            rot=(0.0, 0.0, 0.707, 0.707),
-        ),
-        spawn=_TABLE_SPAWN,
         task_group=TASK_UR10,
     )
 
@@ -222,7 +204,7 @@ class MultiRobotReachCommandsCfg:
     openarm_ee_pose = mdp.UniformPoseCommandCfg(
         asset_name="openarm_robot",
         body_name="openarm_hand",
-        resampling_time_range=(4.0, 4.0),
+        resampling_time_range=(3.0, 3.0),
         debug_vis=True,
         ranges=mdp.UniformPoseCommandCfg.Ranges(
             pos_x=(0.25, 0.35),
@@ -236,7 +218,7 @@ class MultiRobotReachCommandsCfg:
     franka_ee_pose = mdp.UniformPoseCommandCfg(
         asset_name="franka_robot",
         body_name="panda_hand",
-        resampling_time_range=(4.0, 4.0),
+        resampling_time_range=(3.0, 3.0),
         debug_vis=True,
         ranges=mdp.UniformPoseCommandCfg.Ranges(
             pos_x=(0.35, 0.65),
@@ -250,7 +232,7 @@ class MultiRobotReachCommandsCfg:
     ur10_ee_pose = mdp.UniformPoseCommandCfg(
         asset_name="ur10_robot",
         body_name="ee_link",
-        resampling_time_range=(4.0, 4.0),
+        resampling_time_range=(3.0, 3.0),
         debug_vis=True,
         ranges=mdp.UniformPoseCommandCfg.Ranges(
             pos_x=(0.35, 0.65),
@@ -273,9 +255,9 @@ class MultiRobotReachObsCfg:
     """Task-space + proprioceptive observations.
 
     Terms with ``per_robot=True`` reuse standard observation functions;
-    the manager auto-injects ``asset_cfg`` and ``command_name`` from
-    each :class:`RobotInfo` and scatters results (with zero-padding)
-    into a single ``(num_envs, max_feat)`` tensor.
+    the manager auto-injects matching metadata from ``robot_meta``
+    (e.g. ``asset_cfg``, ``command_name``) and scatters results
+    (with zero-padding) into a single ``(num_envs, max_feat)`` tensor.
 
     Task-space terms (EE pose, command, error) have the same
     dimension regardless of robot DoF.  Joint-space terms are
@@ -308,9 +290,8 @@ class MultiRobotReachRewardsCfg:
     """Reach rewards auto-dispatched across all robot groups.
 
     Terms with ``per_robot=True`` reuse standard reward functions;
-    the manager auto-injects ``asset_cfg`` and ``command_name``
-    from each :class:`RobotInfo` and scatters results into a
-    single ``(num_envs,)`` tensor.
+    the manager auto-injects matching metadata from ``robot_meta``
+    and scatters results into a single ``(num_envs,)`` tensor.
     """
 
     ee_pos_tracking = RewTerm(
@@ -350,8 +331,8 @@ class MultiRobotReachEventsCfg:
     """Reset events auto-dispatched across all robot groups.
 
     Both terms use ``per_robot=True`` — the manager auto-injects
-    ``asset_cfg`` from each :class:`RobotInfo` and passes
-    group-local ``env_ids``.
+    matching metadata (e.g. ``asset_cfg``) from ``robot_meta``
+    and passes group-local ``env_ids``.
     """
 
     reset_to_default = EventTerm(
@@ -382,11 +363,11 @@ class MultiRobotReachCurriculumCfg:
 
     action_rate = CurrTerm(
         func=mdp.modify_reward_weight,
-        params={"term_name": "action_rate", "weight": -0.005, "num_steps": 450},
+        params={"term_name": "action_rate", "weight": -0.005, "num_steps": 12000},
     )
     joint_vel = CurrTerm(
         func=mdp.modify_reward_weight,
-        params={"term_name": "joint_vel", "weight": -0.001, "num_steps": 450},
+        params={"term_name": "joint_vel", "weight": -0.001, "num_steps": 12000},
     )
 
 
@@ -397,7 +378,7 @@ class MultiRobotReachCurriculumCfg:
 
 @configclass
 class MultiRobotReachEnvCfg(ManagerBasedRLEnvCfg):
-    """Multi-robot reach: 3 robots, shared 6D action columns.
+    """Multi-robot reach: 3 groups, shared 6D action columns.
 
     Group 0: OpenArm (7 arm DoF)
     Group 1: Franka  (7 arm DoF)
@@ -411,6 +392,27 @@ class MultiRobotReachEnvCfg(ManagerBasedRLEnvCfg):
         env_spacing=2.0,
         replicate_physics=False,
     )
+    # Per-robot metadata for ``per_robot=True`` MDP term auto-injection.
+    # Each key is a scene asset name.  The manager iterates over these entries and, for every MDP term
+    # marked ``per_robot=True``, injects matching values into the term function's keyword arguments:
+    #   asset_cfg    – SceneEntityCfg identifying the EE body and arm joints used by observations
+    #                  (ee_pose_b, joint_pos_rel, ee_pos_error) and events (reset_asset_to_default).
+    #   command_name – name of the UniformPoseCommandCfg that generates the reach target for this robot.
+    robot_meta = {
+        "openarm_robot": {
+            "asset_cfg": SceneEntityCfg("openarm_robot", body_names=["openarm_hand"], joint_names=["openarm_joint.*"]),
+            "command_name": "openarm_ee_pose",
+        },
+        "franka_robot": {
+            "asset_cfg": SceneEntityCfg("franka_robot", body_names=["panda_hand"], joint_names=["panda_joint.*"]),
+            "command_name": "franka_ee_pose",
+        },
+        "ur10_robot": {
+            "asset_cfg": SceneEntityCfg("ur10_robot", body_names=["ee_link"], joint_names=[".*"]),
+            "command_name": "ur10_ee_pose",
+        },
+    }
+
     actions: MultiRobotReachActionsCfg = MultiRobotReachActionsCfg()
     commands: MultiRobotReachCommandsCfg = MultiRobotReachCommandsCfg()
     observations: MultiRobotReachObsCfg = MultiRobotReachObsCfg()

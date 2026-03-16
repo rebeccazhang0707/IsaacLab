@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 import warp as wp
@@ -111,9 +111,6 @@ class JointAction(ActionTerm):
                 self._clip[:, index_list] = torch.tensor(value_list, device=self.device)
             else:
                 raise ValueError(f"Unsupported clip type: {type(cfg.clip)}. Supported types are dict.")
-
-    def robot_metadata(self) -> dict[str, Any]:
-        return {"joint_patterns": self.cfg.joint_names, "num_joints": len(self._joint_ids)}
 
     """
     Properties.

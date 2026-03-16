@@ -485,9 +485,6 @@ class ActionManager(ManagerBase):
             group_key = layout.group_for_asset(term_cfg.asset_name)
             if group_key is not None:
                 layout.register_term(term_name, group_key)
-                meta = term.robot_metadata()
-                if meta:
-                    layout.register_robot_meta(term_cfg.asset_name, **meta)
             # add term name and parameters
             self._term_names.append(term_name)
             self._terms[term_name] = term

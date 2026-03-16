@@ -464,8 +464,10 @@ class InteractiveScene:
                 surface_gripper.reset(local)
         for rigid_object_collection in self._rigid_object_collections.values():
             rigid_object_collection.reset(env_ids)
-        for sensor in self._sensors.values():
-            sensor.reset(env_ids)
+        for name, sensor in self._sensors.items():
+            local = layout.resolve_asset_env_ids(name, env_ids)
+            if local is not None:
+                sensor.reset(local)
 
     def write_data_to_sim(self):
         """Writes the data of the scene entities to the simulation."""
@@ -852,6 +854,8 @@ class InteractiveScene:
                         )
 
                 self._sensors[asset_name] = asset_cfg.class_type(asset_cfg)
+                if layout_key is not None:
+                    self._layout.register_asset(asset_name, layout_key)
             elif isinstance(asset_cfg, AssetBaseCfg):
                 # manually spawn asset
                 if asset_cfg.spawn is not None:

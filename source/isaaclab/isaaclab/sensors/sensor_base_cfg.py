@@ -36,5 +36,14 @@ class SensorBaseCfg:
     update_period: float = 0.0
     """Update period of the sensor buffers (in seconds). Defaults to 0.0 (update every step)."""
 
+    task_group: str | None = None
+    """Task group name this sensor belongs to. Defaults to None.
+
+    When set, the sensor is only cloned into the environments belonging
+    to the named group declared in
+    :attr:`~isaaclab.scene.InteractiveSceneCfg.task_groups`.  The
+    resolution happens during scene construction, before cloning.
+    """
+
     debug_vis: bool = False
     """Whether to visualize the sensor. Defaults to False."""

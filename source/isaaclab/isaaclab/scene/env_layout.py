@@ -8,81 +8,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
 
 import torch
-
-
-class RobotInfo:
-    """Per-robot metadata accumulator and public descriptor.
-
-    Populated incrementally by :class:`ActionManager` and :class:`CommandManager` during ``_prepare_terms`` via
-    :meth:`EnvLayout.register_robot_meta`.  Each ``ActionTerm`` / ``CommandTerm`` contributes its own slice of
-    metadata through :meth:`~isaaclab.managers.ManagerTermBase.robot_metadata`.
-
-    Well-known keys (used by the auto-injection in :meth:`ManagerBase._build_per_robot_mdp_term_caches`):
-
-    * ``ee_body`` — end-effector body name (from task-space actions).
-    * ``joint_patterns`` — arm joint regex patterns (from actions).
-    * ``command_name`` — command-manager term name.
-
-    Additional keys (e.g. ``num_joints``, ``gripper_joint_patterns``, ``body_offset``) can be registered
-    freely and are auto-injected into MDP term functions whose signatures declare matching parameter names.
-    """
-
-    __slots__ = ("asset_name", "_meta", "_resolved_cfg")
-
-    def __init__(self, asset_name: str):
-        self.asset_name: str = asset_name
-        self._meta: dict[str, Any] = {}
-        self._resolved_cfg: Any = None
-
-    # ── accumulation ──────────────────────────────────────────────
-
-    def update(self, **kwargs: Any) -> None:
-        """Merge keyword metadata into this robot's store, invalidating cached cfg."""
-        for k, v in kwargs.items():
-            if v is not None:
-                self._meta[k] = v
-        self._resolved_cfg = None
-
-    # ── read access ───────────────────────────────────────────────
-
-    @property
-    def ee_body(self) -> str | None:
-        return self._meta.get("ee_body")
-
-    @property
-    def command_name(self) -> str | None:
-        return self._meta.get("command_name")
-
-    @property
-    def joint_patterns(self) -> list[str]:
-        return self._meta.get("joint_patterns", [])
-
-    @property
-    def meta(self) -> dict[str, Any]:
-        """Read-only view of all stored metadata."""
-        return self._meta
-
-    def resolved_cfg(self, scene: Any) -> Any:
-        """Return a cached, resolved :class:`SceneEntityCfg` for this robot.
-
-        The cfg is built from ``asset_name``, ``ee_body``, and ``joint_patterns`` and resolved against *scene*.
-        Subsequent calls with the same scene return the cached instance.
-        """
-        if self._resolved_cfg is not None:
-            return self._resolved_cfg
-        from isaaclab.managers import SceneEntityCfg
-
-        body_names = [self.ee_body] if self.ee_body else []
-        cfg = SceneEntityCfg(name=self.asset_name, body_names=body_names, joint_names=self.joint_patterns)
-        cfg.resolve(scene)
-        self._resolved_cfg = cfg
-        return self._resolved_cfg
-
-    def __repr__(self) -> str:
-        return f"RobotInfo({self.asset_name!r}, {self._meta})"
 
 
 class EnvLayout:
@@ -133,8 +60,6 @@ class EnvLayout:
         self._term_groups: dict[str, str] = {}
         # cached default ids for unregistered / None keys
         self._all_env_ids: tuple[int, ...] = tuple(range(num_envs))
-        # per-task robot metadata (populated by action/command managers)
-        self._robots: dict[str, RobotInfo] = {}
 
     # ── properties ────────────────────────────────────────────────────────
 
@@ -248,34 +173,6 @@ class EnvLayout:
         if asset_name is not None:
             return self._asset_groups.get(asset_name)
         return None
-
-    # ── robot metadata registry ───────────────────────────────────────
-
-    def register_robot_meta(self, asset_name: str, **kwargs: Any) -> None:
-        """Register per-robot metadata for a grouped asset.
-
-        Called by :class:`ActionManager` and :class:`CommandManager` during ``_prepare_terms``.  Fields are merged
-        by *asset_name* so that action and command managers can each contribute their part independently.
-
-        Any keyword arguments are accepted; use well-known keys such as ``ee_body``, ``joint_patterns``,
-        ``num_joints``, and ``command_name`` for auto-injection by the per-robot dispatch mechanism.
-
-        Args:
-            asset_name: Scene-level name of the asset.
-            **kwargs: Metadata key-value pairs to merge into this robot's :class:`RobotInfo`.
-        """
-        if asset_name not in self._robots:
-            self._robots[asset_name] = RobotInfo(asset_name)
-        self._robots[asset_name].update(**kwargs)
-
-    @property
-    def robot_infos(self) -> list[RobotInfo]:
-        """Registered :class:`RobotInfo` instances for grouped assets.
-
-        Returns:
-            :class:`RobotInfo` instances ordered by registration time.
-        """
-        return list(self._robots.values())
 
     # ── scatter helpers ────────────────────────────────────────────────────
 

@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Unit tests for :class:`RobotInfo`, :class:`EnvLayout`, and :func:`partition_env_ids`.
+"""Unit tests for :class:`EnvLayout` and :func:`partition_env_ids`.
 
 No Isaac Sim / USD / PhysX dependency required.
 """
@@ -11,59 +11,7 @@ No Isaac Sim / USD / PhysX dependency required.
 import pytest
 import torch
 
-from isaaclab.scene.env_layout import EnvLayout, RobotInfo, partition_env_ids
-
-# ===========================================================================
-# RobotInfo
-# ===========================================================================
-
-
-class TestRobotInfo:
-    def test_init(self):
-        r = RobotInfo("robot_a")
-        assert r.asset_name == "robot_a"
-        assert r.ee_body is None
-        assert r.command_name is None
-        assert r.joint_patterns == []
-        assert r.meta == {}
-
-    def test_update_merges_metadata(self):
-        r = RobotInfo("robot_a")
-        r.update(ee_body="ee_link", joint_patterns=["joint_.*"])
-        assert r.ee_body == "ee_link"
-        assert r.joint_patterns == ["joint_.*"]
-
-    def test_update_ignores_none_values(self):
-        r = RobotInfo("robot_a")
-        r.update(ee_body="ee_link")
-        r.update(ee_body=None, command_name="reach")
-        assert r.ee_body == "ee_link"
-        assert r.command_name == "reach"
-
-    def test_update_overwrites_existing(self):
-        r = RobotInfo("robot_a")
-        r.update(ee_body="old")
-        r.update(ee_body="new")
-        assert r.ee_body == "new"
-
-    def test_meta_exposes_all_keys(self):
-        r = RobotInfo("robot_a")
-        r.update(ee_body="link", custom_key=42)
-        assert r.meta == {"ee_body": "link", "custom_key": 42}
-
-    def test_update_invalidates_resolved_cfg(self):
-        r = RobotInfo("robot_a")
-        r._resolved_cfg = "cached"
-        r.update(ee_body="link")
-        assert r._resolved_cfg is None
-
-    def test_repr(self):
-        r = RobotInfo("robot_a")
-        r.update(ee_body="link")
-        s = repr(r)
-        assert "robot_a" in s
-        assert "ee_body" in s
-
+from isaaclab.scene.env_layout import EnvLayout, partition_env_ids
 
 # ===========================================================================
 # EnvLayout: registration & basic queries
@@ -440,43 +388,6 @@ class TestDispatchHelpers:
     def test_term_env_slice_unregistered(self):
         layout = EnvLayout(12, "cpu")
         assert layout.term_env_slice("unknown") == slice(None)
-
-
-# ===========================================================================
-# EnvLayout: robot metadata
-# ===========================================================================
-
-
-class TestRobotMetadata:
-    def test_register_robot_meta_creates_info(self):
-        layout = EnvLayout(12, "cpu")
-        layout.register_robot_meta("robot_a", ee_body="link", joint_patterns=["j.*"])
-        infos = layout.robot_infos
-        assert len(infos) == 1
-        assert infos[0].asset_name == "robot_a"
-        assert infos[0].ee_body == "link"
-
-    def test_register_robot_meta_merges(self):
-        layout = EnvLayout(12, "cpu")
-        layout.register_robot_meta("robot_a", ee_body="link")
-        layout.register_robot_meta("robot_a", command_name="reach")
-        infos = layout.robot_infos
-        assert len(infos) == 1
-        assert infos[0].ee_body == "link"
-        assert infos[0].command_name == "reach"
-
-    def test_multiple_robots_ordered(self):
-        layout = EnvLayout(12, "cpu")
-        layout.register_robot_meta("robot_b", ee_body="b_link")
-        layout.register_robot_meta("robot_a", ee_body="a_link")
-        infos = layout.robot_infos
-        assert len(infos) == 2
-        assert infos[0].asset_name == "robot_b"
-        assert infos[1].asset_name == "robot_a"
-
-    def test_robot_infos_empty_by_default(self):
-        layout = EnvLayout(12, "cpu")
-        assert layout.robot_infos == []
 
 
 # ===========================================================================
