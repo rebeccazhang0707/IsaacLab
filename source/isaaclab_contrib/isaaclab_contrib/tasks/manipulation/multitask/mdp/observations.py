@@ -34,6 +34,7 @@ from isaaclab.managers import SceneEntityCfg
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
     from isaaclab.envs import ManagerBasedEnv
+    from isaaclab.sensors import FrameTransformer
 
 
 # ===========================================================
@@ -92,6 +93,35 @@ def ee_pos_error(
         ee_pos_w,
     )
     return cmd[:, :3] - cur_b
+
+
+def ee_object_pos_error(
+    env: ManagerBasedEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Position error vector ``(object - ee)`` in the robot root frame [m].
+
+    The end-effector position is taken from the first target frame of
+    ``ee_frame_cfg`` so per-robot TCP offsets remain consistent across
+    heterogeneous robot groups.
+
+    Returns:
+        Shape ``(num_envs, 3)``.
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    object = env.scene[object_cfg.name]
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+
+    root_pos = wp.to_torch(robot.data.root_pos_w)
+    root_quat = wp.to_torch(robot.data.root_quat_w)
+    object_pos_w = wp.to_torch(object.data.root_pos_w)[:, :3]
+    ee_pos_w = wp.to_torch(ee_frame.data.target_pos_w)[..., 0, :]
+
+    object_pos_b, _ = math_utils.subtract_frame_transforms(root_pos, root_quat, object_pos_w)
+    ee_pos_b, _ = math_utils.subtract_frame_transforms(root_pos, root_quat, ee_pos_w)
+    return object_pos_b - ee_pos_b
 
 
 # ===========================================================
