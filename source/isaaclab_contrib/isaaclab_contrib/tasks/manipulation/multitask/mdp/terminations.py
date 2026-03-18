@@ -37,3 +37,13 @@ def object_height_below_minimum(
     """
     asset: RigidObject = env.scene[object_cfg.name]
     return wp.to_torch(asset.data.root_pos_w)[:, 2] < minimum_height
+
+
+def cabinet_drawer_opened(
+    env: ManagerBasedRLEnv,
+    threshold: float,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Terminate cabinet episodes once the drawer is sufficiently open."""
+    drawer_pos = wp.to_torch(env.scene[asset_cfg.name].data.joint_pos)[:, asset_cfg.joint_ids[0]]
+    return drawer_pos > threshold

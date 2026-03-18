@@ -42,7 +42,7 @@ from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
-from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import RobotGroupCfg, SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.markers.config import FRAME_MARKER_CFG
 from isaaclab.scene import InteractiveSceneCfg
@@ -274,7 +274,7 @@ class MultiRobotLiftObsCfg:
         object_pos = ObsTerm(func=lift_mdp.object_position_in_robot_root_frame, per_robot=True)
         target_object_pos = ObsTerm(func=mdp.generated_commands, per_robot=True)
         ee_object_pos_error = ObsTerm(func=mdp.ee_object_pos_error, per_robot=True)
-        ee_target_pos_error = ObsTerm(func=mdp.ee_pos_error, per_robot=True)
+        object_target_pos_error = ObsTerm(func=mdp.object_target_pos_error, per_robot=True)
         actions = ObsTerm(func=mdp.last_action)
 
         def __post_init__(self):
@@ -442,28 +442,28 @@ class MultiRobotLiftEnvCfg(ManagerBasedRLEnvCfg):
     #                  the robot root, used by observations (object_position_in_robot_root_frame).
     #   command_name – name of the UniformPoseCommandCfg that generates the object goal position.
     robot_meta = {
-        "openarm_robot": {
-            "asset_cfg": SceneEntityCfg(
+        "openarm_robot": RobotGroupCfg(
+            asset_cfg=SceneEntityCfg(
                 "openarm_robot",
                 body_names=["openarm_hand"],
                 joint_names=["openarm_joint.*", "openarm_finger_joint.*"],
             ),
-            "robot_cfg": SceneEntityCfg("openarm_robot"),
-            "object_cfg": SceneEntityCfg("openarm_object"),
-            "ee_frame_cfg": SceneEntityCfg("openarm_ee_frame"),
-            "command_name": "openarm_object_pose",
-        },
-        "franka_robot": {
-            "asset_cfg": SceneEntityCfg(
+            robot_cfg=SceneEntityCfg("openarm_robot"),
+            object_cfg=SceneEntityCfg("openarm_object"),
+            ee_frame_cfg=SceneEntityCfg("openarm_ee_frame"),
+            command_name="openarm_object_pose",
+        ),
+        "franka_robot": RobotGroupCfg(
+            asset_cfg=SceneEntityCfg(
                 "franka_robot",
                 body_names=["panda_hand"],
                 joint_names=["panda_joint.*", "panda_finger.*"],
             ),
-            "robot_cfg": SceneEntityCfg("franka_robot"),
-            "object_cfg": SceneEntityCfg("franka_object"),
-            "ee_frame_cfg": SceneEntityCfg("franka_ee_frame"),
-            "command_name": "franka_object_pose",
-        },
+            robot_cfg=SceneEntityCfg("franka_robot"),
+            object_cfg=SceneEntityCfg("franka_object"),
+            ee_frame_cfg=SceneEntityCfg("franka_ee_frame"),
+            command_name="franka_object_pose",
+        ),
     }
 
     actions: MultiRobotLiftActionsCfg = MultiRobotLiftActionsCfg()

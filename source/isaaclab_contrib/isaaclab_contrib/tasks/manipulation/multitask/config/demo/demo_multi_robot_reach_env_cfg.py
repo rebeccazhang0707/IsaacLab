@@ -38,7 +38,7 @@ from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
-from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import RobotGroupCfg, SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
@@ -79,13 +79,13 @@ class MultitaskPhysicsCfg(PresetCfg):
     default: PhysxCfg = PhysxCfg(
         bounce_threshold_velocity=0.01,
         gpu_found_lost_aggregate_pairs_capacity=1024 * 1024 * 4,
-        gpu_total_aggregate_pairs_capacity=16 * 1024,
+        gpu_total_aggregate_pairs_capacity=2**18,
         friction_correlation_distance=0.00625,
     )
     physx: PhysxCfg = PhysxCfg(
         bounce_threshold_velocity=0.01,
         gpu_found_lost_aggregate_pairs_capacity=1024 * 1024 * 4,
-        gpu_total_aggregate_pairs_capacity=16 * 1024,
+        gpu_total_aggregate_pairs_capacity=2**18,
         friction_correlation_distance=0.00625,
     )
     newton: NewtonCfg = NewtonCfg(
@@ -399,18 +399,18 @@ class MultiRobotReachEnvCfg(ManagerBasedRLEnvCfg):
     #                  (ee_pose_b, joint_pos_rel, ee_pos_error) and events (reset_asset_to_default).
     #   command_name – name of the UniformPoseCommandCfg that generates the reach target for this robot.
     robot_meta = {
-        "openarm_robot": {
-            "asset_cfg": SceneEntityCfg("openarm_robot", body_names=["openarm_hand"], joint_names=["openarm_joint.*"]),
-            "command_name": "openarm_ee_pose",
-        },
-        "franka_robot": {
-            "asset_cfg": SceneEntityCfg("franka_robot", body_names=["panda_hand"], joint_names=["panda_joint.*"]),
-            "command_name": "franka_ee_pose",
-        },
-        "ur10_robot": {
-            "asset_cfg": SceneEntityCfg("ur10_robot", body_names=["ee_link"], joint_names=[".*"]),
-            "command_name": "ur10_ee_pose",
-        },
+        "openarm_robot": RobotGroupCfg(
+            asset_cfg=SceneEntityCfg("openarm_robot", body_names=["openarm_hand"], joint_names=["openarm_joint.*"]),
+            command_name="openarm_ee_pose",
+        ),
+        "franka_robot": RobotGroupCfg(
+            asset_cfg=SceneEntityCfg("franka_robot", body_names=["panda_hand"], joint_names=["panda_joint.*"]),
+            command_name="franka_ee_pose",
+        ),
+        "ur10_robot": RobotGroupCfg(
+            asset_cfg=SceneEntityCfg("ur10_robot", body_names=["ee_link"], joint_names=[".*"]),
+            command_name="ur10_ee_pose",
+        ),
     }
 
     actions: MultiRobotReachActionsCfg = MultiRobotReachActionsCfg()

@@ -399,6 +399,8 @@ class ObservationManager(ManagerBase):
                 obs = term_cfg.func(self._env, **term_cfg.params).clone()
                 # scatter single-group terms into full-env tensor
                 if term_cfg.task_group is not None:
+                    if obs.shape[0] == self._env.num_envs:
+                        obs = obs[layout.env_ids_t(term_cfg.task_group)]
                     obs = layout.scatter(term_cfg.task_group, obs, fill=0.0)
             # apply post-processing
             if term_cfg.modifiers is not None:
@@ -624,6 +626,8 @@ class ObservationManager(ManagerBase):
             return (self._env.num_envs, max_feat)
         obs_trial = term_cfg.func(self._env, **term_cfg.params)
         if term_cfg.task_group is not None:
+            if obs_trial.shape[0] == self._env.num_envs:
+                obs_trial = obs_trial[layout.env_ids_t(term_cfg.task_group)]
             obs_trial = layout.scatter(term_cfg.task_group, obs_trial, fill=0.0)
         return tuple(obs_trial.shape)
 

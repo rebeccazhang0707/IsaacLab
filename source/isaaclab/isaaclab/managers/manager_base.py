@@ -6,10 +6,11 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import inspect
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
@@ -23,6 +24,18 @@ from .scene_entity_cfg import SceneEntityCfg
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
+
+
+def _iter_meta_items(meta: Any) -> Iterator[tuple[str, Any]]:
+    """Iterate key-value pairs from a robot metadata entry.
+
+    Supports both plain ``dict`` (legacy) and ``@configclass``-based
+    :class:`~isaaclab.managers.RobotGroupCfg` entries.  Only non-``None``
+    values are yielded.
+    """
+    if isinstance(meta, dict):
+        return ((k, v) for k, v in meta.items() if v is not None)
+    return ((f.name, getattr(meta, f.name)) for f in dataclasses.fields(meta) if getattr(meta, f.name) is not None)
 
 
 class PerRobotMdpTermCache(NamedTuple):
@@ -380,27 +393,28 @@ class ManagerBase(ABC):
         if not callable(func_static):
             raise AttributeError(f"The term '{term_name}' is not callable. Received: {term_cfg.func}")
 
-        # per_robot and task_group are mutually exclusive
-        if term_cfg.per_robot and term_cfg.task_group is not None:
-            raise ValueError(
-                f"Term '{term_name}': 'per_robot' and 'task_group' are mutually exclusive."
-                " Use 'per_robot=True' to auto-dispatch across all robot groups, or"
-                " 'task_group' to scope to a single group — not both."
-            )
-
         # check statically if the term's arguments are matched by params
         term_params = list(term_cfg.params.keys())
+
+        sig_params = inspect.signature(func_static).parameters
+
+        # Auto-inject task_group into params when the function accepts
+        # it and the value is set on the term config.  This removes the
+        # need to duplicate task_group in both the term config field
+        # and the params dict.
+        if term_cfg.task_group is not None and "task_group" in sig_params and "task_group" not in term_cfg.params:
+            term_cfg.params["task_group"] = term_cfg.task_group
+            term_params.append("task_group")
 
         # per_robot auto-inject: any parameter whose name matches a
         # robot_meta key is filled at dispatch time.  We collect all
         # such names here so that the static signature check passes.
         per_robot_auto: set[str] = set()
         if term_cfg.per_robot:
-            sig_params = inspect.signature(func_static).parameters
             robot_meta = getattr(self._env.cfg, "robot_meta", None) or {}
             all_meta_keys: set[str] = set()
             for meta in robot_meta.values():
-                all_meta_keys.update(meta.keys())
+                all_meta_keys.update(k for k, _ in _iter_meta_items(meta))
             for key in all_meta_keys:
                 if key in sig_params and key not in term_cfg.params:
                     per_robot_auto.add(key)
@@ -410,6 +424,30 @@ class ManagerBase(ABC):
         args_with_defaults = [arg for arg in args if args[arg].default is not inspect.Parameter.empty]
         args_without_defaults = [arg for arg in args if args[arg].default is inspect.Parameter.empty]
         args = args_without_defaults + args_with_defaults
+
+        # Auto-inject env_ids from the task-group layout when the function accepts it as a keyword parameter.
+        # Exclude event functions that receive env_ids as a positional argument from the manager (within min_argc).
+        # Injection is skipped when every SceneEntityCfg references an asset scoped to the *same* task group.
+        # Their data is already local-sized so global env_ids would be out of bounds (multi-robot multi-task scenario).
+        positional_arg_names = set(args[:min_argc])
+        if (
+            term_cfg.task_group is not None
+            and not term_cfg.per_robot
+            and "env_ids" in sig_params
+            and "env_ids" not in positional_arg_names
+            and "env_ids" not in term_cfg.params
+        ):
+            layout = self._env.scene.layout
+            has_global_asset = any(
+                layout.group_for_asset(v.name) != term_cfg.task_group
+                for v in term_cfg.params.values()
+                if isinstance(v, SceneEntityCfg)
+            )
+            if has_global_asset:
+                term_cfg.params["env_ids"] = layout.env_ids_t(term_cfg.task_group)
+                if "env_ids" not in term_params:
+                    term_params.append("env_ids")
+
         # ignore first two arguments for env and env_ids
         # Think: Check for cases when kwargs are set inside the function?
         if len(args) > min_argc:
@@ -472,13 +510,17 @@ class ManagerBase(ABC):
         value whose key matches a function parameter name not already
         provided in ``term_cfg.params``.  Values of type
         :class:`SceneEntityCfg` are resolved against the scene before
-        injection.
+        injection.  Both :class:`RobotGroupCfg` and plain ``dict``
+        metadata entries are supported.
+
+        When ``term_cfg.task_group`` is also set, only robots whose
+        scene group matches the task group are included.
 
         Args:
             term_cfg: The term configuration with ``per_robot=True``.
 
         Returns:
-            One :class:`PerRobotMdpTermCache` per robot.
+            One :class:`PerRobotMdpTermCache` per (matching) robot.
         """
         layout = self._env.scene.layout
         robot_meta = getattr(self._env.cfg, "robot_meta", None) or {}
@@ -487,8 +529,15 @@ class ManagerBase(ABC):
 
         caches: list[PerRobotMdpTermCache] = []
         for asset_name, meta in robot_meta.items():
+            # When both per_robot and task_group are set, filter to
+            # robots belonging to the specified task group.
+            if term_cfg.task_group is not None:
+                robot_group = layout.group_for_asset(asset_name)
+                if robot_group != term_cfg.task_group:
+                    continue
+
             overrides: dict[str, Any] = {}
-            for key, value in meta.items():
+            for key, value in _iter_meta_items(meta):
                 if key in sig_params and key not in term_cfg.params:
                     if isinstance(value, SceneEntityCfg):
                         already_resolved = isinstance(value.joint_ids, list) or isinstance(value.body_ids, list)

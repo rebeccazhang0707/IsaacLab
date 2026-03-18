@@ -190,6 +190,8 @@ class TerminationManager(ManagerBase):
                 # scatter single-group terms into full-env tensor
                 group_key = self._term_group_keys.get(name)
                 if group_key is not None:
+                    if value.shape[0] == self.num_envs:
+                        value = value[layout.env_ids_t(group_key)]
                     value = layout.scatter(group_key, value, fill=0.0).bool()
             # store timeout signal separately
             if term_cfg.time_out:
