@@ -393,10 +393,16 @@ class ObservationManager(ManagerBase):
         # evaluate terms: compute, add noise, clip, scale, custom modifiers
         for term_name, term_cfg in obs_terms:
             # compute term's value
+            full_name = f"{group_name}/{term_name}"
             if term_cfg.per_robot:
-                obs = self._compute_per_robot_obs(f"{group_name}/{term_name}", term_cfg)
+                obs = self._compute_per_robot_obs(full_name, term_cfg)
             else:
-                obs = term_cfg.func(self._env, **term_cfg.params).clone()
+                # use scoped env proxy when available for transparent slicing
+                scoped = self._scoped_envs.get(full_name)
+                if scoped is not None:
+                    obs = term_cfg.func(scoped, **term_cfg.params).clone()
+                else:
+                    obs = term_cfg.func(self._env, **term_cfg.params).clone()
                 # scatter single-group terms into full-env tensor
                 if term_cfg.task_group is not None:
                     if obs.shape[0] == self._env.num_envs:
@@ -475,14 +481,23 @@ class ObservationManager(ManagerBase):
         term_name: str,
         term_cfg: ObservationTermCfg,
     ) -> torch.Tensor:
-        """Dispatch an obs term across robot specs and scatter with auto-padding."""
-        feat_dim = self._per_robot_feat_dims[id(term_cfg)]
-        out = torch.zeros(self._env.num_envs, feat_dim, device=self._env.device)
+        """Dispatch an obs term across robot groups and scatter with auto-padding.
+
+        Uses contiguous slice indexing (``env_slice``) instead of
+        advanced tensor indexing for the scatter, avoiding per-group
+        CUDA kernel launches.
+        """
+        layout = self._env.scene.layout
+        out = self._per_robot_obs_bufs[term_name]
+        out.zero_()
         for cache in self._per_robot_caches[term_name]:
-            if cache.gids is None:
+            if cache.group_key is None:
                 continue
-            group_val = term_cfg.func(self._env, **cache.params)
-            out[cache.gids, : group_val.shape[-1]] = group_val
+            call_env = cache.scoped_env if cache.scoped_env is not None else self._env
+            group_val = term_cfg.func(call_env, **cache.params)
+            if group_val.dim() == 1:
+                group_val = group_val.unsqueeze(-1)
+            out[layout.env_slice(cache.group_key), : group_val.shape[-1]] = group_val
         return out
 
     def _prepare_terms(self):
@@ -501,6 +516,7 @@ class ObservationManager(ManagerBase):
         # we store it as a separate list to only call reset on them and prevent unnecessary calls
         self._group_obs_class_instances: list[modifiers.ModifierBase | noise.NoiseModel] = list()
         self._per_robot_feat_dims: dict[int, int] = {}
+        self._per_robot_obs_bufs: dict[str, torch.Tensor] = {}
 
         # make sure the simulation is playing since we compute obs dims which needs asset quantities
         if not self._env.sim.is_playing():
@@ -572,10 +588,12 @@ class ObservationManager(ManagerBase):
                 layout = self._env.scene.layout
                 if term_cfg.per_robot:
                     self._per_robot_caches[full_name] = self._build_per_robot_mdp_term_caches(term_cfg)
-                # register task-group mapping
+                # register task-group mapping and build scoped env proxy
                 if term_cfg.task_group is not None:
                     layout.resolve_task_group(full_name, term_cfg.task_group)
                     layout.register_term(full_name, term_cfg.task_group)
+                    if not term_cfg.per_robot:
+                        self._build_scoped_env(full_name, term_cfg.task_group)
 
                 # check noise settings
                 if not group_cfg.enable_corruption:
@@ -590,6 +608,12 @@ class ObservationManager(ManagerBase):
 
                 # compute dims, validate scale, prepare modifiers & noise
                 obs_dims = self._compute_term_obs_dims(full_name, term_cfg, layout)
+                if term_cfg.per_robot:
+                    self._per_robot_obs_bufs[full_name] = torch.zeros(
+                        self._env.num_envs,
+                        self._per_robot_feat_dims[id(term_cfg)],
+                        device=self._env.device,
+                    )
                 self._validate_term_scale(term_name, group_name, term_cfg, obs_dims)
                 self._prepare_term_modifiers(term_name, term_cfg, obs_dims)
                 self._prepare_term_noise(term_name, term_cfg)
@@ -620,11 +644,18 @@ class ObservationManager(ManagerBase):
         if term_cfg.per_robot:
             max_feat = 0
             for cache in self._per_robot_caches[full_name]:
-                trial = term_cfg.func(self._env, **cache.params)
+                call_env = cache.scoped_env if cache.scoped_env is not None else self._env
+                trial = term_cfg.func(call_env, **cache.params)
+                if trial.dim() == 1:
+                    trial = trial.unsqueeze(-1)
                 max_feat = max(max_feat, trial.shape[-1])
             self._per_robot_feat_dims[id(term_cfg)] = max_feat
             return (self._env.num_envs, max_feat)
-        obs_trial = term_cfg.func(self._env, **term_cfg.params)
+        scoped = self._scoped_envs.get(full_name)
+        if scoped is not None:
+            obs_trial = term_cfg.func(scoped, **term_cfg.params)
+        else:
+            obs_trial = term_cfg.func(self._env, **term_cfg.params)
         if term_cfg.task_group is not None:
             if obs_trial.shape[0] == self._env.num_envs:
                 obs_trial = obs_trial[layout.env_ids_t(term_cfg.task_group)]

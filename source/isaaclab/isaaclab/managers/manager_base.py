@@ -13,8 +13,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-import torch
-
 import isaaclab.utils.string as string_utils
 from isaaclab.physics import PhysicsEvent, PhysicsManager
 from isaaclab.utils import class_to_dict, string_to_callable
@@ -47,12 +45,12 @@ class PerRobotMdpTermCache(NamedTuple):
     layout lookups.
     """
 
-    gids: torch.Tensor | None
-    """Global env-ID tensor for this robot's group, or ``None``."""
     group_key: str | None
     """Layout group key (for :meth:`filter_and_split` in events)."""
     params: dict[str, Any]
     """Fully merged params (term params + auto-injected metadata from ``robot_meta``)."""
+    scoped_env: Any = None
+    """Optional :class:`~isaaclab.scene.ScopedEnv` proxy for this robot group."""
 
 
 logger = logging.getLogger(__name__)
@@ -181,6 +179,8 @@ class ManagerBase(ABC):
         # buffers for per-robot dispatch entries and task-group keys
         self._per_robot_caches: dict[str, list[PerRobotMdpTermCache]] = {}
         self._term_group_keys: dict[str, str] = {}
+        # scoped env proxies for task-group terms (built during _prepare_terms)
+        self._scoped_envs: dict[str, Any] = {}
 
         # flag for whether the scene entities have been resolved
         # if sim is playing, we resolve the scene entities directly while preparing the terms
@@ -503,6 +503,32 @@ class ManagerBase(ABC):
             for i, item in enumerate(value):
                 self._resolve_param_value(f"{term_name}.{key}", i, item)
 
+    def _build_scoped_env(self, term_name: str, task_group: str) -> Any:
+        """Build (or reuse) a :class:`ScopedEnv` proxy for a task-group term.
+
+        Proxies are keyed by ``task_group`` so that terms sharing the
+        same group share the same proxy instance.
+
+        Args:
+            term_name: Term name (for bookkeeping in ``_scoped_envs``).
+            task_group: The task group to scope to.
+
+        Returns:
+            A :class:`ScopedEnv` proxy for the given task group.
+        """
+        from isaaclab.scene.scoped_env import ScopedEnv
+
+        if task_group in self._scoped_envs:
+            proxy = self._scoped_envs[task_group]
+        else:
+            layout = self._env.scene.layout
+            group_slice = layout.env_slice(task_group)
+            group_size = len(layout.env_ids_t(task_group))
+            proxy = ScopedEnv(self._env, group_slice, group_size, task_group)
+            self._scoped_envs[task_group] = proxy
+        self._scoped_envs[term_name] = proxy
+        return proxy
+
     def _build_per_robot_mdp_term_caches(self, term_cfg: ManagerTermBaseCfg) -> list[PerRobotMdpTermCache]:
         """Build per-robot dispatch caches for a ``per_robot`` MDP term.
 
@@ -545,11 +571,25 @@ class ManagerBase(ABC):
                             value.resolve(self._env.scene)
                     overrides[key] = value
 
+            robot_group = layout.group_for_asset(asset_name)
+            scoped = None
+            if robot_group is not None:
+                from isaaclab.scene.scoped_env import ScopedEnv
+
+                cache_key = f"__per_robot__{robot_group}"
+                if cache_key in self._scoped_envs:
+                    scoped = self._scoped_envs[cache_key]
+                else:
+                    group_slice = layout.env_slice(robot_group)
+                    group_size = len(layout.env_ids_t(robot_group))
+                    scoped = ScopedEnv(self._env, group_slice, group_size, robot_group)
+                    self._scoped_envs[cache_key] = scoped
+
             caches.append(
                 PerRobotMdpTermCache(
-                    gids=layout.asset_env_ids_t(asset_name),
-                    group_key=layout.group_for_asset(asset_name),
+                    group_key=robot_group,
                     params={**term_cfg.params, **overrides},
+                    scoped_env=scoped,
                 )
             )
         return caches

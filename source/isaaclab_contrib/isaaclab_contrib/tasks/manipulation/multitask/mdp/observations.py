@@ -12,21 +12,20 @@ functions combined with ``per_robot=True`` on the
 iterates ``robot_meta``, auto-injects ``asset_cfg`` /
 ``command_name``, and scatters results into the global tensor.
 
-This module provides only the terms that have **no standard equivalent**:
+With :class:`~isaaclab.scene.ScopedEnv`, standard single-task functions
+from the reach / lift / cabinet packages can also be used directly for
+``task_group``-scoped terms.  Standard observations are available via the
+``multitask.mdp`` package, which re-exports them through ``__init__.pyi``.
 
-* :func:`ee_pose_b` — end-effector pose in the robot root frame.
+This module only keeps terms that have **no standard equivalent**:
+
+* :func:`ee_pose_b` — EE pose in the robot root frame.
 * :func:`ee_pos_error` — position error between EE and command target.
 * :func:`ee_object_pos_error` — position error between object and EE.
-* :func:`object_position_in_robot_base_frame` — object position in robot frame.
-* :func:`cabinet_rel_ee_drawer_distance` — distance from EE to drawer handle.
+* :func:`object_target_pos_error` — target–object error in robot frame.
+* :func:`cabinet_rel_ee_drawer_distance` — EE to drawer handle distance
+  (configurable frame names, unlike the standard cabinet version).
 * :func:`multi_task_onehot` — one-hot task group encoding.
-* :func:`ee_jacobian_b_padded` — body-frame Jacobian (advanced / reference).
-
-All functions that access per-group asset data accept
-``env_ids: torch.Tensor | slice = slice(None)`` for flexibility.
-When assets are scoped to a ``task_group``, the default
-``slice(None)`` selects all local rows; the manager handles
-scattering the result into the full ``(num_envs, ...)`` tensor.
 """
 
 from __future__ import annotations
@@ -40,13 +39,13 @@ import isaaclab.utils.math as math_utils
 from isaaclab.managers import SceneEntityCfg
 
 if TYPE_CHECKING:
-    from isaaclab.assets import Articulation, RigidObject
+    from isaaclab.assets import Articulation
     from isaaclab.envs import ManagerBasedEnv
     from isaaclab.sensors import FrameTransformer
 
 
 # ===========================================================
-# Task-space observations
+# Task-space observations (no standard equivalent)
 # ===========================================================
 
 
@@ -60,7 +59,7 @@ def ee_pose_b(
     end-effector.
 
     Returns:
-        Shape ``(num_envs, 7)`` — ``(pos_x, y, z, quat_w, x, y, z)``.
+        Shape ``(N, 7)`` — ``(pos_x, y, z, quat_w, x, y, z)``.
     """
     asset: Articulation = env.scene[asset_cfg.name]
     ee_pos_w = wp.to_torch(asset.data.body_pos_w)[:, asset_cfg.body_ids[0]]
@@ -80,7 +79,6 @@ def ee_pos_error(
     env: ManagerBasedEnv,
     command_name: str,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    env_ids: torch.Tensor | slice = slice(None),
 ) -> torch.Tensor:
     """EE position error vector ``(target − current)`` in the root frame [m].
 
@@ -88,17 +86,14 @@ def ee_pos_error(
     end-effector.  The command is expected to contain the target
     position in its first three columns (body-frame convention).
 
-    When used with ``task_group`` on the term config, ``env_ids`` is
-    auto-injected by the manager to slice shared-robot data.
-
     Returns:
-        Shape ``(group_envs, 3)`` or ``(num_envs, 3)``.
+        Shape ``(N, 3)``.
     """
     asset: Articulation = env.scene[asset_cfg.name]
     cmd = env.command_manager.get_command(command_name)
-    ee_pos_w = wp.to_torch(asset.data.body_pos_w)[env_ids, asset_cfg.body_ids[0]]
-    root_pos = wp.to_torch(asset.data.root_pos_w)[env_ids]
-    root_quat = wp.to_torch(asset.data.root_quat_w)[env_ids]
+    ee_pos_w = wp.to_torch(asset.data.body_pos_w)[:, asset_cfg.body_ids[0]]
+    root_pos = wp.to_torch(asset.data.root_pos_w)
+    root_quat = wp.to_torch(asset.data.root_quat_w)
     cur_b, _ = math_utils.subtract_frame_transforms(
         root_pos,
         root_quat,
@@ -112,7 +107,6 @@ def ee_object_pos_error(
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
-    env_ids: torch.Tensor | slice = slice(None),
 ) -> torch.Tensor:
     """Position error vector ``(object - ee)`` in the robot root frame [m].
 
@@ -121,40 +115,20 @@ def ee_object_pos_error(
     heterogeneous robot groups.
 
     Returns:
-        Shape ``(group_envs, 3)`` or ``(num_envs, 3)``.
+        Shape ``(N, 3)``.
     """
     robot: Articulation = env.scene[robot_cfg.name]
     obj = env.scene[object_cfg.name]
     ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
 
-    root_pos = wp.to_torch(robot.data.root_pos_w)[env_ids]
-    root_quat = wp.to_torch(robot.data.root_quat_w)[env_ids]
+    root_pos = wp.to_torch(robot.data.root_pos_w)
+    root_quat = wp.to_torch(robot.data.root_quat_w)
     object_pos_w = wp.to_torch(obj.data.root_pos_w)[:, :3]
-    ee_pos_w = wp.to_torch(ee_frame.data.target_pos_w)[env_ids, 0, :]
+    ee_pos_w = wp.to_torch(ee_frame.data.target_pos_w)[:, 0, :]
 
     object_pos_b, _ = math_utils.subtract_frame_transforms(root_pos, root_quat, object_pos_w)
     ee_pos_b, _ = math_utils.subtract_frame_transforms(root_pos, root_quat, ee_pos_w)
     return object_pos_b - ee_pos_b
-
-
-def object_position_in_robot_base_frame(
-    env: ManagerBasedEnv,
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
-    env_ids: torch.Tensor | slice = slice(None),
-) -> torch.Tensor:
-    """The position of the object in the robot's root frame [m].
-
-    Returns:
-        Shape ``(group_envs, 3)`` or ``(num_envs, 3)``.
-    """
-    robot: Articulation = env.scene[robot_cfg.name]
-    obj: RigidObject = env.scene[object_cfg.name]
-    object_pos_w = wp.to_torch(obj.data.root_pos_w)[:, :3]
-    object_pos_b, _ = math_utils.subtract_frame_transforms(
-        wp.to_torch(robot.data.root_pos_w)[env_ids], wp.to_torch(robot.data.root_quat_w)[env_ids], object_pos_w
-    )
-    return object_pos_b
 
 
 def object_target_pos_error(
@@ -162,7 +136,6 @@ def object_target_pos_error(
     command_name: str,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
-    env_ids: torch.Tensor | slice = slice(None),
 ) -> torch.Tensor:
     """Position error vector ``(target − object)`` in the robot root frame [m].
 
@@ -170,15 +143,15 @@ def object_target_pos_error(
     first three columns (body-frame convention).
 
     Returns:
-        Shape ``(group_envs, 3)`` or ``(num_envs, 3)``.
+        Shape ``(N, 3)``.
     """
     robot: Articulation = env.scene[robot_cfg.name]
-    obj: RigidObject = env.scene[object_cfg.name]
+    obj = env.scene[object_cfg.name]
     cmd = env.command_manager.get_command(command_name)
     object_pos_w = wp.to_torch(obj.data.root_pos_w)[:, :3]
     object_pos_b, _ = math_utils.subtract_frame_transforms(
-        wp.to_torch(robot.data.root_pos_w)[env_ids],
-        wp.to_torch(robot.data.root_quat_w)[env_ids],
+        wp.to_torch(robot.data.root_pos_w),
+        wp.to_torch(robot.data.root_quat_w),
         object_pos_w,
     )
     return cmd[:, :3] - object_pos_b
@@ -188,20 +161,19 @@ def cabinet_rel_ee_drawer_distance(
     env: ManagerBasedEnv,
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
     cabinet_frame_cfg: SceneEntityCfg = SceneEntityCfg("cabinet_frame"),
-    env_ids: torch.Tensor | slice = slice(None),
 ) -> torch.Tensor:
     """Drawer-handle minus EE TCP position [m].
 
-    The shared robot EE frame is sliced by ``env_ids`` while the
-    cabinet handle frame is expected to already be scoped.
+    Unlike the standard cabinet version, frame names are configurable
+    via ``ee_frame_cfg`` and ``cabinet_frame_cfg``.
 
     Returns:
-        Shape ``(group_envs, 3)`` or ``(num_envs, 3)``.
+        Shape ``(N, 3)``.
     """
     ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
     cabinet_frame: FrameTransformer = env.scene[cabinet_frame_cfg.name]
     handle_pos_w = wp.to_torch(cabinet_frame.data.target_pos_w)[:, 0, :]
-    ee_pos_w = wp.to_torch(ee_frame.data.target_pos_w)[env_ids, 0, :]
+    ee_pos_w = wp.to_torch(ee_frame.data.target_pos_w)[:, 0, :]
     return handle_pos_w - ee_pos_w
 
 

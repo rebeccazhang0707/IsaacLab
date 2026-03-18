@@ -368,7 +368,7 @@ class MultiRobotMultiTaskObsCfg:
 
         # ── OpenArm Lift ─────────────────────────────────
         openarm_object_pos = ObsTerm(
-            func=mdp.object_position_in_robot_base_frame,
+            func=mdp.object_position_in_robot_root_frame,
             task_group=TASK_OPENARM_LIFT,
             params={
                 "robot_cfg": SceneEntityCfg("openarm_robot"),

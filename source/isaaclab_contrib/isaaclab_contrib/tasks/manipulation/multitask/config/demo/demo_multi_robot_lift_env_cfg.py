@@ -55,8 +55,6 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from isaaclab_contrib.tasks.manipulation.multitask import mdp
 
-from isaaclab_tasks.manager_based.manipulation.lift import mdp as lift_mdp
-
 from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG
 from isaaclab_assets.robots.openarm import OPENARM_UNI_HIGH_PD_CFG
 
@@ -271,7 +269,7 @@ class MultiRobotLiftObsCfg:
     @configclass
     class PolicyCfg(ObsGroup):
         ee_pose = ObsTerm(func=mdp.ee_pose_b, per_robot=True)
-        object_pos = ObsTerm(func=lift_mdp.object_position_in_robot_root_frame, per_robot=True)
+        object_pos = ObsTerm(func=mdp.object_position_in_robot_root_frame, per_robot=True)
         target_object_pos = ObsTerm(func=mdp.generated_commands, per_robot=True)
         ee_object_pos_error = ObsTerm(func=mdp.ee_object_pos_error, per_robot=True)
         object_target_pos_error = ObsTerm(func=mdp.object_target_pos_error, per_robot=True)
@@ -299,25 +297,25 @@ class MultiRobotLiftRewardsCfg:
     """
 
     reaching_object = RewTerm(
-        func=lift_mdp.object_ee_distance,
+        func=mdp.object_ee_distance,
         weight=1.0,
         per_robot=True,
         params={"std": 0.1},
     )
     lifting_object = RewTerm(
-        func=lift_mdp.object_is_lifted,
+        func=mdp.object_is_lifted,
         weight=15.0,
         per_robot=True,
         params={"minimal_height": 0.04},
     )
     object_goal_tracking = RewTerm(
-        func=lift_mdp.object_goal_distance,
+        func=mdp.object_goal_distance,
         weight=16.0,
         per_robot=True,
         params={"std": 0.3, "minimal_height": 0.04},
     )
     object_goal_tracking_fine = RewTerm(
-        func=lift_mdp.object_goal_distance,
+        func=mdp.object_goal_distance,
         weight=5.0,
         per_robot=True,
         params={"std": 0.05, "minimal_height": 0.04},

@@ -323,21 +323,33 @@ class EnvLayout:
 
     # ── tensor alignment ──────────────────────────────────────────────────
 
-    def scatter(self, key: str | None, local_data: torch.Tensor, fill: float = 0.0) -> torch.Tensor:
+    def scatter(
+        self,
+        key: str | None,
+        local_data: torch.Tensor,
+        fill: float = 0.0,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Scatter local-space data into a full-env tensor.
 
         Args:
             key: Group name.
             local_data: Tensor of shape ``(num_local_envs, ...)``.
             fill: Fill value for environments not in the group.
+            out: Pre-allocated output tensor of shape ``(num_envs, ...)``.
+                When provided the tensor is reused (filled with *fill*
+                then written), avoiding a per-call allocation.
 
         Returns:
             Tensor of shape ``(num_envs, ...)``.
         """
         if key not in self._env_ids:
             return local_data
-        shape = (self._num_envs, *local_data.shape[1:])
-        out = local_data.new_full(shape, fill)
+        if out is None:
+            shape = (self._num_envs, *local_data.shape[1:])
+            out = local_data.new_full(shape, fill)
+        else:
+            out.fill_(fill)
         out[self.env_slice(key)] = local_data
         return out
 

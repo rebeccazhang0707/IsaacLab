@@ -49,8 +49,6 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from isaaclab_contrib.tasks.manipulation.multitask import mdp
 
-from isaaclab_tasks.manager_based.manipulation.lift import mdp as lift_mdp
-
 from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG
 
 from .demo_multi_robot_reach_env_cfg import MultitaskPhysicsCfg
@@ -281,7 +279,7 @@ class FrankaMultiTaskObservationsCfg:
 
         # lift task
         lift_object_pos = ObsTerm(
-            func=mdp.object_position_in_robot_base_frame,
+            func=mdp.object_position_in_robot_root_frame,
             task_group=TASK_LIFT,
             params={
                 "robot_cfg": SceneEntityCfg("robot"),
@@ -367,7 +365,7 @@ class FrankaMultiTaskRewardsCfg:
         },
     )
     lift_lifting_object = RewTerm(
-        func=lift_mdp.object_is_lifted,
+        func=mdp.object_is_lifted,
         task_group=TASK_LIFT,
         weight=15.0,
         params={"minimal_height": 0.04, "object_cfg": SceneEntityCfg("lift_object")},
