@@ -53,9 +53,6 @@ class PerRobotMdpTermCache(NamedTuple):
     """Optional :class:`~isaaclab.scene.ScopedEnv` proxy for this robot group."""
 
 
-logger = logging.getLogger(__name__)
-
-
 class ManagerTermBase(ABC):
     """Base class for manager terms.
 
