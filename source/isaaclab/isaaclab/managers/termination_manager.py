@@ -61,8 +61,7 @@ class TerminationManager(ManagerBase):
 
         # call the base class constructor (this will parse the terms config)
         super().__init__(cfg, env)
-        # pre-allocated buffers for per_robot and task_group scatter paths
-        self._per_robot_value_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        # pre-allocated buffer for task_group scatter path
         self._scatter_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self._term_name_to_term_idx = {name: i for i, name in enumerate(self._term_names)}
         # prepare extra info to store individual termination term information
@@ -177,32 +176,17 @@ class TerminationManager(ManagerBase):
         # reset computation
         self._truncated_buf[:] = False
         self._terminated_buf[:] = False
-        layout = self._env.scene.layout
         # iterate over all the termination terms
         for i, (name, term_cfg) in enumerate(
             zip(self._term_names, self._term_cfgs),
         ):
-            if term_cfg.per_robot:
-                value = self._per_robot_value_buf
-                value.zero_()
-                for entry in self._per_robot_caches[name]:
-                    if entry.group_key is None:
-                        continue
-                    call_env = entry.scoped_env if entry.scoped_env is not None else self._env
-                    value[layout.env_slice(entry.group_key)] = term_cfg.func(call_env, **entry.params)
-            else:
-                # use scoped env proxy when available for transparent slicing
-                group_key = self._term_group_keys.get(name)
-                scoped = self._scoped_envs.get(name)
-                if scoped is not None:
-                    value = term_cfg.func(scoped, **term_cfg.params)
-                else:
-                    value = term_cfg.func(self._env, **term_cfg.params)
-                # scatter single-group terms into full-env tensor
-                if group_key is not None:
-                    if value.shape[0] == self.num_envs:
-                        value = value[layout.env_ids_t(group_key)]
-                    value = layout.scatter(group_key, value, fill=0.0, out=self._scatter_buf)
+            group_key = self._term_group_keys.get(name)
+            value = self._call_term(
+                name,
+                term_cfg,
+                group_key,
+                scatter_buf=self._scatter_buf,
+            )
             # store timeout signal separately
             if term_cfg.time_out:
                 self._truncated_buf |= value
@@ -293,7 +277,6 @@ class TerminationManager(ManagerBase):
         else:
             cfg_items = self.cfg.__dict__.items()
 
-        layout = self._env.scene.layout
         # iterate over all the terms
         for term_name, term_cfg in cfg_items:
             # check for non config
@@ -307,16 +290,9 @@ class TerminationManager(ManagerBase):
                 )
             # resolve common parameters
             self._resolve_common_term_cfg(term_name, term_cfg, min_argc=1)
-            # pre-build per_robot dispatch entries
-            if term_cfg.per_robot:
-                self._per_robot_caches[term_name] = self._build_per_robot_mdp_term_caches(term_cfg)
             # register task-group mapping and build scoped env proxy
             if term_cfg.task_group is not None:
-                layout.resolve_task_group(term_name, term_cfg.task_group)
-                layout.register_term(term_name, term_cfg.task_group)
-                self._term_group_keys[term_name] = term_cfg.task_group
-                if not term_cfg.per_robot:
-                    self._build_scoped_env(term_name, term_cfg.task_group)
+                self._register_task_group(term_name, term_cfg.task_group)
             # add function to list
             self._term_names.append(term_name)
             self._term_cfgs.append(term_cfg)

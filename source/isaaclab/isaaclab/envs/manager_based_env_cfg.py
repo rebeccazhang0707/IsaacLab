@@ -12,7 +12,7 @@ configuring the environment instances, viewer settings, and simulation parameter
 from __future__ import annotations
 
 from dataclasses import MISSING, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import isaaclab.envs.mdp as mdp
 from isaaclab.devices.device_base import DevicesCfg
@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     from isaaclab.devices.openxr import XrCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import RecorderManagerBaseCfg as DefaultEmptyRecorderManagerCfg
-from isaaclab.managers import RobotGroupCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
@@ -102,29 +101,6 @@ class ManagerBasedEnvCfg:
     """Action space settings.
 
     Please refer to the :class:`isaaclab.managers.ActionManager` class for more details.
-    """
-
-    robot_meta: dict[str, RobotGroupCfg | dict[str, Any]] | None = None
-    """Per-robot metadata for ``per_robot`` MDP term dispatch.
-
-    Maps each robot's scene asset name to a :class:`~isaaclab.managers.RobotGroupCfg`
-    (recommended) or a plain ``dict[str, Any]`` (legacy).  When an MDP
-    term has ``per_robot=True``, the manager iterates this mapping and
-    auto-injects every metadata value whose key matches a function
-    parameter name in the term's signature.  Values of type
-    :class:`~isaaclab.managers.SceneEntityCfg` are automatically
-    resolved against the scene before injection.
-
-    Example::
-
-        from isaaclab.managers import RobotGroupCfg, SceneEntityCfg
-
-        robot_meta = {
-            "franka_robot": RobotGroupCfg(
-                asset_cfg=SceneEntityCfg("franka_robot", body_names=["panda_hand"], joint_names=["panda_joint.*"]),
-                command_name="franka_ee_pose",
-            ),
-        }
     """
 
     events: object = DefaultEventManagerCfg()

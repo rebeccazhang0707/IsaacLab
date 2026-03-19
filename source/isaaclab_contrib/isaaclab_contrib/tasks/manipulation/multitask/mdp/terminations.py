@@ -5,10 +5,9 @@
 
 """Termination terms for multi-robot tasks.
 
-These wrappers re-expose standard termination functions with parameter
-names that match the ``robot_meta`` convention (``object_cfg`` instead
-of ``asset_cfg``), so that ``per_robot=True`` auto-injection works
-correctly.
+These functions accept ``object_cfg`` for consistency with the
+``robot_meta`` convention.  Use them with ``task_group`` scoping
+or from batched termination classes in ``batched_terminations.py``.
 """
 
 from __future__ import annotations
@@ -30,10 +29,9 @@ def object_height_below_minimum(
     minimum_height: float,
     object_cfg: SceneEntityCfg = SceneEntityCfg("object"),
 ) -> torch.Tensor:
-    """Terminate when the object's root height is below the minimum height.
+    """Terminate when the object's root height is below the minimum height [m].
 
-    Thin wrapper around the height check that accepts ``object_cfg``
-    so ``per_robot`` auto-injection from ``robot_meta`` works.
+    Accepts ``object_cfg`` for consistency with the ``robot_meta`` convention.
     """
     asset: RigidObject = env.scene[object_cfg.name]
     return wp.to_torch(asset.data.root_pos_w)[:, 2] < minimum_height

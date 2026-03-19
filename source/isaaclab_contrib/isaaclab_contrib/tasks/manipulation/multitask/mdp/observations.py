@@ -5,19 +5,15 @@
 
 """Observation terms for multi-robot / multitask manipulation environments.
 
-Most observations (joint positions, joint velocities, command targets)
-can be expressed with **standard** :mod:`isaaclab.envs.mdp` observation
-functions combined with ``per_robot=True`` on the
-:class:`~isaaclab.managers.ObservationTermCfg`.  The manager automatically
-iterates ``robot_meta``, auto-injects ``asset_cfg`` /
-``command_name``, and scatters results into the global tensor.
+For multi-robot environments, prefer the batched observation classes in
+``batched_obs.py`` which use the gather-first-compute-once pattern.
 
 With :class:`~isaaclab.scene.ScopedEnv`, standard single-task functions
 from the reach / lift / cabinet packages can also be used directly for
 ``task_group``-scoped terms.  Standard observations are available via the
 ``multitask.mdp`` package, which re-exports them through ``__init__.pyi``.
 
-This module only keeps terms that have **no standard equivalent**:
+This module keeps terms that have **no standard equivalent**:
 
 * :func:`ee_pose_b` — EE pose in the robot root frame.
 * :func:`ee_pos_error` — position error between EE and command target.
@@ -178,7 +174,7 @@ def cabinet_rel_ee_drawer_distance(
 
 
 # ===========================================================
-# Robot identity (inherently global — not suitable for per_robot)
+# Robot identity (inherently global)
 # ===========================================================
 
 

@@ -3,14 +3,12 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Multi-robot event terms for heterogeneous scenes.
+"""Event terms for multi-robot heterogeneous scenes.
 
-**Per-asset functions** (use with ``per_robot=True``):
-    Accept ``asset_cfg: SceneEntityCfg`` (auto-injected by the
-    manager from ``robot_meta``) and group-local ``env_ids``.
-
-**Scatter-based functions** (self-dispatching):
-    Iterate ``robot_meta`` entries and map env-ids internally.
+These functions accept explicit ``asset_cfg`` / ``object_cfg``
+parameters and group-local ``env_ids``.  Use them with
+``task_group`` scoping or from batched event classes in
+``batched_events.py``.
 """
 
 from __future__ import annotations
@@ -28,7 +26,7 @@ if TYPE_CHECKING:
 
 
 # ===========================================================
-# Per-asset event functions  (use with per_robot=True)
+# Per-asset event functions
 # ===========================================================
 
 
@@ -57,11 +55,11 @@ def reset_asset_to_default(
     """Reset robot (and optionally object) to default state.
 
     Resets the articulation's root pose, root velocity, and joint
-    state.  When ``object_cfg`` is provided (auto-injected via
-    ``per_robot``), also resets the rigid object's root state.
+    state.  When ``object_cfg`` is provided, also resets the rigid
+    object's root state.
 
     ``env_ids`` are group-local (0-based) when dispatched via
-    ``per_robot=True``.
+    ``task_group`` scoping.
     """
     layout = env.scene.layout
     group_key = layout.group_for_asset(asset_cfg.name)
@@ -93,8 +91,7 @@ def reset_object_state_uniform(
 
     Wrapper around the upstream ``reset_root_state_uniform`` logic that:
 
-    * accepts ``object_cfg`` so ``per_robot`` auto-injection from
-      ``robot_meta`` works (upstream uses ``asset_cfg``).
+    * accepts ``object_cfg`` (upstream uses ``asset_cfg``).
     * translates group-local ``env_ids`` to global indices for
       ``env_origins``.
     """

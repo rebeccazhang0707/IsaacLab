@@ -9,16 +9,11 @@ Each robot type occupies its own env-id group.  The
 :class:`ActionManager` automatically shares action columns
 across disjoint groups.
 
-Lift-specific MDP functions (``object_ee_distance``,
-``object_goal_distance``, ``object_is_lifted``, etc.) accept
-``robot_cfg``, ``object_cfg``, ``ee_frame_cfg``, and ``command_name``
-parameters — all auto-injected from ``robot_meta``.
-
-This demonstrates the **generic** ``robot_meta`` mechanism: each
-robot's metadata includes not only its ``asset_cfg`` and
-``command_name``, but also per-robot ``object_cfg`` and
-``ee_frame_cfg`` — enabling full reuse of existing single-robot
-lift MDP functions with zero wrappers.
+Lift-specific batched MDP classes iterate ``robot_meta`` at init
+time to discover ``robot_cfg``, ``object_cfg``, ``ee_frame_cfg``,
+and ``command_name`` for each robot group and use the
+gather-first-compute-once pattern for efficient multi-robot
+computation.
 
 Layout (2 groups, evenly split):
     Group 0:  OpenArm  -- Lift cube
@@ -42,7 +37,7 @@ from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
-from isaaclab.managers import RobotGroupCfg, SceneEntityCfg
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.markers.config import FRAME_MARKER_CFG
 from isaaclab.scene import InteractiveSceneCfg
@@ -54,6 +49,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from isaaclab_contrib.tasks.manipulation.multitask import mdp
+from isaaclab_contrib.tasks.manipulation.multitask.mdp.utils import RobotGroupCfg
 
 from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG
 from isaaclab_assets.robots.openarm import OPENARM_UNI_HIGH_PD_CFG
@@ -260,19 +256,19 @@ class MultiRobotLiftCommandsCfg:
 
 @configclass
 class MultiRobotLiftObsCfg:
-    """Proprioceptive + object observations, all ``per_robot``.
+    """Proprioceptive + object observations, batched across robot groups.
 
-    ``robot_cfg``, ``object_cfg``, ``command_name`` are auto-injected
-    from ``robot_meta``.
+    Batched observation classes iterate ``robot_meta`` to discover
+    ``robot_cfg``, ``object_cfg``, ``command_name`` per robot group.
     """
 
     @configclass
     class PolicyCfg(ObsGroup):
-        ee_pose = ObsTerm(func=mdp.ee_pose_b, per_robot=True)
-        object_pos = ObsTerm(func=mdp.object_position_in_robot_root_frame, per_robot=True)
-        target_object_pos = ObsTerm(func=mdp.generated_commands, per_robot=True)
-        ee_object_pos_error = ObsTerm(func=mdp.ee_object_pos_error, per_robot=True)
-        object_target_pos_error = ObsTerm(func=mdp.object_target_pos_error, per_robot=True)
+        ee_pose = ObsTerm(func=mdp.batched_ee_pose)
+        object_pos = ObsTerm(func=mdp.batched_object_pos_in_robot_frame)
+        target_object_pos = ObsTerm(func=mdp.batched_generated_commands)
+        ee_object_pos_error = ObsTerm(func=mdp.batched_ee_object_pos_error)
+        object_target_pos_error = ObsTerm(func=mdp.batched_object_target_pos_error)
         actions = ObsTerm(func=mdp.last_action)
 
         def __post_init__(self):
@@ -289,43 +285,38 @@ class MultiRobotLiftObsCfg:
 
 @configclass
 class MultiRobotLiftRewardsCfg:
-    """Lift rewards auto-dispatched across all robot groups.
+    """Lift rewards batched across all robot groups.
 
-    The existing single-robot lift reward functions accept
-    ``robot_cfg``, ``object_cfg``, ``ee_frame_cfg``, and
-    ``command_name`` — all auto-injected from ``robot_meta``.
+    Batched reward classes iterate ``robot_meta`` and use the
+    gather-first-compute-once pattern for ``robot_cfg``,
+    ``object_cfg``, ``ee_frame_cfg``, and ``command_name``.
     """
 
     reaching_object = RewTerm(
-        func=mdp.object_ee_distance,
+        func=mdp.batched_object_ee_distance,
         weight=1.0,
-        per_robot=True,
         params={"std": 0.1},
     )
     lifting_object = RewTerm(
-        func=mdp.object_is_lifted,
+        func=mdp.batched_object_is_lifted,
         weight=15.0,
-        per_robot=True,
         params={"minimal_height": 0.04},
     )
     object_goal_tracking = RewTerm(
-        func=mdp.object_goal_distance,
+        func=mdp.batched_object_goal_distance,
         weight=16.0,
-        per_robot=True,
         params={"std": 0.3, "minimal_height": 0.04},
     )
     object_goal_tracking_fine = RewTerm(
-        func=mdp.object_goal_distance,
+        func=mdp.batched_object_goal_distance,
         weight=5.0,
-        per_robot=True,
         params={"std": 0.05, "minimal_height": 0.04},
     )
 
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-4)
     joint_vel = RewTerm(
-        func=mdp.joint_vel_l2,
+        func=mdp.batched_joint_vel_l2,
         weight=-1e-4,
-        per_robot=True,
     )
 
 
@@ -339,8 +330,7 @@ class MultiRobotLiftTerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
 
     object_dropping = DoneTerm(
-        func=mdp.object_height_below_minimum,
-        per_robot=True,
+        func=mdp.batched_object_height_below_minimum,
         params={"minimum_height": -0.05},
     )
 
@@ -352,30 +342,28 @@ class MultiRobotLiftTerminationsCfg:
 
 @configclass
 class MultiRobotLiftEventsCfg:
-    """Reset events auto-dispatched across all robot groups.
+    """Reset events batched across all robot groups.
 
-    ``asset_cfg`` and ``object_cfg`` are auto-injected from ``robot_meta``.
+    Batched event classes iterate ``robot_meta`` to discover robot
+    groups and dispatch reset logic per group with filtered ``env_ids``.
     """
 
     reset_to_default = EventTerm(
-        func=mdp.reset_asset_to_default,
+        func=mdp.batched_reset_to_default,
         mode="reset",
-        per_robot=True,
         params={"reset_joint_targets": True},
     )
     reset_joints = EventTerm(
-        func=mdp.reset_joints_by_scale,
+        func=mdp.batched_reset_joints_by_scale,
         mode="reset",
-        per_robot=True,
         params={
             "position_range": (0.5, 1.25),
             "velocity_range": (0.0, 0.0),
         },
     )
     reset_object = EventTerm(
-        func=mdp.reset_object_state_uniform,
+        func=mdp.batched_reset_object_state_uniform,
         mode="reset",
-        per_robot=True,
         params={
             "pose_range": {"x": (-0.1, 0.1), "y": (-0.25, 0.25), "z": (0.0, 0.0)},
             "velocity_range": {},
@@ -415,10 +403,9 @@ class MultiRobotLiftEnvCfg(ManagerBasedRLEnvCfg):
     Action dim: max(7, 7) = 6 (IK shared) + 1 (gripper shared) = 7
     (IK dim=6, gripper dim=1, columns shared across disjoint groups)
 
-    The ``robot_meta`` dict showcases the generic mechanism:
-    each robot declares ``asset_cfg``, ``command_name``, ``robot_cfg``,
-    ``object_cfg``, and ``ee_frame_cfg`` — all auto-injected into
-    ``per_robot`` MDP terms by parameter name matching.
+    The ``robot_meta`` dict declares ``asset_cfg``, ``command_name``,
+    ``robot_cfg``, ``object_cfg``, and ``ee_frame_cfg`` — used by
+    batched MDP term classes.
     """
 
     scene: MultiRobotLiftSceneCfg = MultiRobotLiftSceneCfg(
@@ -427,18 +414,13 @@ class MultiRobotLiftEnvCfg(ManagerBasedRLEnvCfg):
         replicate_physics=False,
     )
 
-    # Per-robot metadata for ``per_robot=True`` MDP term auto-injection.
-    # Each key is a scene asset name.  The manager iterates over these entries and, for every MDP term
-    # marked ``per_robot=True``, injects matching values into the term function's keyword arguments:
-    #   asset_cfg    – SceneEntityCfg identifying the EE body and arm+gripper joints used by observations
-    #                  (joint_pos_rel, joint_vel_rel) and events (reset_asset_to_default).
-    #   robot_cfg    – SceneEntityCfg for the robot articulation, used by lift rewards (object_ee_distance).
-    #   object_cfg   – SceneEntityCfg for the rigid object to lift, used by rewards (object_is_lifted,
-    #                  object_goal_distance), events (reset_object_state_uniform), and terminations
-    #                  (object_height_below_minimum).
-    #   ee_frame_cfg – SceneEntityCfg for the FrameTransformer sensor tracking the EE pose relative to
-    #                  the robot root, used by observations (object_position_in_robot_root_frame).
-    #   command_name – name of the UniformPoseCommandCfg that generates the object goal position.
+    # Per-robot metadata used by batched MDP term classes.
+    # Each key is a scene asset name.  Batched classes iterate these entries at init time:
+    #   asset_cfg    – SceneEntityCfg identifying the EE body and arm+gripper joints.
+    #   robot_cfg    – SceneEntityCfg for the robot articulation root.
+    #   object_cfg   – SceneEntityCfg for the rigid object to lift.
+    #   ee_frame_cfg – SceneEntityCfg for the FrameTransformer sensor.
+    #   command_name – name of the UniformPoseCommandCfg for the object goal.
     robot_meta = {
         "openarm_robot": RobotGroupCfg(
             asset_cfg=SceneEntityCfg(

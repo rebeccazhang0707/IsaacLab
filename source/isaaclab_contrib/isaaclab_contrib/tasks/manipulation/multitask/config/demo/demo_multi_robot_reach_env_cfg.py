@@ -38,7 +38,7 @@ from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
-from isaaclab.managers import RobotGroupCfg, SceneEntityCfg
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
@@ -46,8 +46,8 @@ from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from isaaclab_contrib.tasks.manipulation.multitask import mdp
+from isaaclab_contrib.tasks.manipulation.multitask.mdp.utils import RobotGroupCfg
 
-from isaaclab_tasks.manager_based.manipulation.reach.mdp import rewards as reach_rewards
 from isaaclab_tasks.utils import PresetCfg
 
 from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG
@@ -254,10 +254,9 @@ class MultiRobotReachCommandsCfg:
 class MultiRobotReachObsCfg:
     """Task-space + proprioceptive observations.
 
-    Terms with ``per_robot=True`` reuse standard observation functions;
-    the manager auto-injects matching metadata from ``robot_meta``
-    (e.g. ``asset_cfg``, ``command_name``) and scatters results
-    (with zero-padding) into a single ``(num_envs, max_feat)`` tensor.
+    Batched observation classes iterate ``robot_meta`` at init time
+    to discover robot groups and scatter per-group results (with
+    zero-padding) into a single ``(num_envs, max_feat)`` tensor.
 
     Task-space terms (EE pose, command, error) have the same
     dimension regardless of robot DoF.  Joint-space terms are
@@ -266,11 +265,11 @@ class MultiRobotReachObsCfg:
 
     @configclass
     class PolicyCfg(ObsGroup):
-        joint_pos = ObsTerm(func=mdp.joint_pos_rel, per_robot=True)
-        joint_vel = ObsTerm(func=mdp.joint_vel, per_robot=True)
-        ee_pose = ObsTerm(func=mdp.ee_pose_b, per_robot=True)
-        ee_command = ObsTerm(func=mdp.generated_commands, per_robot=True)
-        ee_pos_error = ObsTerm(func=mdp.ee_pos_error, per_robot=True)
+        joint_pos = ObsTerm(func=mdp.batched_joint_pos_rel)
+        joint_vel = ObsTerm(func=mdp.batched_joint_vel)
+        ee_pose = ObsTerm(func=mdp.batched_ee_pose)
+        ee_command = ObsTerm(func=mdp.batched_generated_commands)
+        ee_pos_error = ObsTerm(func=mdp.batched_ee_pos_error)
         actions = ObsTerm(func=mdp.last_action)
 
         def __post_init__(self):
@@ -287,34 +286,30 @@ class MultiRobotReachObsCfg:
 
 @configclass
 class MultiRobotReachRewardsCfg:
-    """Reach rewards auto-dispatched across all robot groups.
+    """Reach rewards batched across all robot groups.
 
-    Terms with ``per_robot=True`` reuse standard reward functions;
-    the manager auto-injects matching metadata from ``robot_meta``
-    and scatters results into a single ``(num_envs,)`` tensor.
+    Batched reward classes iterate ``robot_meta`` at init time and
+    use the gather-first-compute-once pattern to reduce CUDA
+    kernel launches.
     """
 
     ee_pos_tracking = RewTerm(
-        func=reach_rewards.position_command_error,
+        func=mdp.batched_position_command_error,
         weight=-0.2,
-        per_robot=True,
     )
     ee_pos_tracking_fine = RewTerm(
-        func=reach_rewards.position_command_error_tanh,
+        func=mdp.batched_position_command_error_tanh,
         weight=0.1,
-        per_robot=True,
         params={"std": 0.1},
     )
     ee_ori_tracking = RewTerm(
-        func=reach_rewards.orientation_command_error,
+        func=mdp.batched_orientation_command_error,
         weight=-0.1,
-        per_robot=True,
     )
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.0001)
     joint_vel = RewTerm(
-        func=mdp.joint_vel_l2,
+        func=mdp.batched_joint_vel_l2,
         weight=-0.0001,
-        per_robot=True,
     )
 
 
@@ -328,23 +323,20 @@ class MultiRobotReachTerminationsCfg:
 
 @configclass
 class MultiRobotReachEventsCfg:
-    """Reset events auto-dispatched across all robot groups.
+    """Reset events batched across all robot groups.
 
-    Both terms use ``per_robot=True`` — the manager auto-injects
-    matching metadata (e.g. ``asset_cfg``) from ``robot_meta``
-    and passes group-local ``env_ids``.
+    Batched event classes iterate ``robot_meta`` to discover robot
+    groups and dispatch reset logic per group with filtered ``env_ids``.
     """
 
     reset_to_default = EventTerm(
-        func=mdp.reset_asset_to_default,
+        func=mdp.batched_reset_to_default,
         mode="reset",
-        per_robot=True,
         params={"reset_joint_targets": True},
     )
     reset_joints = EventTerm(
-        func=mdp.reset_joints_by_scale,
+        func=mdp.batched_reset_joints_by_scale,
         mode="reset",
-        per_robot=True,
         params={
             "position_range": (0.5, 1.25),
             "velocity_range": (0.0, 0.0),
@@ -392,12 +384,11 @@ class MultiRobotReachEnvCfg(ManagerBasedRLEnvCfg):
         env_spacing=2.0,
         replicate_physics=False,
     )
-    # Per-robot metadata for ``per_robot=True`` MDP term auto-injection.
-    # Each key is a scene asset name.  The manager iterates over these entries and, for every MDP term
-    # marked ``per_robot=True``, injects matching values into the term function's keyword arguments:
-    #   asset_cfg    – SceneEntityCfg identifying the EE body and arm joints used by observations
-    #                  (ee_pose_b, joint_pos_rel, ee_pos_error) and events (reset_asset_to_default).
-    #   command_name – name of the UniformPoseCommandCfg that generates the reach target for this robot.
+    # Per-robot metadata used by batched MDP term classes.
+    # Each key is a scene asset name.  Batched classes iterate these entries at init time to
+    # discover robot groups and pre-allocate staging buffers:
+    #   asset_cfg    – SceneEntityCfg identifying the EE body and arm joints.
+    #   command_name – name of the UniformPoseCommandCfg that generates the reach target.
     robot_meta = {
         "openarm_robot": RobotGroupCfg(
             asset_cfg=SceneEntityCfg("openarm_robot", body_names=["openarm_hand"], joint_names=["openarm_joint.*"]),

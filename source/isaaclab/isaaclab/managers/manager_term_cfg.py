@@ -27,58 +27,6 @@ if TYPE_CHECKING:
 
 
 @configclass
-class RobotGroupCfg:
-    """Typed metadata for a robot group in heterogeneous multi-robot environments.
-
-    Declares the scene entities and command association for a single
-    robot type.  Used as the value type in
-    :attr:`~isaaclab.envs.ManagerBasedEnvCfg.robot_meta` so that the
-    ``per_robot`` auto-injection mechanism has typed, IDE-discoverable
-    fields instead of an opaque ``dict[str, Any]``.
-
-    Only non-``None`` fields are injected into MDP term functions.
-    If a task requires additional per-robot metadata beyond these
-    common fields, subclass this configclass and add extra fields —
-    the injection mechanism iterates all dataclass fields
-    automatically.
-
-    Example::
-
-        robot_meta = {
-            "franka_robot": RobotGroupCfg(
-                asset_cfg=SceneEntityCfg("franka_robot", body_names=["panda_hand"]),
-                command_name="franka_ee_pose",
-            ),
-        }
-    """
-
-    asset_cfg: SceneEntityCfg = MISSING
-    """SceneEntityCfg identifying the robot articulation.
-
-    Typically includes ``body_names`` for the end-effector and
-    ``joint_names`` for the arm (and optionally gripper) joints.
-    """
-
-    command_name: str | None = None
-    """Name of the command term that generates targets for this robot."""
-
-    robot_cfg: SceneEntityCfg | None = None
-    """SceneEntityCfg for the robot articulation root.
-
-    Used by reward/observation functions that need the root pose
-    separately from the EE body (e.g. ``object_ee_distance``).
-    When ``None``, functions that accept ``robot_cfg`` will not
-    receive an auto-injected value.
-    """
-
-    object_cfg: SceneEntityCfg | None = None
-    """SceneEntityCfg for the manipulation object (e.g. a cube to lift)."""
-
-    ee_frame_cfg: SceneEntityCfg | None = None
-    """SceneEntityCfg for the end-effector FrameTransformer sensor."""
-
-
-@configclass
 class ManagerTermBaseCfg:
     """Configuration for a manager term."""
 
@@ -119,37 +67,6 @@ class ManagerTermBaseCfg:
     **Auto-injection**: if the function signature accepts a ``task_group``
     parameter, the value is automatically injected from this field —
     there is no need to duplicate it in :attr:`params`.
-
-    Can be combined with :attr:`per_robot`.  When both are set,
-    ``per_robot`` dispatch is filtered to only the robots whose scene
-    group matches this task group.
-    """
-
-    per_robot: bool = False
-    """Automatically dispatch this term once per robot group.
-
-    When ``True``, the manager iterates
-    :attr:`ManagerBasedEnvCfg.robot_meta` and calls the function once
-    for each robot entry.  Any metadata key that matches a function
-    parameter name (and is not already provided in :attr:`params`) is
-    auto-injected.  Values of type :class:`SceneEntityCfg` are
-    automatically resolved against the scene before injection.
-
-    ``robot_meta`` maps each asset name to a
-    :class:`RobotGroupCfg` (or a plain ``dict[str, Any]``).  Common
-    keys include ``asset_cfg`` (:class:`SceneEntityCfg`) and
-    ``command_name`` (str).
-
-    This allows reuse of standard term functions (e.g.
-    :func:`~isaaclab.envs.mdp.rewards.joint_vel_l2`,
-    :func:`~isaaclab.envs.mdp.events.reset_joints_by_scale`) without
-    writing multi-robot wrapper functions.
-
-    Results are scattered / filtered by the manager — the function
-    itself stays layout-unaware.
-
-    Can be combined with :attr:`task_group` to restrict dispatch to
-    robots belonging to a specific task group.
     """
 
 

@@ -41,7 +41,7 @@ from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
-from isaaclab.managers import RobotGroupCfg, SceneEntityCfg
+from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.markers.config import FRAME_MARKER_CFG
 from isaaclab.scene import InteractiveSceneCfg
@@ -53,6 +53,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from isaaclab_contrib.tasks.manipulation.multitask import mdp
+from isaaclab_contrib.tasks.manipulation.multitask.mdp.utils import RobotGroupCfg
 
 from isaaclab_tasks.manager_based.manipulation.lift import mdp as lift_mdp
 
@@ -363,7 +364,7 @@ class MultiRobotMultiTaskObsCfg:
     @configclass
     class PolicyCfg(ObsGroup):
         task_onehot = ObsTerm(func=mdp.multi_task_onehot)
-        ee_pose = ObsTerm(func=mdp.ee_pose_b, per_robot=True)
+        ee_pose = ObsTerm(func=mdp.batched_ee_pose)
         actions = ObsTerm(func=mdp.last_action)
 
         # ── OpenArm Lift ─────────────────────────────────
@@ -607,9 +608,8 @@ class MultiRobotMultiTaskRewardsCfg:
     # ── Global penalties ─────────────────────────────
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-4)
     joint_vel = RewTerm(
-        func=mdp.joint_vel_l2,
+        func=mdp.batched_joint_vel_l2,
         weight=-1e-4,
-        per_robot=True,
     )
 
 
@@ -644,17 +644,15 @@ class MultiRobotMultiTaskTerminationsCfg:
 class MultiRobotMultiTaskEventsCfg:
     """Reset events for the multi-robot multi-task layout."""
 
-    # ── Shared robot resets ───────────────────────────
+    # ── Shared robot resets (batched across all robot groups) ──
     reset_to_default = EventTerm(
-        func=mdp.reset_asset_to_default,
+        func=mdp.batched_reset_to_default,
         mode="reset",
-        per_robot=True,
         params={"reset_joint_targets": True},
     )
     reset_joints = EventTerm(
-        func=mdp.reset_joints_by_scale,
+        func=mdp.batched_reset_joints_by_scale,
         mode="reset",
-        per_robot=True,
         params={
             "position_range": (0.5, 1.25),
             "velocity_range": (0.0, 0.0),

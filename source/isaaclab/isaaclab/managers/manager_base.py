@@ -6,12 +6,11 @@
 from __future__ import annotations
 
 import copy
-import dataclasses
 import inspect
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Sequence
-from typing import TYPE_CHECKING, Any, NamedTuple
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 import isaaclab.utils.string as string_utils
 from isaaclab.physics import PhysicsEvent, PhysicsManager
@@ -21,36 +20,9 @@ from .manager_term_cfg import ManagerTermBaseCfg
 from .scene_entity_cfg import SceneEntityCfg
 
 if TYPE_CHECKING:
+    import torch
+
     from isaaclab.envs import ManagerBasedEnv
-
-
-def _iter_meta_items(meta: Any) -> Iterator[tuple[str, Any]]:
-    """Iterate key-value pairs from a robot metadata entry.
-
-    Supports both plain ``dict`` (legacy) and ``@configclass``-based
-    :class:`~isaaclab.managers.RobotGroupCfg` entries.  Only non-``None``
-    values are yielded.
-    """
-    if isinstance(meta, dict):
-        return ((k, v) for k, v in meta.items() if v is not None)
-    return ((f.name, getattr(meta, f.name)) for f in dataclasses.fields(meta) if getattr(meta, f.name) is not None)
-
-
-class PerRobotMdpTermCache(NamedTuple):
-    """Pre-computed, per-robot dispatch cache for a single ``per_robot`` MDP term.
-
-    One instance is created per (robot, term) pair at init time by
-    :meth:`ManagerBase._build_per_robot_mdp_term_caches` and reused on
-    every step, eliminating runtime dict merges, property accesses, and
-    layout lookups.
-    """
-
-    group_key: str | None
-    """Layout group key (for :meth:`filter_and_split` in events)."""
-    params: dict[str, Any]
-    """Fully merged params (term params + auto-injected metadata from ``robot_meta``)."""
-    scoped_env: Any = None
-    """Optional :class:`~isaaclab.scene.ScopedEnv` proxy for this robot group."""
 
 
 class ManagerTermBase(ABC):
@@ -173,8 +145,7 @@ class ManagerBase(ABC):
         # store the inputs
         self.cfg = copy.deepcopy(cfg)
         self._env = env
-        # buffers for per-robot dispatch entries and task-group keys
-        self._per_robot_caches: dict[str, list[PerRobotMdpTermCache]] = {}
+        # task-group keys for layout-aware dispatch
         self._term_group_keys: dict[str, str] = {}
         # scoped env proxies for task-group terms (built during _prepare_terms)
         self._scoped_envs: dict[str, Any] = {}
@@ -403,20 +374,6 @@ class ManagerBase(ABC):
             term_cfg.params["task_group"] = term_cfg.task_group
             term_params.append("task_group")
 
-        # per_robot auto-inject: any parameter whose name matches a
-        # robot_meta key is filled at dispatch time.  We collect all
-        # such names here so that the static signature check passes.
-        per_robot_auto: set[str] = set()
-        if term_cfg.per_robot:
-            robot_meta = getattr(self._env.cfg, "robot_meta", None) or {}
-            all_meta_keys: set[str] = set()
-            for meta in robot_meta.values():
-                all_meta_keys.update(k for k, _ in _iter_meta_items(meta))
-            for key in all_meta_keys:
-                if key in sig_params and key not in term_cfg.params:
-                    per_robot_auto.add(key)
-            term_params = term_params + list(per_robot_auto)
-
         args = inspect.signature(func_static).parameters
         args_with_defaults = [arg for arg in args if args[arg].default is not inspect.Parameter.empty]
         args_without_defaults = [arg for arg in args if args[arg].default is inspect.Parameter.empty]
@@ -429,7 +386,6 @@ class ManagerBase(ABC):
         positional_arg_names = set(args[:min_argc])
         if (
             term_cfg.task_group is not None
-            and not term_cfg.per_robot
             and "env_ids" in sig_params
             and "env_ids" not in positional_arg_names
             and "env_ids" not in term_cfg.params
@@ -500,6 +456,67 @@ class ManagerBase(ABC):
             for i, item in enumerate(value):
                 self._resolve_param_value(f"{term_name}.{key}", i, item)
 
+    def _call_term(
+        self,
+        term_key: str,
+        term_cfg: ManagerTermBaseCfg,
+        group_key: str | None = None,
+        *,
+        clone: bool = False,
+        scatter_buf: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Call a term function with optional task-group scoping and scatter.
+
+        This is the common dispatch pattern shared by observation, reward,
+        and termination managers:
+
+        1. Use a :class:`~isaaclab.scene.ScopedEnv` proxy when one exists
+           for *term_key*.
+        2. Call the term function with the appropriate env and params.
+        3. If *group_key* is set, scatter the group-local result into a
+           full ``(num_envs, ...)`` tensor.
+
+        Args:
+            term_key: Lookup key for the scoped-env cache.
+            term_cfg: The term configuration.
+            group_key: Task-group key for scatter, or ``None``.
+            clone: If ``True``, clone the result before returning.
+            scatter_buf: Optional pre-allocated scatter buffer passed to
+                :meth:`EnvLayout.scatter`.
+
+        Returns:
+            The computed tensor, scattered if *group_key* is active.
+        """
+        scoped = self._scoped_envs.get(term_key)
+        if scoped is not None:
+            value = term_cfg.func(scoped, **term_cfg.params)
+        else:
+            value = term_cfg.func(self._env, **term_cfg.params)
+        if clone:
+            value = value.clone()
+        if group_key is not None:
+            layout = self._env.scene.layout
+            if value.shape[0] == self.num_envs:
+                value = value[layout.env_ids_t(group_key)]
+            value = layout.scatter(group_key, value, fill=0.0, out=scatter_buf)
+        return value
+
+    def _register_task_group(self, term_key: str, task_group: str) -> None:
+        """Resolve, register, and build a scoped-env proxy for a task-group term.
+
+        Shared boilerplate extracted from reward, observation, and
+        termination manager ``_prepare_terms`` methods.
+
+        Args:
+            term_key: The unique term name used as lookup key.
+            task_group: The task group declared on the term configuration.
+        """
+        layout = self._env.scene.layout
+        layout.resolve_task_group(term_key, task_group)
+        layout.register_term(term_key, task_group)
+        self._term_group_keys[term_key] = task_group
+        self._build_scoped_env(term_key, task_group)
+
     def _build_scoped_env(self, term_name: str, task_group: str) -> Any:
         """Build (or reuse) a :class:`ScopedEnv` proxy for a task-group term.
 
@@ -525,68 +542,3 @@ class ManagerBase(ABC):
             self._scoped_envs[task_group] = proxy
         self._scoped_envs[term_name] = proxy
         return proxy
-
-    def _build_per_robot_mdp_term_caches(self, term_cfg: ManagerTermBaseCfg) -> list[PerRobotMdpTermCache]:
-        """Build per-robot dispatch caches for a ``per_robot`` MDP term.
-
-        Iterates ``env.cfg.robot_meta`` and auto-injects any metadata
-        value whose key matches a function parameter name not already
-        provided in ``term_cfg.params``.  Values of type
-        :class:`SceneEntityCfg` are resolved against the scene before
-        injection.  Both :class:`RobotGroupCfg` and plain ``dict``
-        metadata entries are supported.
-
-        When ``term_cfg.task_group`` is also set, only robots whose
-        scene group matches the task group are included.
-
-        Args:
-            term_cfg: The term configuration with ``per_robot=True``.
-
-        Returns:
-            One :class:`PerRobotMdpTermCache` per (matching) robot.
-        """
-        layout = self._env.scene.layout
-        robot_meta = getattr(self._env.cfg, "robot_meta", None) or {}
-        func_static = term_cfg.func.__call__ if inspect.isclass(term_cfg.func) else term_cfg.func
-        sig_params = inspect.signature(func_static).parameters
-
-        caches: list[PerRobotMdpTermCache] = []
-        for asset_name, meta in robot_meta.items():
-            # When both per_robot and task_group are set, filter to
-            # robots belonging to the specified task group.
-            if term_cfg.task_group is not None:
-                robot_group = layout.group_for_asset(asset_name)
-                if robot_group != term_cfg.task_group:
-                    continue
-
-            overrides: dict[str, Any] = {}
-            for key, value in _iter_meta_items(meta):
-                if key in sig_params and key not in term_cfg.params:
-                    if isinstance(value, SceneEntityCfg):
-                        already_resolved = isinstance(value.joint_ids, list) or isinstance(value.body_ids, list)
-                        if not already_resolved:
-                            value.resolve(self._env.scene)
-                    overrides[key] = value
-
-            robot_group = layout.group_for_asset(asset_name)
-            scoped = None
-            if robot_group is not None:
-                from isaaclab.scene.scoped_env import ScopedEnv
-
-                cache_key = f"__per_robot__{robot_group}"
-                if cache_key in self._scoped_envs:
-                    scoped = self._scoped_envs[cache_key]
-                else:
-                    group_slice = layout.env_slice(robot_group)
-                    group_size = len(layout.env_ids_t(robot_group))
-                    scoped = ScopedEnv(self._env, group_slice, group_size, robot_group)
-                    self._scoped_envs[cache_key] = scoped
-
-            caches.append(
-                PerRobotMdpTermCache(
-                    group_key=robot_group,
-                    params={**term_cfg.params, **overrides},
-                    scoped_env=scoped,
-                )
-            )
-        return caches
