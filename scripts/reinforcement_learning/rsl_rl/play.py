@@ -8,13 +8,9 @@
 import argparse
 import contextlib
 import importlib.metadata as metadata
-import logging
 import os
 import sys
 import time
-
-logging.getLogger("onnxscript").setLevel(logging.WARNING)
-logging.getLogger("onnx_ir").setLevel(logging.WARNING)
 
 import gymnasium as gym
 import torch

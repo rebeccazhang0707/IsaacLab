@@ -143,6 +143,7 @@ class ManagerBase(ABC):
         # store the inputs
         self.cfg = copy.deepcopy(cfg)
         self._env = env
+
         # flag for whether the scene entities have been resolved
         # if sim is playing, we resolve the scene entities directly while preparing the terms
         self._is_scene_entities_resolved = self._env.sim.is_playing()
@@ -414,5 +415,3 @@ class ManagerBase(ABC):
         elif isinstance(value, (list, tuple)):
             for i, item in enumerate(value):
                 self._resolve_param_value(f"{term_name}.{key}", i, item)
-
-

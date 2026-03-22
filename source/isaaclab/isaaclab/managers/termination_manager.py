@@ -145,7 +145,7 @@ class TerminationManager(ManagerBase):
         for i, key in enumerate(self._term_names):
             # store information
             extras["Episode_Termination/" + key] = last_episode_done_stats[i].item()
-        # reset all the termination terms
+        # reset all the reward terms
         for term_cfg in self._class_term_cfgs:
             term_cfg.func.reset(env_ids=env_ids)
         # return logged information
@@ -164,7 +164,7 @@ class TerminationManager(ManagerBase):
         self._truncated_buf[:] = False
         self._terminated_buf[:] = False
         # iterate over all the termination terms
-        for i, (name, term_cfg) in enumerate(zip(self._term_names, self._term_cfgs)):
+        for i, term_cfg in enumerate(self._term_cfgs):
             value = term_cfg.func(self._env, **term_cfg.params)
             # store timeout signal separately
             if term_cfg.time_out:
@@ -255,7 +255,6 @@ class TerminationManager(ManagerBase):
             cfg_items = self.cfg.items()
         else:
             cfg_items = self.cfg.__dict__.items()
-
         # iterate over all the terms
         for term_name, term_cfg in cfg_items:
             # check for non config

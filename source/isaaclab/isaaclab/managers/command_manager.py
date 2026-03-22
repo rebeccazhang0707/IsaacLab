@@ -50,11 +50,6 @@ class CommandTerm(ManagerTermBase):
         """
         super().__init__(cfg, env)
 
-        # validate task_group if specified
-        tg = getattr(cfg, "task_group", None)
-        if tg is not None:
-            env.scene.layout.resolve_task_group(self.__name__, tg)
-
         # create buffers to store the command
         # -- metrics that can be used for logging
         self.metrics = dict()

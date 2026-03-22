@@ -220,7 +220,6 @@ class RewardManager(ManagerBase):
             cfg_items = self.cfg.items()
         else:
             cfg_items = self.cfg.__dict__.items()
-
         # iterate over all the terms
         for term_name, term_cfg in cfg_items:
             # check for non config
