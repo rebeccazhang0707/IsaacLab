@@ -174,23 +174,6 @@ class EnvLayout:
             return self._asset_groups.get(asset_name)
         return None
 
-    # ── scatter helpers ────────────────────────────────────────────────────
-
-    def multi_task_onehot(self) -> torch.Tensor:
-        """One-hot encoding of task group for every environment.
-
-        Column *i* is 1.0 for all envs assigned to the *i*-th task group.
-
-        Returns:
-            Shape ``(num_envs, num_task_groups)``.
-        """
-        n_tasks = len(self._env_ids)
-        out = torch.zeros(self._num_envs, n_tasks, device=self._device)
-        for i, group in enumerate(self._env_ids):
-            env_ids = self.env_ids(group)
-            out[env_ids, i] = 1.0
-        return out
-
     # ── registration ──────────────────────────────────────────────────────
 
     def register(self, key: str, env_ids: Sequence[int]) -> None:
@@ -364,17 +347,18 @@ class EnvLayout:
         * Both partial (same ids) → ``slice(None)``
 
         Args:
-            term_key: Layout key of the term.
-            asset_key: Layout key of the asset.
+            term_key: Layout key of the term (group name).
+            asset_key: Asset name (resolved via ``register_asset``).
 
         Returns:
             ``slice(None)`` or a long tensor suitable for indexing.
         """
         if term_key not in self._env_ids:
             return slice(None)
-        if asset_key not in self._env_ids:
-            return self.env_slice(term_key)
-        return slice(None)
+        asset_group = self._asset_groups.get(asset_key)
+        if asset_group is not None:
+            return slice(None)
+        return self.env_slice(term_key)
 
     # ── high-level dispatch helpers ────────────────────────────────────────
 

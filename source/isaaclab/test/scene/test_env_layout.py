@@ -391,29 +391,6 @@ class TestDispatchHelpers:
 
 
 # ===========================================================================
-# EnvLayout: multi_task_onehot
-# ===========================================================================
-
-
-class TestMultiTaskOnehot:
-    def test_onehot_shape_and_values(self):
-        layout = EnvLayout(6, "cpu")
-        layout.apply_task_groups({"a": 1, "b": 1})
-        oh = layout.multi_task_onehot()
-        assert oh.shape == (6, 2)
-        assert oh[:3, 0].sum().item() == 3.0
-        assert oh[:3, 1].sum().item() == 0.0
-        assert oh[3:, 0].sum().item() == 0.0
-        assert oh[3:, 1].sum().item() == 3.0
-
-    def test_each_row_sums_to_one(self):
-        layout = EnvLayout(12, "cpu")
-        layout.apply_task_groups({"a": 1, "b": 1, "c": 1})
-        oh = layout.multi_task_onehot()
-        assert torch.allclose(oh.sum(dim=1), torch.ones(12))
-
-
-# ===========================================================================
 # EnvLayout: apply_task_groups & resolve_task_group
 # ===========================================================================
 

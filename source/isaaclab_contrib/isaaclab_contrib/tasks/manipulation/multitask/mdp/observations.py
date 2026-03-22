@@ -32,11 +32,12 @@ import torch
 import warp as wp
 
 import isaaclab.utils.math as math_utils
-from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
     from isaaclab.envs import ManagerBasedEnv
+    from isaaclab.managers import ManagerTermBaseCfg
     from isaaclab.sensors import FrameTransformer
 
 
@@ -178,12 +179,25 @@ def cabinet_rel_ee_drawer_distance(
 # ===========================================================
 
 
-def multi_task_onehot(env: ManagerBasedEnv) -> torch.Tensor:
-    """One-hot encoding of task group, scattered across groups.
+class multi_task_onehot(ManagerTermBase):
+    """One-hot encoding of task group for every environment.
 
-    Delegates to :meth:`EnvLayout.multi_task_onehot`.
+    Column *i* is 1.0 for all envs assigned to the *i*-th task group.
+    The tensor is built once at init since group assignments are fixed.
 
     Returns:
         Shape ``(num_envs, num_task_groups)``.
     """
-    return env.scene.layout.multi_task_onehot()
+
+    def __init__(self, cfg: ManagerTermBaseCfg, env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+        layout = env.scene.layout
+        groups = layout.group_names
+        group_idx = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+        for i, group in enumerate(groups):
+            ids = list(layout.env_ids(group))
+            group_idx[ids] = i
+        self._onehot = torch.nn.functional.one_hot(group_idx, num_classes=len(groups)).float()
+
+    def __call__(self, env: ManagerBasedEnv) -> torch.Tensor:
+        return self._onehot

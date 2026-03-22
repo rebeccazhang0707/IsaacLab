@@ -147,9 +147,6 @@ class ManagerBase(ABC):
         self._env = env
         # task-group keys for layout-aware dispatch
         self._term_group_keys: dict[str, str] = {}
-        # scoped env proxies for task-group terms (built during _prepare_terms)
-        self._scoped_envs: dict[str, Any] = {}
-
         # flag for whether the scene entities have been resolved
         # if sim is playing, we resolve the scene entities directly while preparing the terms
         self._is_scene_entities_resolved = self._env.sim.is_playing()
@@ -470,14 +467,12 @@ class ManagerBase(ABC):
         This is the common dispatch pattern shared by observation, reward,
         and termination managers:
 
-        1. Use a :class:`~isaaclab.scene.ScopedEnv` proxy when one exists
-           for *term_key*.
-        2. Call the term function with the appropriate env and params.
-        3. If *group_key* is set, scatter the group-local result into a
+        1. Call the term function with the real environment.
+        2. If *group_key* is set, scatter the group-local result into a
            full ``(num_envs, ...)`` tensor.
 
         Args:
-            term_key: Lookup key for the scoped-env cache.
+            term_key: Lookup key (unused, kept for API compat).
             term_cfg: The term configuration.
             group_key: Task-group key for scatter, or ``None``.
             clone: If ``True``, clone the result before returning.
@@ -487,11 +482,7 @@ class ManagerBase(ABC):
         Returns:
             The computed tensor, scattered if *group_key* is active.
         """
-        scoped = self._scoped_envs.get(term_key)
-        if scoped is not None:
-            value = term_cfg.func(scoped, **term_cfg.params)
-        else:
-            value = term_cfg.func(self._env, **term_cfg.params)
+        value = term_cfg.func(self._env, **term_cfg.params)
         if clone:
             value = value.clone()
         if group_key is not None:
@@ -502,7 +493,7 @@ class ManagerBase(ABC):
         return value
 
     def _register_task_group(self, term_key: str, task_group: str) -> None:
-        """Resolve, register, and build a scoped-env proxy for a task-group term.
+        """Resolve and register a task-group for a term.
 
         Shared boilerplate extracted from reward, observation, and
         termination manager ``_prepare_terms`` methods.
@@ -515,30 +506,4 @@ class ManagerBase(ABC):
         layout.resolve_task_group(term_key, task_group)
         layout.register_term(term_key, task_group)
         self._term_group_keys[term_key] = task_group
-        self._build_scoped_env(term_key, task_group)
 
-    def _build_scoped_env(self, term_name: str, task_group: str) -> Any:
-        """Build (or reuse) a :class:`ScopedEnv` proxy for a task-group term.
-
-        Proxies are keyed by ``task_group`` so that terms sharing the
-        same group share the same proxy instance.
-
-        Args:
-            term_name: Term name (for bookkeeping in ``_scoped_envs``).
-            task_group: The task group to scope to.
-
-        Returns:
-            A :class:`ScopedEnv` proxy for the given task group.
-        """
-        from isaaclab.scene.scoped_env import ScopedEnv
-
-        if task_group in self._scoped_envs:
-            proxy = self._scoped_envs[task_group]
-        else:
-            layout = self._env.scene.layout
-            group_slice = layout.env_slice(task_group)
-            group_size = len(layout.env_ids_t(task_group))
-            proxy = ScopedEnv(self._env, group_slice, group_size, task_group)
-            self._scoped_envs[task_group] = proxy
-        self._scoped_envs[term_name] = proxy
-        return proxy

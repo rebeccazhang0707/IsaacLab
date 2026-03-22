@@ -49,7 +49,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from isaaclab_contrib.tasks.manipulation.multitask import mdp
-from isaaclab_contrib.tasks.manipulation.multitask.mdp.utils import RobotGroupCfg
+from isaaclab_contrib.tasks.manipulation.multitask.mdp.utils import LiftGroupCfg
 
 from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG
 from isaaclab_assets.robots.openarm import OPENARM_UNI_HIGH_PD_CFG
@@ -422,7 +422,7 @@ class MultiRobotLiftEnvCfg(ManagerBasedRLEnvCfg):
     #   ee_frame_cfg – SceneEntityCfg for the FrameTransformer sensor.
     #   command_name – name of the UniformPoseCommandCfg for the object goal.
     robot_meta = {
-        "openarm_robot": RobotGroupCfg(
+        TASK_OPENARM: LiftGroupCfg(
             asset_cfg=SceneEntityCfg(
                 "openarm_robot",
                 body_names=["openarm_hand"],
@@ -433,7 +433,7 @@ class MultiRobotLiftEnvCfg(ManagerBasedRLEnvCfg):
             ee_frame_cfg=SceneEntityCfg("openarm_ee_frame"),
             command_name="openarm_object_pose",
         ),
-        "franka_robot": RobotGroupCfg(
+        TASK_FRANKA: LiftGroupCfg(
             asset_cfg=SceneEntityCfg(
                 "franka_robot",
                 body_names=["panda_hand"],

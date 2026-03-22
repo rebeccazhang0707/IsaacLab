@@ -46,7 +46,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from isaaclab_contrib.tasks.manipulation.multitask import mdp
-from isaaclab_contrib.tasks.manipulation.multitask.mdp.utils import RobotGroupCfg
+from isaaclab_contrib.tasks.manipulation.multitask.mdp.utils import ReachGroupCfg
 
 from isaaclab_tasks.utils import PresetCfg
 
@@ -390,15 +390,15 @@ class MultiRobotReachEnvCfg(ManagerBasedRLEnvCfg):
     #   asset_cfg    – SceneEntityCfg identifying the EE body and arm joints.
     #   command_name – name of the UniformPoseCommandCfg that generates the reach target.
     robot_meta = {
-        "openarm_robot": RobotGroupCfg(
+        TASK_OPENARM: ReachGroupCfg(
             asset_cfg=SceneEntityCfg("openarm_robot", body_names=["openarm_hand"], joint_names=["openarm_joint.*"]),
             command_name="openarm_ee_pose",
         ),
-        "franka_robot": RobotGroupCfg(
+        TASK_FRANKA: ReachGroupCfg(
             asset_cfg=SceneEntityCfg("franka_robot", body_names=["panda_hand"], joint_names=["panda_joint.*"]),
             command_name="franka_ee_pose",
         ),
-        "ur10_robot": RobotGroupCfg(
+        TASK_UR10: ReachGroupCfg(
             asset_cfg=SceneEntityCfg("ur10_robot", body_names=["ee_link"], joint_names=[".*"]),
             command_name="ur10_ee_pose",
         ),

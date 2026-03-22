@@ -22,21 +22,22 @@ if TYPE_CHECKING:
 
 @configclass
 class RobotGroupCfg:
-    """Typed metadata for a robot group in heterogeneous multi-robot environments.
+    """Base metadata for a robot/task group in multi-robot environments.
 
-    Declares the scene entities and command association for a single
-    robot type.  Environment configs store a ``robot_meta`` dict
-    mapping asset names to instances of this class so that batched
-    MDP term classes have typed, IDE-discoverable fields instead of
-    an opaque ``dict[str, Any]``.
+    Environment configs store a ``robot_meta`` dict mapping **task-group
+    names** to instances of this class (or its subclasses) so that
+    batched MDP term classes have typed, IDE-discoverable fields.
 
-    If a task requires additional per-robot metadata beyond these
-    common fields, subclass this configclass and add extra fields.
+    Subclass for specific task domains:
+
+    * :class:`ReachGroupCfg` -- reach tasks
+    * :class:`LiftGroupCfg` -- lift tasks
+    * :class:`CabinetGroupCfg` -- cabinet tasks
 
     Example::
 
         robot_meta = {
-            "franka_robot": RobotGroupCfg(
+            "franka_reach": ReachGroupCfg(
                 asset_cfg=SceneEntityCfg("franka_robot", body_names=["panda_hand"]),
                 command_name="franka_ee_pose",
             ),
@@ -50,23 +51,55 @@ class RobotGroupCfg:
     ``joint_names`` for the arm (and optionally gripper) joints.
     """
 
-    command_name: str | None = None
-    """Name of the command term that generates targets for this robot."""
 
-    robot_cfg: SceneEntityCfg | None = None
-    """SceneEntityCfg for the robot articulation root.
+@configclass
+class ReachGroupCfg(RobotGroupCfg):
+    """Metadata for a reach task group.
 
-    Used by reward/observation functions that need the root pose
-    separately from the EE body (e.g. ``object_ee_distance``).
-    When ``None``, functions that accept ``robot_cfg`` will not
-    receive an auto-injected value.
+    Reach tasks require a command target but no object or cabinet.
     """
 
-    object_cfg: SceneEntityCfg | None = None
-    """SceneEntityCfg for the manipulation object (e.g. a cube to lift)."""
+    command_name: str = MISSING
+    """Name of the command term that generates the reach target."""
 
-    ee_frame_cfg: SceneEntityCfg | None = None
+
+@configclass
+class LiftGroupCfg(RobotGroupCfg):
+    """Metadata for a lift task group.
+
+    Lift tasks require a command target, a robot root reference,
+    a manipulation object, and an EE frame sensor.
+    """
+
+    command_name: str = MISSING
+    """Name of the command term that generates the object goal pose."""
+
+    robot_cfg: SceneEntityCfg = MISSING
+    """SceneEntityCfg for the robot articulation root (used for frame transforms)."""
+
+    object_cfg: SceneEntityCfg = MISSING
+    """SceneEntityCfg for the rigid object to lift."""
+
+    ee_frame_cfg: SceneEntityCfg = MISSING
     """SceneEntityCfg for the end-effector FrameTransformer sensor."""
+
+
+@configclass
+class CabinetGroupCfg(RobotGroupCfg):
+    """Metadata for a cabinet task group.
+
+    Cabinet tasks require an EE frame, a cabinet handle frame,
+    and the cabinet articulation for reading drawer joint state.
+    """
+
+    ee_frame_cfg: SceneEntityCfg = MISSING
+    """SceneEntityCfg for the end-effector FrameTransformer sensor."""
+
+    cabinet_frame_cfg: SceneEntityCfg = MISSING
+    """SceneEntityCfg for the cabinet handle FrameTransformer sensor."""
+
+    cabinet_asset_cfg: SceneEntityCfg = MISSING
+    """SceneEntityCfg for the cabinet articulation (joint names for the drawer)."""
 
 
 def resolve_scene_entity_cfg(env: ManagerBasedEnv, cfg: SceneEntityCfg) -> None:
@@ -86,22 +119,51 @@ def filter_env_ids(
     group_key: str,
     env_ids: torch.Tensor | None,
 ) -> tuple[torch.Tensor | None, bool]:
-    """Filter global ``env_ids`` down to a single task group.
+    """Filter ``env_ids`` to only those belonging to *group_key*.
 
     Args:
         layout: The environment layout.
         group_key: The task-group key to filter for.
-        env_ids: Global env indices, or ``None`` for all envs.
+        env_ids: Env indices to filter, or ``None`` for all envs.
 
     Returns:
-        A tuple ``(local_ids, skip)``.  When *skip* is ``True`` the
-        caller should ``continue`` to the next group (no envs matched).
-        When *env_ids* is ``None``, *local_ids* is also ``None``
-        (meaning "all envs in this group").
+        A tuple ``(env_ids, skip)``.  *env_ids* contains only the
+        subset that belong to this group.  When *skip* is ``True``
+        no envs matched and the caller should ``continue`` to the
+        next group.  When the input *env_ids* is ``None``, the output
+        is also ``None`` (meaning "all envs in this group").
     """
     if env_ids is None:
         return None, False
-    local, _ = layout.filter_and_split(group_key, env_ids)
-    if local.numel() == 0:
-        return local, True
-    return local, False
+    _, matched = layout.filter_and_split(group_key, env_ids)
+    if matched.numel() == 0:
+        return matched, True
+    return matched, False
+
+
+def asset_env_ids(
+    layout: EnvLayout,
+    group_key: str,
+    asset_name: str,
+    env_ids: torch.Tensor | None,
+) -> torch.Tensor | None:
+    """Return the correct env indices for writing to an asset's sim buffers.
+
+    Shared assets use the same indices as the caller.  Group-specific
+    assets need 0-based indices, which this function handles internally.
+
+    Args:
+        layout: The environment layout.
+        group_key: The task-group key the caller is iterating over.
+        asset_name: Scene entity name of the asset being written to.
+        env_ids: Env indices from :func:`filter_env_ids`, or ``None``
+            for all envs in the group.
+
+    Returns:
+        Indices suitable for ``write_*_to_sim_index`` calls, or ``None``
+        when all envs in the asset's partition should be written.
+    """
+    asset_group = layout._asset_groups.get(asset_name)
+    if asset_group is None or asset_group != group_key:
+        return env_ids
+    return layout.global_to_local(group_key, env_ids) if env_ids is not None else None
