@@ -55,8 +55,6 @@ class RewardManager(ManagerBase):
 
         # call the base class constructor (this will parse the terms config)
         super().__init__(cfg, env)
-        # pre-allocated buffer for task_group scatter path
-        self._scatter_buf = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         # prepare extra info to store individual reward term information
         self._episode_sums = dict()
         for term_name in self._term_names:
@@ -123,15 +121,8 @@ class RewardManager(ManagerBase):
             # reset episodic sum
             self._episode_sums[key][env_ids] = 0.0
         # reset all the reward terms
-        layout = self._env.scene.layout
         for term_cfg in self._class_term_cfgs:
-            if term_cfg.task_group is not None:
-                local = layout.resolve_env_ids(term_cfg.task_group, env_ids)
-                if local is None:
-                    continue
-                term_cfg.func.reset(env_ids=local)
-            else:
-                term_cfg.func.reset(env_ids=env_ids)
+            term_cfg.func.reset(env_ids=env_ids)
         # return logged information
         return extras
 
@@ -140,10 +131,6 @@ class RewardManager(ManagerBase):
 
         This function calls each reward term managed by the class and adds them to compute the net
         reward signal. It also updates the episodic sums corresponding to individual reward terms.
-
-        For terms with :attr:`RewardTermCfg.task_group` set, the term
-        function returns ``(group_envs,)`` and the manager scatters
-        the result into the full ``(num_envs,)`` buffer automatically.
 
         Args:
             dt: The time-step interval of the environment.
@@ -160,17 +147,7 @@ class RewardManager(ManagerBase):
                 self._step_reward[:, term_idx] = 0.0
                 continue
             # compute term's value
-            group_key = self._term_group_keys.get(name)
-            value = (
-                self._call_term(
-                    name,
-                    term_cfg,
-                    group_key,
-                    scatter_buf=self._scatter_buf,
-                )
-                * term_cfg.weight
-                * dt
-            )
+            value = term_cfg.func(self._env, **term_cfg.params) * term_cfg.weight * dt
             # update total reward
             self._reward_buf += value
             # update episodic sum
@@ -263,9 +240,6 @@ class RewardManager(ManagerBase):
                 )
             # resolve common parameters
             self._resolve_common_term_cfg(term_name, term_cfg, min_argc=1)
-            # register task-group mapping and build scoped env proxy
-            if term_cfg.task_group is not None:
-                self._register_task_group(term_name, term_cfg.task_group)
             # add function to list
             self._term_names.append(term_name)
             self._term_cfgs.append(term_cfg)

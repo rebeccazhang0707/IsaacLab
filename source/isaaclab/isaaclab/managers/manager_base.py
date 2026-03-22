@@ -20,8 +20,6 @@ from .manager_term_cfg import ManagerTermBaseCfg
 from .scene_entity_cfg import SceneEntityCfg
 
 if TYPE_CHECKING:
-    import torch
-
     from isaaclab.envs import ManagerBasedEnv
 
 
@@ -145,8 +143,6 @@ class ManagerBase(ABC):
         # store the inputs
         self.cfg = copy.deepcopy(cfg)
         self._env = env
-        # task-group keys for layout-aware dispatch
-        self._term_group_keys: dict[str, str] = {}
         # flag for whether the scene entities have been resolved
         # if sim is playing, we resolve the scene entities directly while preparing the terms
         self._is_scene_entities_resolved = self._env.sim.is_playing()
@@ -360,44 +356,10 @@ class ManagerBase(ABC):
 
         # check statically if the term's arguments are matched by params
         term_params = list(term_cfg.params.keys())
-
-        sig_params = inspect.signature(func_static).parameters
-
-        # Auto-inject task_group into params when the function accepts
-        # it and the value is set on the term config.  This removes the
-        # need to duplicate task_group in both the term config field
-        # and the params dict.
-        if term_cfg.task_group is not None and "task_group" in sig_params and "task_group" not in term_cfg.params:
-            term_cfg.params["task_group"] = term_cfg.task_group
-            term_params.append("task_group")
-
         args = inspect.signature(func_static).parameters
         args_with_defaults = [arg for arg in args if args[arg].default is not inspect.Parameter.empty]
         args_without_defaults = [arg for arg in args if args[arg].default is inspect.Parameter.empty]
         args = args_without_defaults + args_with_defaults
-
-        # Auto-inject env_ids from the task-group layout when the function accepts it as a keyword parameter.
-        # Exclude event functions that receive env_ids as a positional argument from the manager (within min_argc).
-        # Injection is skipped when every SceneEntityCfg references an asset scoped to the *same* task group.
-        # Their data is already local-sized so global env_ids would be out of bounds (multi-robot multi-task scenario).
-        positional_arg_names = set(args[:min_argc])
-        if (
-            term_cfg.task_group is not None
-            and "env_ids" in sig_params
-            and "env_ids" not in positional_arg_names
-            and "env_ids" not in term_cfg.params
-        ):
-            layout = self._env.scene.layout
-            has_global_asset = any(
-                layout.group_for_asset(v.name) != term_cfg.task_group
-                for v in term_cfg.params.values()
-                if isinstance(v, SceneEntityCfg)
-            )
-            if has_global_asset:
-                term_cfg.params["env_ids"] = layout.env_ids_t(term_cfg.task_group)
-                if "env_ids" not in term_params:
-                    term_params.append("env_ids")
-
         # ignore first two arguments for env and env_ids
         # Think: Check for cases when kwargs are set inside the function?
         if len(args) > min_argc:
@@ -453,57 +415,4 @@ class ManagerBase(ABC):
             for i, item in enumerate(value):
                 self._resolve_param_value(f"{term_name}.{key}", i, item)
 
-    def _call_term(
-        self,
-        term_key: str,
-        term_cfg: ManagerTermBaseCfg,
-        group_key: str | None = None,
-        *,
-        clone: bool = False,
-        scatter_buf: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Call a term function with optional task-group scoping and scatter.
-
-        This is the common dispatch pattern shared by observation, reward,
-        and termination managers:
-
-        1. Call the term function with the real environment.
-        2. If *group_key* is set, scatter the group-local result into a
-           full ``(num_envs, ...)`` tensor.
-
-        Args:
-            term_key: Lookup key (unused, kept for API compat).
-            term_cfg: The term configuration.
-            group_key: Task-group key for scatter, or ``None``.
-            clone: If ``True``, clone the result before returning.
-            scatter_buf: Optional pre-allocated scatter buffer passed to
-                :meth:`EnvLayout.scatter`.
-
-        Returns:
-            The computed tensor, scattered if *group_key* is active.
-        """
-        value = term_cfg.func(self._env, **term_cfg.params)
-        if clone:
-            value = value.clone()
-        if group_key is not None:
-            layout = self._env.scene.layout
-            if value.shape[0] == self.num_envs:
-                value = value[layout.env_ids_t(group_key)]
-            value = layout.scatter(group_key, value, fill=0.0, out=scatter_buf)
-        return value
-
-    def _register_task_group(self, term_key: str, task_group: str) -> None:
-        """Resolve and register a task-group for a term.
-
-        Shared boilerplate extracted from reward, observation, and
-        termination manager ``_prepare_terms`` methods.
-
-        Args:
-            term_key: The unique term name used as lookup key.
-            task_group: The task group declared on the term configuration.
-        """
-        layout = self._env.scene.layout
-        layout.resolve_task_group(term_key, task_group)
-        layout.register_term(term_key, task_group)
-        self._term_group_keys[term_key] = task_group
 

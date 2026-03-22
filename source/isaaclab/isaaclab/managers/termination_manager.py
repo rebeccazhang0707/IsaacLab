@@ -61,8 +61,6 @@ class TerminationManager(ManagerBase):
 
         # call the base class constructor (this will parse the terms config)
         super().__init__(cfg, env)
-        # pre-allocated buffer for task_group scatter path
-        self._scatter_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self._term_name_to_term_idx = {name: i for i, name in enumerate(self._term_names)}
         # prepare extra info to store individual termination term information
         self._term_dones = torch.zeros((self.num_envs, len(self._term_names)), device=self.device, dtype=torch.bool)
@@ -148,15 +146,8 @@ class TerminationManager(ManagerBase):
             # store information
             extras["Episode_Termination/" + key] = last_episode_done_stats[i].item()
         # reset all the termination terms
-        layout = self._env.scene.layout
         for term_cfg in self._class_term_cfgs:
-            if term_cfg.task_group is not None:
-                local = layout.resolve_env_ids(term_cfg.task_group, env_ids)
-                if local is None:
-                    continue
-                term_cfg.func.reset(env_ids=local)
-            else:
-                term_cfg.func.reset(env_ids=env_ids)
+            term_cfg.func.reset(env_ids=env_ids)
         # return logged information
         return extras
 
@@ -166,10 +157,6 @@ class TerminationManager(ManagerBase):
         This function calls each termination term managed by the class and performs a logical OR operation
         to compute the net termination signal.
 
-        For terms with :attr:`TerminationTermCfg.task_group` set, the
-        term function returns ``(group_envs,)`` and the manager
-        scatters the result into the full ``(num_envs,)`` buffer.
-
         Returns:
             The combined termination signal of shape (num_envs,).
         """
@@ -177,16 +164,8 @@ class TerminationManager(ManagerBase):
         self._truncated_buf[:] = False
         self._terminated_buf[:] = False
         # iterate over all the termination terms
-        for i, (name, term_cfg) in enumerate(
-            zip(self._term_names, self._term_cfgs),
-        ):
-            group_key = self._term_group_keys.get(name)
-            value = self._call_term(
-                name,
-                term_cfg,
-                group_key,
-                scatter_buf=self._scatter_buf,
-            )
+        for i, (name, term_cfg) in enumerate(zip(self._term_names, self._term_cfgs)):
+            value = term_cfg.func(self._env, **term_cfg.params)
             # store timeout signal separately
             if term_cfg.time_out:
                 self._truncated_buf |= value
@@ -290,9 +269,6 @@ class TerminationManager(ManagerBase):
                 )
             # resolve common parameters
             self._resolve_common_term_cfg(term_name, term_cfg, min_argc=1)
-            # register task-group mapping and build scoped env proxy
-            if term_cfg.task_group is not None:
-                self._register_task_group(term_name, term_cfg.task_group)
             # add function to list
             self._term_names.append(term_name)
             self._term_cfgs.append(term_cfg)

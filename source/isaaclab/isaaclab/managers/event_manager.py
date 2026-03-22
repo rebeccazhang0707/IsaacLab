@@ -211,7 +211,6 @@ class EventManager(ManagerBase):
             raise ValueError(f"Event mode '{mode}' requires the total number of environment steps to be provided.")
 
         # iterate over all the event terms
-        layout = self._env.scene.layout
         for index, term_cfg in enumerate(self._mode_term_cfgs[mode]):
             # initialize class-based terms if not already initialized (for non-prestartup modes)
             if inspect.isclass(term_cfg.func):
@@ -219,9 +218,6 @@ class EventManager(ManagerBase):
                     f"Initializing term '{self._mode_term_names[mode][index]}' with class '{term_cfg.func.__name__}'."
                 )
                 term_cfg.func = term_cfg.func(cfg=term_cfg, env=self._env)
-            # resolve group key for layout-aware dispatch
-            term_name = self._mode_term_names[mode][index]
-            group_key = self._term_group_keys.get(term_name)
             if mode == "interval":
                 # extract time left for this term
                 time_left = self._interval_term_time_left[index]
@@ -236,9 +232,8 @@ class EventManager(ManagerBase):
                         sampled_interval = torch.rand(1) * (upper - lower) + lower
                         self._interval_term_time_left[index][:] = sampled_interval
 
-                        call_ids = layout.resolve_env_ids(group_key, None) if group_key is not None else None
-                        if group_key is None or call_ids is not None:
-                            term_cfg.func(self._env, call_ids, **term_cfg.params)
+                        # call the event term (with None for env_ids)
+                        term_cfg.func(self._env, None, **term_cfg.params)
                 else:
                     valid_env_ids = (time_left < 1e-6).nonzero().flatten()
                     if len(valid_env_ids) > 0:
@@ -246,11 +241,8 @@ class EventManager(ManagerBase):
                         sampled_time = torch.rand(len(valid_env_ids), device=self.device) * (upper - lower) + lower
                         self._interval_term_time_left[index][valid_env_ids] = sampled_time
 
-                        call_ids = (
-                            layout.resolve_env_ids(group_key, valid_env_ids) if group_key is not None else valid_env_ids
-                        )  # noqa: E501
-                        if group_key is None or call_ids is not None:
-                            term_cfg.func(self._env, call_ids, **term_cfg.params)
+                        # call the event term
+                        term_cfg.func(self._env, valid_env_ids, **term_cfg.params)
             elif mode == "reset":
                 # obtain the minimum step count between resets
                 min_step_count = term_cfg.min_step_count_between_reset
@@ -264,9 +256,8 @@ class EventManager(ManagerBase):
                     self._reset_term_last_triggered_step_id[index][env_ids] = global_env_step_count
                     self._reset_term_last_triggered_once[index][env_ids] = True
 
-                    call_ids = layout.resolve_env_ids(group_key, env_ids) if group_key is not None else env_ids
-                    if group_key is None or call_ids is not None:
-                        term_cfg.func(self._env, call_ids, **term_cfg.params)
+                    # call the event term with the environment indices
+                    term_cfg.func(self._env, env_ids, **term_cfg.params)
                 else:
                     # extract last reset step for this term
                     last_triggered_step = self._reset_term_last_triggered_step_id[index][env_ids]
@@ -291,15 +282,11 @@ class EventManager(ManagerBase):
                         self._reset_term_last_triggered_once[index][valid_env_ids] = True
                         self._reset_term_last_triggered_step_id[index][valid_env_ids] = global_env_step_count
 
-                        call_ids = (
-                            layout.resolve_env_ids(group_key, valid_env_ids) if group_key is not None else valid_env_ids
-                        )  # noqa: E501
-                        if group_key is None or call_ids is not None:
-                            term_cfg.func(self._env, call_ids, **term_cfg.params)
+                        # call the event term
+                        term_cfg.func(self._env, valid_env_ids, **term_cfg.params)
             else:
-                call_ids = layout.resolve_env_ids(group_key, env_ids) if group_key is not None else env_ids
-                if group_key is None or call_ids is not None:
-                    term_cfg.func(self._env, call_ids, **term_cfg.params)
+                # call the event term
+                term_cfg.func(self._env, env_ids, **term_cfg.params)
 
     """
     Operations - Term settings.
@@ -358,13 +345,12 @@ class EventManager(ManagerBase):
         # buffer to store the step count when the term was last triggered for each environment for "reset" mode
         self._reset_term_last_triggered_step_id: list[torch.Tensor] = list()
         self._reset_term_last_triggered_once: list[torch.Tensor] = list()
+
         # check if config is dict already
         if isinstance(self.cfg, dict):
             cfg_items = self.cfg.items()
         else:
             cfg_items = self.cfg.__dict__.items()
-
-        layout = self._env.scene.layout
         # iterate over all the terms
         for term_name, term_cfg in cfg_items:
             # check for non config
@@ -385,11 +371,6 @@ class EventManager(ManagerBase):
 
             # resolve common parameters
             self._resolve_common_term_cfg(term_name, term_cfg, min_argc=2)
-            # register task-group mapping
-            if term_cfg.task_group is not None:
-                layout.resolve_task_group(term_name, term_cfg.task_group)
-                layout.register_term(term_name, term_cfg.task_group)
-                self._term_group_keys[term_name] = term_cfg.task_group
 
             # check if mode is pre-startup and scene replication is enabled
             if term_cfg.mode == "prestartup" and self._env.scene.cfg.replicate_physics:

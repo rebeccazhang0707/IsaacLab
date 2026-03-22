@@ -7,15 +7,9 @@ __all__ = [
     "EnvLayout",
     "InteractiveScene",
     "InteractiveSceneCfg",
-    "ScopedAsset",
-    "ScopedCommandManager",
-    "ScopedData",
-    "ScopedEnv",
-    "ScopedScene",
     "partition_env_ids",
 ]
 
 from .env_layout import EnvLayout, partition_env_ids
 from .interactive_scene import InteractiveScene
 from .interactive_scene_cfg import InteractiveSceneCfg
-from .scoped_env import ScopedAsset, ScopedCommandManager, ScopedData, ScopedEnv, ScopedScene
