@@ -3,485 +3,434 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Centralized environment layout for heterogeneous multi-task scenes."""
+"""Centralized environment layout for heterogeneous multi-task scenes.
+
+Design follows Newton's pattern: frozen dataclasses + pure functions + minimal state.
+
+Architecture:
+- Layer 1: Pure functions (filter_to_group, to_local, to_global, etc.)
+- Layer 2: GroupView wrapper (delegates to pure functions)
+- Layer 3: EnvLayout - minimal state, exposes raw data for composition
+"""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+__all__ = [
+    # Pure functions
+    "is_contiguous_slice",
+    "filter_to_group",
+    "to_local",
+    "to_global",
+    "get_env_ids",
+    "compute_read_index",
+    "build_layout",
+    "resolve_asset_env_ids",
+    # Data classes
+    "GroupLayout",
+    "GroupView",
+    # Main class
+    "EnvLayout",
+]
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from .clone_cfg import CloneCfg
+
+
+# ============================================================================
+# Layer 1: Pure Functions (Newton-like core)
+# ============================================================================
+
+
+def is_contiguous_slice(indices: list[int]) -> bool:
+    """Check if indices form a contiguous sequence."""
+    n = len(indices)
+    if n > 1:
+        for i in range(1, n):
+            if indices[i] != indices[i - 1] + 1:
+                return False
+    return True
+
+
+@dataclass(frozen=True)
+class GroupLayout:
+    """Immutable layout data for a group - like Newton's FrequencyLayout.
+
+    Either ``slice`` or ``indices`` is set, never both.
+    """
+
+    offset: int
+    """First env index in this group."""
+
+    count: int
+    """Number of envs in this group."""
+
+    slice: slice | None = None
+    """Set if envs are contiguous (zero-copy indexing)."""
+
+    indices: torch.Tensor | None = None
+    """Set if envs are non-contiguous (requires gather)."""
+
+    device: str = "cpu"
+    """Device for tensor operations."""
+
+    @property
+    def is_contiguous(self) -> bool:
+        """Whether this group's envs are contiguous."""
+        return self.slice is not None
+
+
+def filter_to_group(layout: GroupLayout, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Filter env_ids to those in this group. Returns (local_ids, matched_global_ids)."""
+    if layout.slice is not None:
+        start, stop = layout.slice.start, layout.slice.stop
+        mask = (env_ids >= start) & (env_ids < stop)
+        matched = env_ids[mask]
+        return matched - start, matched
+    else:
+        indices = layout.indices
+        positions = torch.searchsorted(indices, env_ids)
+        valid_mask = (positions < layout.count) & (indices[positions.clamp(max=layout.count - 1)] == env_ids)
+        return positions[valid_mask], env_ids[valid_mask]
+
+
+def to_local(layout: GroupLayout, env_ids: torch.Tensor) -> torch.Tensor:
+    """Convert global env_ids to 0-based local indices. Non-matching IDs are dropped."""
+    if layout.slice is not None:
+        start, stop = layout.slice.start, layout.slice.stop
+        mask = (env_ids >= start) & (env_ids < stop)
+        return env_ids[mask] - start
+    else:
+        indices = layout.indices
+        positions = torch.searchsorted(indices, env_ids)
+        valid_mask = (positions < layout.count) & (indices[positions.clamp(max=layout.count - 1)] == env_ids)
+        return positions[valid_mask]
+
+
+def to_global(layout: GroupLayout, local_ids: torch.Tensor) -> torch.Tensor:
+    """Convert local indices back to global env_ids."""
+    if layout.slice is not None:
+        return local_ids + layout.slice.start
+    else:
+        return layout.indices[local_ids]
+
+
+def get_env_ids(layout: GroupLayout) -> torch.Tensor:
+    """Get all env IDs for this group."""
+    if layout.slice is not None:
+        return torch.arange(layout.slice.start, layout.slice.stop, dtype=torch.long, device=layout.device)
+    else:
+        return layout.indices
+
+
+def compute_read_index(
+    group_layout: GroupLayout,
+    asset_env_ids: torch.Tensor | None,
+    group_idx: int,
+    asset_group_idxs: tuple[int, ...] | None,
+) -> slice | torch.Tensor:
+    """Compute read index into asset buffer."""
+    if asset_group_idxs is None:
+        return group_layout.slice if group_layout.slice is not None else group_layout.indices
+    if len(asset_group_idxs) == 1 and asset_group_idxs[0] == group_idx:
+        return slice(None)
+    if group_layout.slice is not None:
+        start = torch.searchsorted(asset_env_ids, group_layout.slice.start).item()
+        return slice(start, start + group_layout.count)
+    else:
+        return torch.searchsorted(asset_env_ids, group_layout.indices)
+
+
+def build_layout(env_ids: list[int], device: str) -> GroupLayout:
+    """Build a GroupLayout from env_ids list."""
+    if len(env_ids) == 0:
+        return GroupLayout(offset=0, count=0, slice=slice(0, 0), indices=None, device=device)
+    elif is_contiguous_slice(env_ids):
+        return GroupLayout(
+            offset=env_ids[0],
+            count=len(env_ids),
+            slice=slice(env_ids[0], env_ids[-1] + 1),
+            indices=None,
+            device=device,
+        )
+    else:
+        return GroupLayout(
+            offset=env_ids[0],
+            count=len(env_ids),
+            slice=None,
+            indices=torch.tensor(env_ids, dtype=torch.long, device=device),
+            device=device,
+        )
+
+
+def resolve_asset_env_ids(
+    layout: EnvLayout,
+    asset_name: str,
+    env_ids: torch.Tensor | None,
+) -> torch.Tensor | None:
+    """Map global env_ids to local asset indices for heterogeneous layouts.
+
+    Pure function: composes from layout's raw data.
+
+    Args:
+        layout: The EnvLayout instance.
+        asset_name: Name of the asset.
+        env_ids: Global env indices, or None for all envs.
+
+    Returns:
+        Local indices for this asset, or None if no envs apply.
+    """
+    asset_groups = layout.assets.get(asset_name)
+
+    # Homogeneous or unregistered asset: spans all envs
+    if not asset_groups and not layout.group_names:
+        return env_ids
+
+    # No groups registered for this asset but layout is heterogeneous
+    if not asset_groups:
+        return env_ids
+
+    # Heterogeneous: filter to asset's groups and collect local indices
+    if env_ids is None:
+        env_ids = torch.arange(layout.num_envs, dtype=torch.long, device=layout._device)
+
+    local_ids = []
+    for group_name in asset_groups:
+        local, _ = layout[group_name].filter(env_ids)
+        if local.numel() > 0:
+            local_ids.append(local)
+
+    if not local_ids:
+        return None
+    return torch.cat(local_ids) if len(local_ids) > 1 else local_ids[0]
+
+
+# ============================================================================
+# Layer 2: GroupView Wrapper (delegates to pure functions)
+# ============================================================================
+
+
+@dataclass
+class GroupView:
+    """Ergonomic wrapper around GroupLayout - delegates to pure functions.
+
+    ``write`` indexes into a full-env output buffer (shape ``(num_envs, ...)``).
+    ``read`` indexes into the asset's data buffer.
+    """
+
+    write: slice | torch.Tensor
+    """Index into a full-env ``(num_envs, ...)`` output buffer."""
+
+    read: slice | torch.Tensor
+    """Index into the asset's data buffer."""
+
+    layout: GroupLayout = field(repr=False)
+    """The underlying GroupLayout - exposed for pure function composition."""
+
+    def filter(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Filter env_ids to this group. Returns (local_ids, matched_global_ids)."""
+        return filter_to_group(self.layout, env_ids)
+
+    def to_local(self, env_ids: torch.Tensor) -> torch.Tensor:
+        """Convert global env_ids to 0-based local indices."""
+        return to_local(self.layout, env_ids)
+
+    def to_global(self, local_ids: torch.Tensor) -> torch.Tensor:
+        """Convert local indices back to global env_ids."""
+        return to_global(self.layout, local_ids)
+
+    @property
+    def env_ids(self) -> torch.Tensor:
+        """All env IDs in this group."""
+        return get_env_ids(self.layout)
+
+    @property
+    def count(self) -> int:
+        """Number of envs in this group."""
+        return self.layout.count
+
+
+# ============================================================================
+# Layer 3: EnvLayout (minimal state, exposes raw data for composition)
+# ============================================================================
+
+
+_HOMOGENEOUS_LAYOUT = GroupLayout(offset=0, count=0, slice=slice(None), indices=None, device="cpu")
 
 
 class EnvLayout:
     """Centralized environment partitioning for heterogeneous multi-task scenes.
 
-    One instance per :class:`InteractiveScene`.  All lookup tables, slices and
-    masks are cached here — assets and manager terms never instantiate their own
-    mapping logic.  They either:
-
-    * query this object by *key* (a string such as the asset or term name), or
-    * receive pre-filtered **local** env indices from the orchestration layer
-      (scene / manager) and remain completely layout-unaware.
-
-    For homogeneous scenes (single layout) every query degrades to
-    ``slice(None)`` / identity with **zero overhead**.
+    Minimal API - exposes raw data for caller composition.
 
     Example::
 
-        # Setup (done once by InteractiveScene)
-        layout = EnvLayout(num_envs=24, device="cuda:0")
-        layout.apply_task_groups({"lift": 1, "stack": 1, "reach": 1})
-        # Registers three groups of 8 envs each.
+        # Indexing
+        gv = layout["lift", "robot"]
+        output[gv.write] = robot.data[gv.read]
 
-        # Runtime queries
-        layout.global_to_local("lift", torch.tensor([2, 5, 10]))
-        # → tensor([2, 5])   (10 is dropped — doesn't belong to "lift")
+        # Composition from raw data
+        if (g := layout.assets.get("robot")) and len(g) == 1:
+            ...  # asset is exclusive to one group
 
-        layout.env_slice("stack")
-        # → slice(8, 16)     (contiguous → zero-copy view)
-
-        layout.scatter("lift", local_reward, fill=0.0)
-        # → (24,) tensor with reward in rows 0-7, zeros elsewhere
+        # Pure function usage
+        local, matched = filter_to_group(gv.layout, env_ids)
     """
 
     def __init__(self, num_envs: int, device: str = "cuda:0"):
         self._num_envs = num_envs
         self._device = device
-        # group name → env-id tuple
-        self._env_ids: dict[str, tuple[int, ...]] = {}
-        # group name → cached long tensor of env IDs (lazily populated)
-        self._env_id_tensors: dict[str | None, torch.Tensor] = {}
-        # group name → cached global-to-local lookup table (lazily populated)
-        self._lookups: dict[str, torch.Tensor] = {}
-        # task-group partition (populated by apply_task_groups)
-        self._task_group_partition: dict[str, list[int]] | None = None
-        # entity → group key mappings (centralized registry)
-        self._asset_groups: dict[str, str] = {}
-        self._term_groups: dict[str, str] = {}
-        # cached default ids for unregistered / None keys
-        self._all_env_ids: tuple[int, ...] = tuple(range(num_envs))
+        self._layouts: dict[str, GroupLayout] = {}
+        self._group_names: tuple[str, ...] = ()
+        self._assets: dict[str, tuple[str, ...]] = {}
+        self._terms: dict[str, str] = {}
+        self._clone_cfg: CloneCfg | None = None
 
-    # ── properties ────────────────────────────────────────────────────────
+    # ── fundamental properties ────────────────────────────────────────────
 
     @property
     def num_envs(self) -> int:
-        """Total number of environments across all groups."""
+        """Total number of environments."""
         return self._num_envs
 
     @property
-    def is_heterogeneous(self) -> bool:
-        """Whether any partial group has been registered."""
-        return len(self._env_ids) > 0
+    def group_names(self) -> tuple[str, ...]:
+        """Names of all registered groups (immutable)."""
+        return self._group_names
+
+    # ── raw data access for composition ───────────────────────────────────
 
     @property
-    def group_names(self) -> list[str]:
-        """Names of all registered groups."""
-        return list(self._env_ids.keys())
+    def layouts(self) -> Mapping[str, GroupLayout]:
+        """Read-only mapping of group name → GroupLayout."""
+        return MappingProxyType(self._layouts)
 
-    def apply_task_groups(self, task_groups: dict[str, int] | int) -> None:
-        """Partition environments by task groups and register each group.
+    @property
+    def assets(self) -> Mapping[str, tuple[str, ...]]:
+        """Read-only mapping of asset name → tuple of group names."""
+        return MappingProxyType(self._assets)
 
-        Calls :func:`partition_env_ids` internally and registers every
-        resulting group.
+    @property
+    def terms(self) -> Mapping[str, str]:
+        """Read-only mapping of term ID → group name."""
+        return MappingProxyType(self._terms)
 
-        Args:
-            task_groups: Either an ``int`` for equal-sized anonymous groups,
-                or a ``dict[str, int]`` mapping group name to relative weight.
+    # ── setup ─────────────────────────────────────────────────────────────
 
-        Raises:
-            RuntimeError: If task groups have already been applied.
-        """
-        if self._task_group_partition is not None:
-            raise RuntimeError("Task groups have already been applied to this layout.")
-        self._task_group_partition = partition_env_ids(self._num_envs, task_groups)
-        for group_name, env_ids in self._task_group_partition.items():
-            self.register(group_name, env_ids)
+    def apply_clone_cfg(self, clone_cfg: CloneCfg) -> None:
+        """Store clone config for later use."""
+        if self._clone_cfg is not None:
+            raise RuntimeError("Clone config has already been applied.")
+        self._clone_cfg = clone_cfg
 
-    def resolve_task_group(self, key: str, task_group: str) -> list[int]:
-        """Look up the env_ids for a task group, with validation.
+    def apply_assignment(
+        self,
+        assignment: torch.Tensor,
+        group_names: tuple[str, ...],
+        group_assets: dict[str, list[str]] | None = None,
+    ) -> None:
+        """Populate layout from assignment tensor."""
+        assignment = assignment.to(device=self._device, dtype=torch.long)
 
-        Args:
-            key: The name of the entity requesting resolution (for error messages).
-            task_group: The task group name to look up.
+        if group_assets is None and self._clone_cfg is not None:
+            group_assets = {name: inc.assets for name, inc in self._clone_cfg.clone_groups.items()}
 
-        Returns:
-            The list of environment indices for the requested group.
+        self._group_names = group_names
+        self._layouts = {}
 
-        Raises:
-            ValueError: If no task groups are configured or the name is unknown.
-        """
-        if self._task_group_partition is None:
-            raise ValueError(f"'{key}' sets task_group='{task_group}' but no task_groups are configured on the scene.")
-        if task_group not in self._task_group_partition:
-            raise ValueError(
-                f"'{key}' references unknown task_group='{task_group}'. "
-                f"Available groups: {list(self._task_group_partition.keys())}"
-            )
-        return self._task_group_partition[task_group]
+        for idx, name in enumerate(group_names):
+            env_ids = (assignment == idx).nonzero(as_tuple=True)[0].tolist()
+            self._layouts[name] = build_layout(env_ids, self._device)
 
-    # ── entity registry ────────────────────────────────────────────────────
+            if group_assets and name in group_assets:
+                for asset_name in group_assets[name]:
+                    self._add_asset_to_group(asset_name, name)
+
+    def register(self, key: str, env_ids: torch.Tensor) -> None:
+        """Register a named environment partition."""
+        env_ids_list = env_ids.tolist()
+
+        if any(i < 0 or i >= self._num_envs for i in env_ids_list):
+            raise ValueError(f"env_ids for '{key}' out of range [0, {self._num_envs})")
+        if len(set(env_ids_list)) != len(env_ids_list):
+            raise ValueError(f"env_ids for '{key}' contain duplicates")
+
+        self._layouts[key] = build_layout(env_ids_list, self._device)
+        if key not in self._group_names:
+            self._group_names = (*self._group_names, key)
 
     def register_asset(self, asset_name: str, group_key: str) -> None:
-        """Register an asset → group mapping.
+        """Register an asset to a group."""
+        if group_key in self._layouts:
+            self._add_asset_to_group(asset_name, group_key)
 
-        Called by :class:`InteractiveScene` during setup so that managers
-        can later resolve layout information by asset name alone.
-
-        Args:
-            asset_name: Scene-level name of the asset.
-            group_key: The group key (must already be registered via
-                :meth:`register` or :meth:`apply_task_groups`).
-        """
-        self._asset_groups[asset_name] = group_key
+    def _add_asset_to_group(self, asset_name: str, group_key: str) -> None:
+        current = self._assets.get(asset_name, ())
+        if group_key not in current:
+            self._assets[asset_name] = (*current, group_key)
 
     def register_term(self, term_id: str, group_key: str) -> None:
-        """Register a manager-term → group mapping.
+        """Register a manager-term to a group."""
+        if group_key in self._layouts:
+            self._terms[term_id] = group_key
 
-        Called by managers during ``_prepare_terms`` so that subsequent
-        dispatch operations (reset, process_action, …) can resolve
-        layout information by term name alone.
+    # ── single entry point ────────────────────────────────────────────────
 
-        Args:
-            term_id: Manager-level term name (the config attribute name).
-            group_key: The group key.
-        """
-        self._term_groups[term_id] = group_key
+    def __getitem__(self, key: str | tuple[str, str | None]) -> GroupView:
+        """Get GroupView: layout["lift"] or layout["lift", "robot"]."""
+        if isinstance(key, str):
+            return self._make_view(key, None)
+        return self._make_view(key[0], key[1])
 
-    def group_for_asset(self, asset_name: str) -> str | None:
-        """Return the group key for an asset, or ``None`` if not registered."""
-        return self._asset_groups.get(asset_name)
+    def group_view(self, group_key: str | None, asset_name: str | None = None) -> GroupView:
+        """Get GroupView for a group/asset pair. Alias for __getitem__."""
+        return self._make_view(group_key, asset_name)
 
-    def group_for_term(self, term_id: str) -> str | None:
-        """Return the group key for a manager term, or ``None``."""
-        return self._term_groups.get(term_id)
+    def _make_view(self, group_key: str | None, asset_name: str | None) -> GroupView:
+        if group_key is None:
+            return GroupView(write=slice(None), read=slice(None), layout=_HOMOGENEOUS_LAYOUT)
 
-    def resolve_group_key(self, *, task_group: str | None = None, asset_name: str | None = None) -> str | None:
-        """Resolve a group key from configuration parameters for 'command' terms.
+        layout = self._layouts.get(group_key)
+        if layout is None:
+            raise KeyError(f"unregistered group '{group_key}'. Available: {list(self._group_names)}")
 
-        Priority: *task_group* (if it names a registered group) >
-        *asset_name* (via :meth:`group_for_asset`).
+        write = layout.slice if layout.slice is not None else layout.indices
+        read = self._compute_read(group_key, asset_name, layout)
+        return GroupView(write=write, read=read, layout=layout)
 
-        Args:
-            task_group: Explicit task-group name from the term config.
-            asset_name: Asset name whose group to inherit.
-
-        Returns:
-            The resolved group key, or ``None`` when homogeneous.
-        """
-        if task_group is not None and task_group in self._env_ids:
-            return task_group
-        if asset_name is not None:
-            return self._asset_groups.get(asset_name)
-        return None
-
-    # ── registration ──────────────────────────────────────────────────────
-
-    def register(self, key: str, env_ids: Sequence[int]) -> None:
-        """Register a named environment partition.
-
-        The same key may be re-registered (the old entry is replaced).
-        Multiple keys that map to the *same* set of env indices will
-        automatically share cached lookup tables and slices.
-
-        Typically called internally by :meth:`apply_task_groups`.
-
-        Args:
-            key: Unique group name (usually a task group name such as ``"lift"``).
-            env_ids: Global environment indices belonging to this group.
-
-        Raises:
-            ValueError: If any index is out of ``[0, num_envs)``.
-            ValueError: If *env_ids* contains duplicate entries.
-        """
-        ids = tuple(env_ids)
-        if any(i < 0 or i >= self._num_envs for i in ids):
-            raise ValueError(f"env_ids for '{key}' out of range [0, {self._num_envs}): got {ids}")
-        if len(ids) != len(set(ids)):
-            raise ValueError(f"env_ids for '{key}' contain duplicates: {ids}")
-        self._env_ids[key] = ids
-
-    # ── simple queries ────────────────────────────────────────────────────
-
-    def num_envs_for(self, key: str | None) -> int:
-        """Number of environments in a group (all envs if *key* is ``None`` or unregistered)."""
-        return len(self._env_ids[key]) if key in self._env_ids else self._num_envs
-
-    def env_ids(self, key: str | None) -> tuple[int, ...]:
-        """Global env indices for a group (all envs if *key* is ``None`` or unregistered)."""
-        if key is None:
-            return self._all_env_ids
-        return self._env_ids.get(key, self._all_env_ids)
-
-    def env_ids_t(self, key: str | None) -> torch.Tensor:
-        """Like :meth:`env_ids` but returns a cached ``torch.long`` tensor.
-
-        Suitable for direct tensor row-indexing (avoids the tuple → multi-dim
-        indexing pitfall).
-        """
-        if key not in self._env_id_tensors:
-            self._env_id_tensors[key] = torch.tensor(self.env_ids(key), device=self._device, dtype=torch.long)
-        return self._env_id_tensors[key]
-
-    def asset_env_ids_t(self, asset_name: str) -> torch.Tensor | None:
-        """Cached long tensor of global env IDs for an asset's group, or ``None``."""
-        key = self._asset_groups.get(asset_name)
-        if key is None:
-            return None
-        return self.env_ids_t(key)
-
-    def env_slice(self, key: str | None) -> slice | torch.Tensor:
-        """Fast indexer: ``slice(None)`` if *key* is ``None`` or full,
-        ``slice(a, b)`` if contiguous, else a long tensor.
-        """
-        if key not in self._env_ids:
+    def _compute_read(self, group_key: str, asset_name: str | None, layout: GroupLayout) -> slice | torch.Tensor:
+        if asset_name is None:
             return slice(None)
-        ids = self._env_ids[key]
-        if len(ids) > 0 and ids == tuple(range(ids[0], ids[0] + len(ids))):
-            return slice(ids[0], ids[0] + len(ids))
-        return self.env_ids_t(key)
 
-    # ── env-id mapping ────────────────────────────────────────────────────
+        asset_groups = self._assets.get(asset_name)
+        if asset_groups is None:
+            return layout.slice if layout.slice is not None else layout.indices
 
-    def global_to_local(self, key: str | None, global_ids: torch.Tensor) -> torch.Tensor:
-        """Map global env indices to local (0-based) indices for a group.
+        group_idx = self._group_names.index(group_key)
+        asset_group_idxs = tuple(self._group_names.index(g) for g in asset_groups)
 
-        Indices that do not belong to the group are **silently dropped**.
-        If *key* is ``None`` or unregistered, the input is returned unchanged.
-
-        Args:
-            key: Group name, or ``None`` for homogeneous assets.
-            global_ids: 1-D long tensor of global env indices.
-
-        Returns:
-            1-D long tensor of local indices.
-        """
-        if key not in self._env_ids:
-            return global_ids
-        lut = self._get_lookup(key)
-        max_id = lut.shape[0] - 1
-        clamped = global_ids.clamp(max=max_id)
-        valid = (global_ids <= max_id) & (lut[clamped] >= 0)
-        return lut[global_ids[valid]]
-
-    def local_to_global(self, key: str | None, local_ids: torch.Tensor) -> torch.Tensor:
-        """Map local (0-based) indices back to global env indices.
-
-        If *key* is ``None`` or unregistered, the input is returned unchanged.
-
-        Args:
-            key: Group name, or ``None`` for homogeneous assets.
-            local_ids: 1-D long tensor of group-local env indices.
-
-        Returns:
-            1-D long tensor of global indices.
-        """
-        if key not in self._env_ids:
-            return local_ids
-        id_t = self.env_ids_t(key)
-        return id_t[local_ids]
-
-    def filter_and_split(self, key: str | None, global_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return ``(local_ids, matching_global_ids)``.
-
-        Useful when you need both local indices (for term-internal buffers)
-        and the corresponding global indices (for scene-wide data like
-        :attr:`InteractiveScene.env_origins`).
-
-        If *key* is ``None`` or unregistered, both outputs equal *global_ids*.
-
-        Args:
-            key: Group name, or ``None`` for homogeneous assets.
-            global_ids: 1-D long tensor of global env indices.
-
-        Returns:
-            Tuple of (local_ids, matching_global_ids).
-        """
-        if key not in self._env_ids:
-            return global_ids, global_ids
-        lut = self._get_lookup(key)
-        max_id = lut.shape[0] - 1
-        clamped = global_ids.clamp(max=max_id)
-        valid = (global_ids <= max_id) & (lut[clamped] >= 0)
-        return lut[global_ids[valid]], global_ids[valid]
-
-    # ── tensor alignment ──────────────────────────────────────────────────
-
-    def scatter(
-        self,
-        key: str | None,
-        local_data: torch.Tensor,
-        fill: float = 0.0,
-        out: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Scatter local-space data into a full-env tensor.
-
-        Args:
-            key: Group name.
-            local_data: Tensor of shape ``(num_local_envs, ...)``.
-            fill: Fill value for environments not in the group.
-            out: Pre-allocated output tensor of shape ``(num_envs, ...)``.
-                When provided the tensor is reused (filled with *fill*
-                then written), avoiding a per-call allocation.
-
-        Returns:
-            Tensor of shape ``(num_envs, ...)``.
-        """
-        if key not in self._env_ids:
-            return local_data
-        if out is None:
-            shape = (self._num_envs, *local_data.shape[1:])
-            out = local_data.new_full(shape, fill)
-        else:
-            out.fill_(fill)
-        out[self.env_slice(key)] = local_data
-        return out
-
-    def cross_slice(self, term_key: str | None, asset_key: str | None) -> slice | torch.Tensor:
-        """Return indices to align asset data with a term's local buffers.
-
-        Use this when a term manages a subset of envs but the asset it
-        references spans a *different* (usually larger) set.
-
-        * Both homogeneous → ``slice(None)``
-        * Term partial, asset full → ``env_slice(term_key)``
-        * Both partial (same ids) → ``slice(None)``
-
-        Args:
-            term_key: Layout key of the term (group name).
-            asset_key: Asset name (resolved via ``register_asset``).
-
-        Returns:
-            ``slice(None)`` or a long tensor suitable for indexing.
-        """
-        if term_key not in self._env_ids:
+        if len(asset_group_idxs) == 1 and asset_group_idxs[0] == group_idx:
             return slice(None)
-        asset_group = self._asset_groups.get(asset_key)
-        if asset_group is not None:
-            return slice(None)
-        return self.env_slice(term_key)
 
-    # ── high-level dispatch helpers ────────────────────────────────────────
+        asset_env_ids = self._get_asset_env_ids(asset_name)
+        return compute_read_index(layout, asset_env_ids, group_idx, asset_group_idxs)
 
-    def resolve_env_ids(
-        self, key: str | None, env_ids: Sequence[int] | slice | None
-    ) -> Sequence[int] | torch.Tensor | slice | None:
-        """Map global *env_ids* to local indices for a group.
+    def _get_asset_env_ids(self, asset_name: str) -> torch.Tensor:
+        asset_groups = self._assets.get(asset_name, ())
+        if not asset_groups:
+            return torch.arange(self._num_envs, dtype=torch.long, device=self._device)
 
-        Handles all edge cases so callers need no branching logic:
-
-        * ``env_ids`` is ``None`` or ``slice`` → returned as-is.
-        * *key* is ``None`` or unregistered → *env_ids* returned unchanged.
-        * Otherwise → :meth:`global_to_local` is applied; returns ``None``
-          when no environments match (caller should skip the term/asset).
-
-        Args:
-            key: Group key, or ``None`` for homogeneous entities.
-            env_ids: Global env indices, ``slice(None)``, or ``None``.
-
-        Returns:
-            Local env indices, ``slice(None)``/``None`` (pass-through),
-            or ``None`` if no environments belong to this group.
-        """
-        if key is None or key not in self._env_ids:
-            return env_ids
-        if env_ids is None or isinstance(env_ids, slice):
-            return env_ids
-        env_ids_t = torch.as_tensor(env_ids, dtype=torch.long, device=self._device)
-        local = self.global_to_local(key, env_ids_t)
-        return local if local.numel() > 0 else None
-
-    def resolve_term_env_ids(
-        self, term_id: str, env_ids: Sequence[int] | slice | None
-    ) -> Sequence[int] | torch.Tensor | slice | None:
-        """Convenience: :meth:`resolve_env_ids` keyed by term name."""
-        return self.resolve_env_ids(self._term_groups.get(term_id), env_ids)
-
-    def resolve_asset_env_ids(
-        self, asset_name: str, env_ids: Sequence[int] | slice | None
-    ) -> Sequence[int] | torch.Tensor | slice | None:
-        """Convenience: :meth:`resolve_env_ids` keyed by asset name."""
-        return self.resolve_env_ids(self._asset_groups.get(asset_name), env_ids)
-
-    def term_env_slice(self, term_id: str) -> slice | torch.Tensor:
-        """Return the env slice for a registered term.
-
-        Falls back to ``slice(None)`` when the term is not registered
-        or covers all environments.
-        """
-        return self.env_slice(self._term_groups.get(term_id))
-
-    # ── internals ─────────────────────────────────────────────────────────
-
-    def _get_lookup(self, key: str) -> torch.Tensor:
-        """Return a cached global-to-local lookup table for a registered group."""
-        if key not in self._lookups:
-            ids = self._env_ids[key]
-            t = torch.tensor(ids, device=self._device, dtype=torch.long)
-            lut = torch.full((int(t.max().item()) + 1,), -1, dtype=torch.long, device=self._device)
-            lut[t] = torch.arange(len(t), device=self._device)
-            self._lookups[key] = lut
-        return self._lookups[key]
+        tensors = [get_env_ids(self._layouts[g]) for g in asset_groups]
+        if len(tensors) == 1:
+            return tensors[0]
+        return torch.cat(tensors).unique().sort().values
 
     def __repr__(self) -> str:
-        groups_info = ", ".join(f"{k}({len(v)} envs)" for k, v in self._env_ids.items())
-        return f"EnvLayout(num_envs={self._num_envs}, groups=[{groups_info or 'homogeneous'}])"
-
-
-# ── utility functions ─────────────────────────────────────────────────────
-
-
-def partition_env_ids(
-    num_envs: int,
-    groups: dict[str, int] | int,
-) -> dict[str, list[int]]:
-    """Partition environment indices across named groups.
-
-    Args:
-        num_envs: Total number of environments.
-        groups: Either an ``int`` for equal-sized anonymous groups
-            (keys will be ``"group_0"``, ``"group_1"``, ...), or a
-            ``dict[str, int]`` mapping group name to desired size.
-            Sizes are treated as weights when they don't sum to
-            *num_envs*.
-
-    Returns:
-        Dict mapping group names to lists of environment indices.
-
-    When *num_envs* is not evenly divisible, each group (except the
-    last) is sized by ``round(num_envs * weight / total_weight)`` and
-    the last group absorbs whatever remains.
-
-    Example::
-
-        partition_env_ids(24, {"lift": 8, "stack": 8, "reach": 8})
-        # {"lift": [0..7], "stack": [8..15], "reach": [16..23]}
-
-        partition_env_ids(24, 3)
-        # {"group_0": [0..7], "group_1": [8..15], "group_2": [16..23]}
-
-        # indivisible case: 10 envs, 3 equal-weight groups
-        partition_env_ids(10, {"A": 1, "B": 1, "C": 1})
-        # {"A": [0..2], "B": [3..5], "C": [6..9]}
-        # A and B get 3 envs each (round(10/3) = 3), C gets the remaining 4.
-    """
-    if isinstance(groups, int):
-        groups = {f"group_{i}": 1 for i in range(groups)}
-
-    names = list(groups.keys())
-    weights = list(groups.values())
-    total_weight = sum(weights)
-
-    result: dict[str, list[int]] = {}
-    start = 0
-    remaining = num_envs
-    for i, (name, w) in enumerate(zip(names, weights)):
-        if i == len(names) - 1:
-            size = remaining
-        else:
-            size = round(num_envs * w / total_weight)
-            size = min(size, remaining)
-        result[name] = list(range(start, start + size))
-        start += size
-        remaining -= size
-
-    return result
+        groups = ", ".join(f"{n}: {self._layouts[n].count} envs" for n in self._group_names)
+        return f"EnvLayout(num_envs={self._num_envs}, groups=[{groups or 'homogeneous'}])"

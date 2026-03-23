@@ -3,21 +3,72 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Shared helpers and config types for batched MDP term classes."""
+"""Config types and base class for batched MDP terms."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Iterator
+from typing import TYPE_CHECKING, TypeVar, overload
 
-import torch
-
-from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.configclass import MISSING
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
-    from isaaclab.scene.env_layout import EnvLayout
+    from isaaclab.managers import ManagerTermBaseCfg
+    from isaaclab.scene import EnvLayout
+
+_GroupT = TypeVar("_GroupT", bound="RobotGroupCfg")
+
+
+class BatchedTermBase(ManagerTermBase):
+    """Base class for batched MDP terms that iterate over robot_meta groups.
+
+    Provides common setup and helper methods to reduce boilerplate in
+    batched observation, reward, termination, and event terms.
+
+    ``robot_meta`` is read from ``cfg.params["robot_meta"]``, where all
+    nested ``SceneEntityCfg`` instances are auto-resolved by the manager.
+
+    Subclasses should:
+    1. Call ``super().__init__(cfg, env)``
+    2. Use ``self._iter_groups(*types)`` to iterate filtered groups
+    """
+
+    def __init__(self, cfg: ManagerTermBaseCfg, env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+        self._layout: EnvLayout = env.scene.layout
+        # Read from params (auto-resolved by manager)
+        self._robot_meta: dict = cfg.params.get("robot_meta") or {}
+        self._num_envs = env.num_envs
+        self._device = env.device
+
+    @overload
+    def _iter_groups(self) -> Iterator[tuple[str, RobotGroupCfg]]: ...
+
+    @overload
+    def _iter_groups(self, group_type: type[_GroupT], /) -> Iterator[tuple[str, _GroupT]]: ...
+
+    @overload
+    def _iter_groups(
+        self, group_type1: type[RobotGroupCfg], group_type2: type[RobotGroupCfg], /, *more: type[RobotGroupCfg]
+    ) -> Iterator[tuple[str, RobotGroupCfg]]: ...
+
+    def _iter_groups(self, *group_types: type[RobotGroupCfg]) -> Iterator[tuple[str, RobotGroupCfg]]:
+        """Iterate robot_meta entries, optionally filtering by group type.
+
+        Args:
+            *group_types: If provided, only yield entries that are instances
+                of one of these types. If empty, yield all entries.
+
+        Yields:
+            (group_key, meta) tuples with proper typing for autocomplete.
+        """
+        for group_key, meta in self._robot_meta.items():
+            if group_types and not isinstance(meta, group_types):
+                continue
+            yield group_key, meta
 
 
 @configclass
@@ -53,6 +104,24 @@ class RobotGroupCfg:
 
 
 @configclass
+class PoseCommandRanges:
+    """Uniform sampling ranges for a pose command [m, rad]."""
+
+    pos_x: tuple[float, float] = (0.0, 0.0)
+    """Min/max for X position [m]."""
+    pos_y: tuple[float, float] = (0.0, 0.0)
+    """Min/max for Y position [m]."""
+    pos_z: tuple[float, float] = (0.0, 0.0)
+    """Min/max for Z position [m]."""
+    roll: tuple[float, float] = (0.0, 0.0)
+    """Min/max for roll angle [rad]."""
+    pitch: tuple[float, float] = (0.0, 0.0)
+    """Min/max for pitch angle [rad]."""
+    yaw: tuple[float, float] = (0.0, 0.0)
+    """Min/max for yaw angle [rad]."""
+
+
+@configclass
 class ReachGroupCfg(RobotGroupCfg):
     """Metadata for a reach task group.
 
@@ -61,6 +130,9 @@ class ReachGroupCfg(RobotGroupCfg):
 
     command_name: str = MISSING
     """Name of the command term that generates the reach target."""
+
+    command_ranges: PoseCommandRanges = MISSING
+    """Sampling ranges for the pose command target."""
 
 
 @configclass
@@ -73,6 +145,9 @@ class LiftGroupCfg(RobotGroupCfg):
 
     command_name: str = MISSING
     """Name of the command term that generates the object goal pose."""
+
+    command_ranges: PoseCommandRanges = MISSING
+    """Sampling ranges for the pose command target."""
 
     robot_cfg: SceneEntityCfg = MISSING
     """SceneEntityCfg for the robot articulation root (used for frame transforms)."""
@@ -100,70 +175,3 @@ class CabinetGroupCfg(RobotGroupCfg):
 
     cabinet_asset_cfg: SceneEntityCfg = MISSING
     """SceneEntityCfg for the cabinet articulation (joint names for the drawer)."""
-
-
-def resolve_scene_entity_cfg(env: ManagerBasedEnv, cfg: SceneEntityCfg) -> None:
-    """Resolve body/joint ids on a :class:`SceneEntityCfg` if not already resolved.
-
-    Batched MDP term classes call this during ``__init__`` for each
-    :class:`SceneEntityCfg` found in ``robot_meta``.  The guard avoids
-    redundant resolution when the same cfg object is shared.
-    """
-    already = isinstance(cfg.body_ids, list) or isinstance(cfg.joint_ids, list)
-    if not already:
-        cfg.resolve(env.scene)
-
-
-def filter_env_ids(
-    layout: EnvLayout,
-    group_key: str,
-    env_ids: torch.Tensor | None,
-) -> tuple[torch.Tensor | None, bool]:
-    """Filter ``env_ids`` to only those belonging to *group_key*.
-
-    Args:
-        layout: The environment layout.
-        group_key: The task-group key to filter for.
-        env_ids: Env indices to filter, or ``None`` for all envs.
-
-    Returns:
-        A tuple ``(env_ids, skip)``.  *env_ids* contains only the
-        subset that belong to this group.  When *skip* is ``True``
-        no envs matched and the caller should ``continue`` to the
-        next group.  When the input *env_ids* is ``None``, the output
-        is also ``None`` (meaning "all envs in this group").
-    """
-    if env_ids is None:
-        return None, False
-    _, matched = layout.filter_and_split(group_key, env_ids)
-    if matched.numel() == 0:
-        return matched, True
-    return matched, False
-
-
-def asset_env_ids(
-    layout: EnvLayout,
-    group_key: str,
-    asset_name: str,
-    env_ids: torch.Tensor | None,
-) -> torch.Tensor | None:
-    """Return the correct env indices for writing to an asset's sim buffers.
-
-    Shared assets use the same indices as the caller.  Group-specific
-    assets need 0-based indices, which this function handles internally.
-
-    Args:
-        layout: The environment layout.
-        group_key: The task-group key the caller is iterating over.
-        asset_name: Scene entity name of the asset being written to.
-        env_ids: Env indices from :func:`filter_env_ids`, or ``None``
-            for all envs in the group.
-
-    Returns:
-        Indices suitable for ``write_*_to_sim_index`` calls, or ``None``
-        when all envs in the asset's partition should be written.
-    """
-    asset_group = layout._asset_groups.get(asset_name)
-    if asset_group is None or asset_group != group_key:
-        return env_ids
-    return layout.global_to_local(group_key, env_ids) if env_ids is not None else None

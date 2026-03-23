@@ -82,8 +82,10 @@ class ActionTerm(ManagerTermBase):
         based on the asset this term is applied to.
         """
         layout = self._env.scene.layout
-        key = layout.group_for_asset(self.cfg.asset_name)
-        return layout.num_envs_for(key)
+        groups = layout.assets.get(self.cfg.asset_name)
+        if groups and len(groups) == 1:
+            return layout[groups[0]].count
+        return layout.num_envs
 
     @property
     @abstractmethod
@@ -251,7 +253,7 @@ class ActionManager(ManagerBase):
         layout = self._env.scene.layout
         for index, (name, term) in enumerate(self._terms.items()):
             col_start = self._term_col_start.get(name, "?")
-            group = layout.group_for_term(name) or "(global)"
+            group = layout.terms.get(name) or "(global)"
             table.add_row([index, name, term.action_dim, col_start, group])
         # convert table to string
         msg += table.get_string()
@@ -390,9 +392,15 @@ class ActionManager(ManagerBase):
         # reset all action terms — dispatch through layout
         layout = self._env.scene.layout
         for term_name, term in self._terms.items():
-            local = layout.resolve_term_env_ids(term_name, env_ids)
-            if local is not None:
-                term.reset(env_ids=local)
+            group_key = layout.terms.get(term_name)
+            if group_key is None:
+                term.reset(env_ids=env_ids)
+            elif isinstance(env_ids, slice):
+                term.reset(env_ids=layout[group_key].env_ids)
+            else:
+                local, matched = layout[group_key].filter(env_ids)
+                if matched.numel() > 0:
+                    term.reset(env_ids=local)
         # nothing to log here
         return {}
 
@@ -415,7 +423,8 @@ class ActionManager(ManagerBase):
         # dispatch actions to each term using layout-aware column offsets
         layout = self._env.scene.layout
         for term_name, term in self._terms.items():
-            env_sel = layout.term_env_slice(term_name)
+            group_key = layout.terms.get(term_name)
+            env_sel = layout[group_key].write if group_key else slice(None)
             col_start = self._term_col_start[term_name]
             term_actions = action[env_sel, col_start : col_start + term.action_dim]
             term.process_actions(term_actions)
@@ -482,9 +491,9 @@ class ActionManager(ManagerBase):
             if not isinstance(term, ActionTerm):
                 raise TypeError(f"Returned object for the term '{term_name}' is not of type ActionType.")
             # register term → group mapping in the centralized layout
-            group_key = layout.group_for_asset(term_cfg.asset_name)
-            if group_key is not None:
-                layout.register_term(term_name, group_key)
+            groups = layout.assets.get(term_cfg.asset_name)
+            if groups and len(groups) == 1:
+                layout.register_term(term_name, groups[0])
             # add term name and parameters
             self._term_names.append(term_name)
             self._terms[term_name] = term
@@ -497,7 +506,7 @@ class ActionManager(ManagerBase):
         self._term_col_start: dict[str, int] = {}
 
         for term_name, term in self._terms.items():
-            group_key = layout.group_for_term(term_name)
+            group_key = layout.terms.get(term_name)
             if group_key is not None:
                 if group_key not in group_col_cursor:
                     group_col_cursor[group_key] = 0
@@ -508,7 +517,7 @@ class ActionManager(ManagerBase):
         global_col_cursor = max_group_dim
 
         for term_name, term in self._terms.items():
-            group_key = layout.group_for_term(term_name)
+            group_key = layout.terms.get(term_name)
             if group_key is None:
                 self._term_col_start[term_name] = global_col_cursor
                 global_col_cursor += term.action_dim

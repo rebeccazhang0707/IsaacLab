@@ -40,7 +40,7 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.markers.config import FRAME_MARKER_CFG
-from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.scene import CloneCfg, InclusionSet, InteractiveSceneCfg
 from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
@@ -49,11 +49,11 @@ from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from isaaclab_contrib.tasks.manipulation.multitask import mdp
-from isaaclab_contrib.tasks.manipulation.multitask.mdp.utils import LiftGroupCfg
+from isaaclab_contrib.tasks.manipulation.multitask.mdp.utils import LiftGroupCfg, PoseCommandRanges
 
 from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG
 from isaaclab_assets.robots.openarm import OPENARM_UNI_HIGH_PD_CFG
-
+from isaaclab.cloner import sequential
 from .demo_multi_robot_reach_env_cfg import MultitaskPhysicsCfg
 
 # -----------------------------------------------------------
@@ -62,6 +62,47 @@ from .demo_multi_robot_reach_env_cfg import MultitaskPhysicsCfg
 
 TASK_OPENARM = "openarm_lift"
 TASK_FRANKA = "franka_lift"
+
+ROBOT_META = {
+    TASK_OPENARM: LiftGroupCfg(
+        asset_cfg=SceneEntityCfg(
+            "openarm_robot",
+            body_names=["openarm_hand"],
+            joint_names=["openarm_joint.*", "openarm_finger_joint.*"],
+        ),
+        robot_cfg=SceneEntityCfg("openarm_robot"),
+        object_cfg=SceneEntityCfg("openarm_object"),
+        ee_frame_cfg=SceneEntityCfg("openarm_ee_frame"),
+        command_name="ee_pose",
+        command_ranges=PoseCommandRanges(
+            pos_x=(0.2, 0.4),
+            pos_y=(-0.2, 0.2),
+            pos_z=(0.15, 0.4),
+            roll=(-math.pi / 6, math.pi / 6),
+            pitch=(math.pi / 2, math.pi / 2),
+            yaw=(-math.pi / 9, math.pi / 9),
+        ),
+    ),
+    TASK_FRANKA: LiftGroupCfg(
+        asset_cfg=SceneEntityCfg(
+            "franka_robot",
+            body_names=["panda_hand"],
+            joint_names=["panda_joint.*", "panda_finger.*"],
+        ),
+        robot_cfg=SceneEntityCfg("franka_robot"),
+        object_cfg=SceneEntityCfg("franka_object"),
+        ee_frame_cfg=SceneEntityCfg("franka_ee_frame"),
+        command_name="ee_pose",
+        command_ranges=PoseCommandRanges(
+            pos_x=(0.4, 0.6),
+            pos_y=(-0.25, 0.25),
+            pos_z=(0.25, 0.5),
+            roll=(0.0, 0.0),
+            pitch=(math.pi, math.pi),
+            yaw=(-3.14, 3.14),
+        ),
+    ),
+}
 
 _TABLE_SPAWN = UsdFileCfg(
     usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/SeattleLabTable/table_instanceable.usd",
@@ -94,10 +135,13 @@ _MARKER_CFG.prim_path = "/Visuals/FrameTransformer"
 class MultiRobotLiftSceneCfg(InteractiveSceneCfg):
     """Two robot types, each lifting its own cube."""
 
-    task_groups = {
-        TASK_OPENARM: 1,
-        TASK_FRANKA: 1,
-    }
+    clone_cfg = CloneCfg(
+        clone_strategy=sequential,
+        clone_groups={
+            TASK_OPENARM: InclusionSet(assets=["openarm_robot", "openarm_object", "openarm_ee_frame"], weight=1),
+            TASK_FRANKA: InclusionSet(assets=["franka_robot", "franka_object", "franka_ee_frame"], weight=1),
+        }
+    )
 
     plane = AssetBaseCfg(
         prim_path="/World/GroundPlane",
@@ -117,14 +161,12 @@ class MultiRobotLiftSceneCfg(InteractiveSceneCfg):
     # ── OpenArm ──────────────────────────────────────────────
     openarm_robot = OPENARM_UNI_HIGH_PD_CFG.replace(
         prim_path="{ENV_REGEX_NS}/OpenArm_Robot",
-        task_group=TASK_OPENARM,
     )
 
     openarm_object = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/OpenArm_Object",
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.4, 0.0, 0.055), rot=(0.0, 0.0, 0.0, 1.0)),
         spawn=_CUBE_SPAWN,
-        task_group=TASK_OPENARM,
     )
     openarm_ee_frame = FrameTransformerCfg(
         prim_path="{ENV_REGEX_NS}/OpenArm_Robot/openarm_link0",
@@ -136,19 +178,16 @@ class MultiRobotLiftSceneCfg(InteractiveSceneCfg):
                 name="end_effector",
             ),
         ],
-        task_group=TASK_OPENARM,
     )
 
     # ── Franka ───────────────────────────────────────────────
     franka_robot = FRANKA_PANDA_HIGH_PD_CFG.replace(
         prim_path="{ENV_REGEX_NS}/Franka_Robot",
-        task_group=TASK_FRANKA,
     )
     franka_object = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Franka_Object",
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.5, 0.0, 0.055), rot=(0.0, 0.0, 0.0, 1.0)),
         spawn=_CUBE_SPAWN,
-        task_group=TASK_FRANKA,
     )
     franka_ee_frame = FrameTransformerCfg(
         prim_path="{ENV_REGEX_NS}/Franka_Robot/panda_link0",
@@ -161,7 +200,6 @@ class MultiRobotLiftSceneCfg(InteractiveSceneCfg):
                 offset=OffsetCfg(pos=(0.0, 0.0, 0.1034)),
             ),
         ],
-        task_group=TASK_FRANKA,
     )
 
 
@@ -217,35 +255,12 @@ class MultiRobotLiftActionsCfg:
 
 @configclass
 class MultiRobotLiftCommandsCfg:
-    """Per-group lift command targets (goal position for the object)."""
+    """Single batched pose command — per-group ranges live in ``robot_meta``."""
 
-    openarm_object_pose = mdp.UniformPoseCommandCfg(
-        asset_name="openarm_robot",
-        body_name="openarm_hand",
+    ee_pose = mdp.BatchedPoseCommandCfg(
         resampling_time_range=(5.0, 5.0),
         debug_vis=False,
-        ranges=mdp.UniformPoseCommandCfg.Ranges(
-            pos_x=(0.2, 0.4),
-            pos_y=(-0.2, 0.2),
-            pos_z=(0.15, 0.4),
-            roll=(-math.pi / 6, math.pi / 6),
-            pitch=(math.pi / 2, math.pi / 2),
-            yaw=(-math.pi / 9, math.pi / 9),
-        ),
-    )
-    franka_object_pose = mdp.UniformPoseCommandCfg(
-        asset_name="franka_robot",
-        body_name="panda_hand",
-        resampling_time_range=(5.0, 5.0),
-        debug_vis=False,
-        ranges=mdp.UniformPoseCommandCfg.Ranges(
-            pos_x=(0.4, 0.6),
-            pos_y=(-0.25, 0.25),
-            pos_z=(0.25, 0.5),
-            roll=(0.0, 0.0),
-            pitch=(math.pi, math.pi),
-            yaw=(-3.14, 3.14),
-        ),
+        robot_meta=ROBOT_META,
     )
 
 
@@ -354,7 +369,7 @@ class MultiRobotLiftEventsCfg:
         params={"reset_joint_targets": True},
     )
     reset_joints = EventTerm(
-        func=mdp.batched_reset_joints_by_scale,
+        func=mdp.batched_reset_joints,
         mode="reset",
         params={
             "position_range": (0.5, 1.25),
@@ -362,7 +377,7 @@ class MultiRobotLiftEventsCfg:
         },
     )
     reset_object = EventTerm(
-        func=mdp.batched_reset_object_state_uniform,
+        func=mdp.batched_reset_object_uniform,
         mode="reset",
         params={
             "pose_range": {"x": (-0.1, 0.1), "y": (-0.25, 0.25), "z": (0.0, 0.0)},
@@ -411,40 +426,8 @@ class MultiRobotLiftEnvCfg(ManagerBasedRLEnvCfg):
     scene: MultiRobotLiftSceneCfg = MultiRobotLiftSceneCfg(
         num_envs=4096,
         env_spacing=2.5,
-        replicate_physics=False,
+        replicate_physics=True,
     )
-
-    # Per-robot metadata used by batched MDP term classes.
-    # Each key is a scene asset name.  Batched classes iterate these entries at init time:
-    #   asset_cfg    – SceneEntityCfg identifying the EE body and arm+gripper joints.
-    #   robot_cfg    – SceneEntityCfg for the robot articulation root.
-    #   object_cfg   – SceneEntityCfg for the rigid object to lift.
-    #   ee_frame_cfg – SceneEntityCfg for the FrameTransformer sensor.
-    #   command_name – name of the UniformPoseCommandCfg for the object goal.
-    robot_meta = {
-        TASK_OPENARM: LiftGroupCfg(
-            asset_cfg=SceneEntityCfg(
-                "openarm_robot",
-                body_names=["openarm_hand"],
-                joint_names=["openarm_joint.*", "openarm_finger_joint.*"],
-            ),
-            robot_cfg=SceneEntityCfg("openarm_robot"),
-            object_cfg=SceneEntityCfg("openarm_object"),
-            ee_frame_cfg=SceneEntityCfg("openarm_ee_frame"),
-            command_name="openarm_object_pose",
-        ),
-        TASK_FRANKA: LiftGroupCfg(
-            asset_cfg=SceneEntityCfg(
-                "franka_robot",
-                body_names=["panda_hand"],
-                joint_names=["panda_joint.*", "panda_finger.*"],
-            ),
-            robot_cfg=SceneEntityCfg("franka_robot"),
-            object_cfg=SceneEntityCfg("franka_object"),
-            ee_frame_cfg=SceneEntityCfg("franka_ee_frame"),
-            command_name="franka_object_pose",
-        ),
-    }
 
     actions: MultiRobotLiftActionsCfg = MultiRobotLiftActionsCfg()
     commands: MultiRobotLiftCommandsCfg = MultiRobotLiftCommandsCfg()

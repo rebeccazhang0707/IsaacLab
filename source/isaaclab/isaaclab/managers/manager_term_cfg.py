@@ -52,23 +52,6 @@ class ManagerTermBaseCfg:
         in the :class:`SceneEntityCfg` object.
     """
 
-    task_group: str | None = None
-    """Task group name this term belongs to.
-
-    When set, the term is scoped to environments belonging to the named group declared in
-    :attr:`~isaaclab.scene.InteractiveSceneCfg.task_groups`.
-
-    The exact semantics depend on the manager:
-
-    * **Reward / Termination / Observation** — the function returns ``(group_envs, ...)`` and the manager
-      scatters the result into the full-sized buffer (non-group rows filled with zero / False).
-    * **Event** — the manager filters ``env_ids`` to group-local indices before calling the function.
-
-    **Auto-injection**: if the function signature accepts a ``task_group``
-    parameter, the value is automatically injected from this field —
-    there is no need to duplicate it in :attr:`params`.
-    """
-
 
 ##
 # Recorder manager.
@@ -134,18 +117,6 @@ class CommandTermCfg:
     """Time before commands are changed [s]."""
     debug_vis: bool = False
     """Whether to visualize debug information. Defaults to False."""
-
-    task_group: str | None = None
-    """Task group name this command term belongs to. Defaults to None.
-
-    When set, the command term is automatically scoped to the
-    environments belonging to the named group declared in
-    :attr:`~isaaclab.scene.InteractiveSceneCfg.task_groups`.
-
-    If ``None``, the term falls back to the layout key of the
-    referenced asset (resolved via ``asset_name``).  If the asset also
-    covers all environments, the command applies everywhere.
-    """
 
 
 ##

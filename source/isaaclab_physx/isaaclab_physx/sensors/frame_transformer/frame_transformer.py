@@ -281,7 +281,7 @@ class FrameTransformer(BaseFrameTransformer):
             ]
 
             # Only need one representative env as the names and their ordering are the same across environments.
-            # Use the lowest env index present (not necessarily env_0 when task_group restricts cloning).
+            # Use the lowest env index present (not necessarily env_0 when clone_cfg restricts cloning).
             first_env_id = extract_env_num_and_prim_path(all_prim_paths[self._per_env_indices[0]])[0]
             first_env_seg = f"/env_{first_env_id}/"
             sorted_prim_paths = [

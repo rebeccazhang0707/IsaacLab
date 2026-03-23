@@ -72,6 +72,17 @@ class SpawnerCfg:
     spawn_path: str | None = None
     """Path where the prototype is spawned. Defaults to None."""
 
+    spawn_idx_offset: int = 0
+    """Starting index for prototype numbering when spawn_path contains ``.*``.
+
+    When the spawn path uses a wildcard pattern (e.g., ``/World/template/prototype_.*``),
+    this offset is added to the index. For example, with offset=5, the pattern creates
+    ``prototype_5`` instead of ``prototype_0``.
+
+    This is managed by :class:`~isaaclab.scene.InteractiveScene` to ensure globally
+    unique prototype indices across all assets.
+    """
+
 
 @configclass
 class RigidObjectSpawnerCfg(SpawnerCfg):

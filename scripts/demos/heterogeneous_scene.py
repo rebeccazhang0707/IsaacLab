@@ -17,9 +17,9 @@ Three task groups split the environments evenly:
 * **franka_stack**   -- Franka   + three coloured cubes
 * **ur10_reach**     -- UR10     (no objects, pure reaching)
 
-Every robot, table, and object declares ``task_group`` so it only
-appears in its group's environments.  The simulation loop uses
-:class:`EnvLayout` to dispatch per-group resets and joint targets.
+The ``clone_cfg`` on the scene config declares which assets belong
+to each group.  The simulation loop uses :class:`EnvLayout` to
+dispatch per-group resets and joint targets.
 
 .. code-block:: bash
 
@@ -58,7 +58,7 @@ import warp as wp
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
-from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
+from isaaclab.scene import CloneCfg, InclusionSet, InteractiveScene, InteractiveSceneCfg
 from isaaclab.sim import SimulationContext
 from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import (
@@ -102,16 +102,21 @@ _BLOCKS_DIR = f"{ISAAC_NUCLEUS_DIR}/Props/Blocks"
 class MultiRobotSceneCfg(InteractiveSceneCfg):
     """Scene with three robot types, each in its own env group.
 
-    ``task_groups`` declares the partition.  Every per-group asset
-    sets ``task_group`` so it is only cloned into the matching
+    ``clone_cfg`` declares the partition.  Assets listed in each
+    :class:`InclusionSet` are only cloned into that group's
     environments.
     """
 
-    task_groups = {
-        TASK_OPENARM_LIFT: 1,
-        TASK_FRANKA_STACK: 1,
-        TASK_UR10_REACH: 1,
-    }
+    clone_cfg = CloneCfg(
+        clone_groups={
+            TASK_OPENARM_LIFT: InclusionSet(assets=["openarm_robot", "openarm_table", "openarm_cube"], weight=1),
+            TASK_FRANKA_STACK: InclusionSet(
+                assets=["franka_robot", "franka_table", "franka_cube_blue", "franka_cube_red", "franka_cube_green"],
+                weight=1,
+            ),
+            TASK_UR10_REACH: InclusionSet(assets=["ur10_robot", "ur10_table"], weight=1),
+        }
+    )
 
     # -- shared across ALL envs --------------------------------
     ground = AssetBaseCfg(
@@ -132,7 +137,6 @@ class MultiRobotSceneCfg(InteractiveSceneCfg):
     # -- Group 0: OpenArm + lift cube -------------------------
     openarm_robot = OPENARM_UNI_HIGH_PD_CFG.replace(
         prim_path="{ENV_REGEX_NS}/OpenArm_Robot",
-        task_group=TASK_OPENARM_LIFT,
     )
     openarm_table = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/OpenArm_Table",
@@ -141,7 +145,6 @@ class MultiRobotSceneCfg(InteractiveSceneCfg):
             rot=(0.0, 0.0, 0.707, 0.707),
         ),
         spawn=UsdFileCfg(usd_path=_TABLE_USD),
-        task_group=TASK_OPENARM_LIFT,
     )
     openarm_cube = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/OpenArm_Cube",
@@ -153,13 +156,11 @@ class MultiRobotSceneCfg(InteractiveSceneCfg):
             scale=(0.8, 0.8, 0.8),
             rigid_props=_CUBE_RIGID_PROPS,
         ),
-        task_group=TASK_OPENARM_LIFT,
     )
 
     # -- Group 1: Franka + three stacking cubes ----------------
     franka_robot = FRANKA_PANDA_HIGH_PD_CFG.replace(
         prim_path="{ENV_REGEX_NS}/Franka_Robot",
-        task_group=TASK_FRANKA_STACK,
     )
     franka_table = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Franka_Table",
@@ -168,7 +169,6 @@ class MultiRobotSceneCfg(InteractiveSceneCfg):
             rot=(0.0, 0.0, 0.707, 0.707),
         ),
         spawn=UsdFileCfg(usd_path=_TABLE_USD),
-        task_group=TASK_FRANKA_STACK,
     )
     franka_cube_blue = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Franka_CubeBlue",
@@ -179,7 +179,6 @@ class MultiRobotSceneCfg(InteractiveSceneCfg):
             usd_path=f"{_BLOCKS_DIR}/blue_block.usd",
             rigid_props=_CUBE_RIGID_PROPS,
         ),
-        task_group=TASK_FRANKA_STACK,
     )
     franka_cube_red = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Franka_CubeRed",
@@ -190,7 +189,6 @@ class MultiRobotSceneCfg(InteractiveSceneCfg):
             usd_path=f"{_BLOCKS_DIR}/red_block.usd",
             rigid_props=_CUBE_RIGID_PROPS,
         ),
-        task_group=TASK_FRANKA_STACK,
     )
     franka_cube_green = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Franka_CubeGreen",
@@ -201,13 +199,11 @@ class MultiRobotSceneCfg(InteractiveSceneCfg):
             usd_path=f"{_BLOCKS_DIR}/green_block.usd",
             rigid_props=_CUBE_RIGID_PROPS,
         ),
-        task_group=TASK_FRANKA_STACK,
     )
 
     # -- Group 2: UR10 (no objects) ----------------------------
     ur10_robot = UR10_CFG.replace(
         prim_path="{ENV_REGEX_NS}/UR10_Robot",
-        task_group=TASK_UR10_REACH,
     )
     ur10_table = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/UR10_Table",
@@ -216,7 +212,6 @@ class MultiRobotSceneCfg(InteractiveSceneCfg):
             rot=(0.0, 0.0, 0.707, 0.707),
         ),
         spawn=UsdFileCfg(usd_path=_TABLE_USD),
-        task_group=TASK_UR10_REACH,
     )
 
 

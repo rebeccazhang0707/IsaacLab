@@ -28,6 +28,7 @@ from isaaclab.assets import (
     RigidObjectCollection,
     RigidObjectCollectionCfg,
 )
+from isaaclab.cloner.cloner_utils import ClonePlanBuilder
 from isaaclab.physics.scene_data_requirements import resolve_scene_data_requirements
 from isaaclab.sensors import ContactSensorCfg, FrameTransformerCfg, SensorBase, SensorBaseCfg
 from isaaclab.sim import SimulationContext
@@ -39,7 +40,7 @@ from isaaclab.terrains import TerrainImporter, TerrainImporterCfg
 # It will be removed once the VisuoTactileSensor class is added to the core Isaac Lab framework.
 from isaaclab_contrib.sensors.tacsl_sensor import VisuoTactileSensorCfg
 
-from .env_layout import EnvLayout
+from .env_layout import EnvLayout, resolve_asset_env_ids
 from .interactive_scene_cfg import InteractiveSceneCfg
 
 # import logger
@@ -173,8 +174,9 @@ class InteractiveScene:
         # allocate env indices
         self._ALL_INDICES = torch.arange(self.cfg.num_envs, dtype=torch.long, device=self.device)
         self._layout = EnvLayout(self.cfg.num_envs, self.device)
-        if self.cfg.task_groups is not None:
-            self._layout.apply_task_groups(self.cfg.task_groups)
+        if self.cfg.clone_cfg is not None:
+            # Store clone_cfg but don't assign envs yet - strategy does that
+            self._layout.apply_clone_cfg(self.cfg.clone_cfg)
         self._default_env_origins, _ = cloner.grid_transforms(self.num_envs, self.cfg.env_spacing, device=self.device)
         # copy empty prim of env_0 to env_1, env_2, ..., env_{num_envs-1} with correct location.
         cloner.usd_replicate(
@@ -445,27 +447,28 @@ class InteractiveScene:
             env_ids: The indices of the environments to reset.
                 Defaults to None (all instances).
         """
-        layout = self._layout
+        env_ids_t = torch.as_tensor(env_ids, device=self.device) if env_ids is not None else None
+
         for name, articulation in self._articulations.items():
-            local = layout.resolve_asset_env_ids(name, env_ids)
+            local = resolve_asset_env_ids(self._layout, name, env_ids_t)
             if local is not None:
                 articulation.reset(local)
         for name, deformable_object in self._deformable_objects.items():
-            local = layout.resolve_asset_env_ids(name, env_ids)
+            local = resolve_asset_env_ids(self._layout, name, env_ids_t)
             if local is not None:
                 deformable_object.reset(local)
         for name, rigid_object in self._rigid_objects.items():
-            local = layout.resolve_asset_env_ids(name, env_ids)
+            local = resolve_asset_env_ids(self._layout, name, env_ids_t)
             if local is not None:
                 rigid_object.reset(local)
         for name, surface_gripper in self._surface_grippers.items():
-            local = layout.resolve_asset_env_ids(name, env_ids)
+            local = resolve_asset_env_ids(self._layout, name, env_ids_t)
             if local is not None:
                 surface_gripper.reset(local)
         for rigid_object_collection in self._rigid_object_collections.values():
             rigid_object_collection.reset(env_ids)
         for name, sensor in self._sensors.items():
-            local = layout.resolve_asset_env_ids(name, env_ids)
+            local = resolve_asset_env_ids(self._layout, name, env_ids_t)
             if local is not None:
                 sensor.reset(local)
 
@@ -663,14 +666,10 @@ class InteractiveScene:
     Operations: Iteration.
     """
 
-    def keys(self) -> list[str]:
-        """Returns the keys of the scene entities.
-
-        Returns:
-            The keys of the scene entities.
-        """
-        all_keys = ["terrain"]
-        for asset_family in [
+    @property
+    def _entity_dicts(self) -> tuple[dict, ...]:
+        """All entity dictionaries for iteration."""
+        return (
             self._articulations,
             self._deformable_objects,
             self._rigid_objects,
@@ -678,41 +677,23 @@ class InteractiveScene:
             self._sensors,
             self._surface_grippers,
             self._extras,
-        ]:
-            all_keys += list(asset_family.keys())
+        )
+
+    def keys(self) -> list[str]:
+        """Returns the keys of the scene entities."""
+        all_keys = ["terrain"]
+        for d in self._entity_dicts:
+            all_keys.extend(d.keys())
         return all_keys
 
     def __getitem__(self, key: str) -> Any:
-        """Returns the scene entity with the given key.
-
-        Args:
-            key: The key of the scene entity.
-
-        Returns:
-            The scene entity.
-        """
-        # check if it is a terrain
+        """Returns the scene entity with the given key."""
         if key == "terrain":
             return self._terrain
-
-        all_keys = ["terrain"]
-        # check if it is in other dictionaries
-        for asset_family in [
-            self._articulations,
-            self._deformable_objects,
-            self._rigid_objects,
-            self._rigid_object_collections,
-            self._sensors,
-            self._surface_grippers,
-            self._extras,
-        ]:
-            out = asset_family.get(key)
-            # if found, return
-            if out is not None:
-                return out
-            all_keys += list(asset_family.keys())
-        # if not found, raise error
-        raise KeyError(f"Scene entity with key '{key}' not found. Available Entities: '{all_keys}'")
+        for d in self._entity_dicts:
+            if key in d:
+                return d[key]
+        raise KeyError(f"Scene entity with key '{key}' not found. Available: {self.keys()}")
 
     """
     Internal methods.
@@ -733,103 +714,74 @@ class InteractiveScene:
         """Add scene entities from the config."""
         from isaaclab_physx.assets import DeformableObjectCfg, SurfaceGripperCfg  # noqa: PLC0415
 
+        from isaaclab.sim.spawners.wrappers import MultiAssetSpawnerCfg  # noqa: PLC0415
+
         # store paths that are in global collision filter
         self._global_prim_paths = list()
-        # per-asset env masks for selective cloning (populated below)
-        if self.cloner_cfg.asset_env_masks is None:
-            self.cloner_cfg.asset_env_masks = {}
-        # Process non-sensor entities before sensors so that asset prims exist in the template
-        # when sensors (e.g. cameras attached to robot links) need to spawn under them.
+        # Clone plan builder
+        self._plan_builder = ClonePlanBuilder(self.device)
+
+        env_regex = self.env_regex_ns.rstrip("/")
+        spawn_path_pattern = f"{self.cloner_cfg.template_root}/{self.cloner_cfg.template_prototype_identifier}_.*"
+
+        def configure_spawner(cfg, name: str, register_fn) -> None:
+            """Configure spawner's spawn_path and spawn_idx_offset."""
+            if not (hasattr(cfg, "spawn") and cfg.spawn is not None):
+                return
+            if not (hasattr(cfg, "prim_path") and self.env_ns in cfg.prim_path):
+                cfg.spawn.spawn_path = cfg.prim_path
+                return
+            dest_path = cfg.prim_path.split(env_regex + "/", 1)[-1]
+            num_variants = len(cfg.spawn.assets_cfg) if isinstance(cfg.spawn, MultiAssetSpawnerCfg) else 1
+            cfg.spawn.spawn_path = spawn_path_pattern
+            cfg.spawn.spawn_idx_offset = register_fn(name, dest_path, num_variants)
+
+        # All entities are processed uniformly - sensors and assets both get flat prototype slots
         all_items = [
             (k, v)
             for k, v in self.cfg.__dict__.items()
             if k not in InteractiveSceneCfg.__dataclass_fields__ and v is not None
         ]
-        ordered_items = [(k, v) for k, v in all_items if not isinstance(v, SensorBaseCfg)] + [
-            (k, v) for k, v in all_items if isinstance(v, SensorBaseCfg)
-        ]
 
-        for asset_name, asset_cfg in ordered_items:
+        for asset_name, asset_cfg in all_items:
             # Resolve old-style preset wrappers: configclass with a ``presets`` dict and a ``'default'`` key.
             # These are multi-backend selector objects (e.g. VelocityEnvContactSensorCfg) that hold several
             # alternative asset configs in a dict and are not themselves asset configs.
             if hasattr(asset_cfg, "presets") and isinstance(asset_cfg.presets, dict) and "default" in asset_cfg.presets:
                 asset_cfg = asset_cfg.presets["default"]
                 setattr(self.cfg, asset_name, asset_cfg)
-            # resolve task_group → env_ids for selective cloning
-            tg = getattr(asset_cfg, "task_group", None)
-            resolved_env_ids: list[int] | None = (
-                self._layout.resolve_task_group(asset_name, tg) if tg is not None else None
-            )
             # resolve prim_path with env regex
             if hasattr(asset_cfg, "prim_path"):
                 asset_cfg.prim_path = asset_cfg.prim_path.format(ENV_REGEX_NS=self.env_regex_ns)
-            # set spawn_path on spawner if cloning is needed
-            if hasattr(asset_cfg, "spawn") and asset_cfg.spawn is not None:
-                if hasattr(asset_cfg, "prim_path") and self.env_ns in asset_cfg.prim_path:
-                    template_base = asset_cfg.prim_path.replace(self.env_regex_ns, self.cloner_cfg.template_root)
-                    proto_id = self.cloner_cfg.template_prototype_identifier
-                    if isinstance(asset_cfg, SensorBaseCfg):
-                        # Sensor may be nested under a proto_asset_N prim (e.g. a camera on a robot
-                        # link). Search for the actual template location so spawning succeeds even
-                        # though the parent asset lives at template_root/<Asset>/proto_asset_0/...
-                        asset_cfg.spawn.spawn_path = self._resolve_sensor_template_spawn_path(template_base, proto_id)
-                    else:
-                        asset_cfg.spawn.spawn_path = f"{template_base}/{proto_id}_.*"
-                    if resolved_env_ids is not None:
-                        self.cloner_cfg.asset_env_masks[template_base] = list(resolved_env_ids)
-                else:
-                    # No cloning - spawn directly at prim_path
-                    asset_cfg.spawn.spawn_path = asset_cfg.prim_path
-            # create asset and wire layout reference
-            # When task_group is set, reuse the group key already registered
-            # by apply_task_groups() instead of duplicating the registration.
-            layout_key = tg if tg is not None else None
+            # configure spawner for cloning
+            configure_spawner(asset_cfg, asset_name, self._plan_builder.register)
             if isinstance(asset_cfg, TerrainImporterCfg):
                 # terrains are special entities since they define environment origins
                 asset_cfg.num_envs = self.cfg.num_envs
                 asset_cfg.env_spacing = self.cfg.env_spacing
                 self._terrain = asset_cfg.class_type(asset_cfg)
             elif isinstance(asset_cfg, ArticulationCfg):
-                asset = asset_cfg.class_type(asset_cfg)
-                if layout_key is not None:
-                    self._layout.register_asset(asset_name, layout_key)
-                self._articulations[asset_name] = asset
+                self._articulations[asset_name] = asset_cfg.class_type(asset_cfg)
             elif isinstance(asset_cfg, DeformableObjectCfg):
-                asset = asset_cfg.class_type(asset_cfg)
-                if layout_key is not None:
-                    self._layout.register_asset(asset_name, layout_key)
-                self._deformable_objects[asset_name] = asset
+                self._deformable_objects[asset_name] = asset_cfg.class_type(asset_cfg)
             elif isinstance(asset_cfg, RigidObjectCfg):
-                asset = asset_cfg.class_type(asset_cfg)
-                if layout_key is not None:
-                    self._layout.register_asset(asset_name, layout_key)
-                self._rigid_objects[asset_name] = asset
+                self._rigid_objects[asset_name] = asset_cfg.class_type(asset_cfg)
             elif isinstance(asset_cfg, RigidObjectCollectionCfg):
                 for rigid_object_cfg in asset_cfg.rigid_objects.values():
                     rigid_object_cfg.prim_path = rigid_object_cfg.prim_path.format(ENV_REGEX_NS=self.env_regex_ns)
-                    # set spawn_path on spawner if cloning is needed
-                    if hasattr(rigid_object_cfg, "spawn") and rigid_object_cfg.spawn is not None:
-                        if self.env_ns in rigid_object_cfg.prim_path:
-                            spawn_tmpl = rigid_object_cfg.prim_path.replace(
-                                self.env_regex_ns, self.cloner_cfg.template_root
-                            )
-                            proto_id = self.cloner_cfg.template_prototype_identifier
-                            rigid_object_cfg.spawn.spawn_path = f"{spawn_tmpl}/{proto_id}_.*"
-                        else:
-                            rigid_object_cfg.spawn.spawn_path = rigid_object_cfg.prim_path
+                    configure_spawner(
+                        rigid_object_cfg,
+                        asset_name,
+                        lambda n, d, v, an=asset_name: self._plan_builder.register_into_collection(an, d, v),
+                    )
                 self._rigid_object_collections[asset_name] = asset_cfg.class_type(asset_cfg)
                 for rigid_object_cfg in asset_cfg.rigid_objects.values():
                     if hasattr(rigid_object_cfg, "collision_group") and rigid_object_cfg.collision_group == -1:
                         asset_paths = sim_utils.find_matching_prim_paths(rigid_object_cfg.prim_path)
                         self._global_prim_paths += asset_paths
             elif isinstance(asset_cfg, SurfaceGripperCfg):
-                asset = asset_cfg.class_type(asset_cfg)
-                if layout_key is not None:
-                    self._layout.register_asset(asset_name, layout_key)
-                self._surface_grippers[asset_name] = asset
+                self._surface_grippers[asset_name] = asset_cfg.class_type(asset_cfg)
             elif isinstance(asset_cfg, SensorBaseCfg):
-                # Update target frame path(s)' regex name space for FrameTransformer
                 if isinstance(asset_cfg, FrameTransformerCfg):
                     updated_target_frames = []
                     for target_frame in asset_cfg.target_frames:
@@ -854,8 +806,6 @@ class InteractiveScene:
                         )
 
                 self._sensors[asset_name] = asset_cfg.class_type(asset_cfg)
-                if layout_key is not None:
-                    self._layout.register_asset(asset_name, layout_key)
             elif isinstance(asset_cfg, AssetBaseCfg):
                 # manually spawn asset
                 if asset_cfg.spawn is not None:
@@ -876,38 +826,9 @@ class InteractiveScene:
                 asset_paths = sim_utils.find_matching_prim_paths(asset_cfg.prim_path)
                 self._global_prim_paths += asset_paths
 
-    def _resolve_sensor_template_spawn_path(self, template_base: str, proto_id: str) -> str:
-        """Resolve the actual template spawn path for a sensor nested under a proto_asset prim.
-
-        Sensors parented to robot links live inside ``proto_asset_0`` rather than directly under
-        the template root.  For example, a wrist camera at
-        ``/World/template/Robot/panda_hand/wrist_cam`` is actually spawned at
-        ``/World/template/Robot/proto_asset_0/panda_hand/wrist_cam``.
-
-        This method inserts a ``proto_id_.*`` wildcard one level below the template root and
-        searches for the concrete parent prim so the camera spawner can find it.
-
-        Args:
-            template_base: Template path derived by replacing the env regex with the template root.
-                Example: ``/World/template/Robot/panda_hand/wrist_cam``.
-            proto_id: Prototype identifier prefix (e.g. ``proto_asset``).
-
-        Returns:
-            Concrete spawn path (e.g. ``/World/template/Robot/proto_asset_0/panda_hand/wrist_cam``)
-            if the parent is found, otherwise ``template_base/proto_id_.*`` as a fallback.
-        """
-        template_root = self.cloner_cfg.template_root
-        # rel = e.g. "Robot/panda_hand/wrist_cam"
-        rel = template_base[len(template_root) + 1 :]
-        # asset = "Robot", remainder = "panda_hand/wrist_cam"
-        asset, _, remainder = rel.partition("/")
-        if not remainder:
-            return f"{template_base}/{proto_id}_.*"
-
-        # parent = "panda_hand", leaf = "wrist_cam"
-        parent, _, leaf = remainder.rpartition("/")
-        search = (
-            f"{template_root}/{asset}/{proto_id}_.*/{parent}" if parent else f"{template_root}/{asset}/{proto_id}_.*"
+        # Finalize clone plan and apply layout assignment
+        group_assignment, group_names = self._plan_builder.finalize(
+            self.cloner_cfg, self.cfg.clone_cfg, self.cfg.num_envs
         )
-        found = sim_utils.find_matching_prim_paths(search)
-        return f"{found[0]}/{leaf}" if found else f"{template_base}/{proto_id}_.*"
+        if self.cfg.clone_cfg is not None:
+            self._layout.apply_assignment(group_assignment, group_names)

@@ -1,6 +1,30 @@
 Changelog
 ---------
 
+4.5.24 (2026-03-23)
+~~~~~~~~~~~~~~~~~~~
+
+Added
+^^^^^
+
+* Added :func:`~isaaclab.cloner.interleaved` clone strategy that assigns
+  environments to groups in an alternating (round-robin) pattern, cycling
+  through combos for each successive env ID.
+
+
+4.5.23 (2026-03-22)
+~~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Fixed heterogeneous clone planning to preserve clone-group partitions
+  prepared by :class:`~isaaclab.scene.InteractiveScene` instead of
+  reconstructing activity from flattened per-root masks. This keeps
+  :func:`~isaaclab.cloner.make_clone_plan` simple and avoids skewed
+  variant selection in partially active groups.
+
+
 4.5.22 (2026-03-16)
 ~~~~~~~~~~~~~~~~~~~
 

@@ -3,9 +3,15 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
+
 from dataclasses import MISSING
+from typing import TYPE_CHECKING
 
 from isaaclab.utils.configclass import configclass
+
+if TYPE_CHECKING:
+    from .clone_cfg import CloneCfg
 
 
 @configclass
@@ -125,17 +131,26 @@ class InteractiveSceneCfg:
 
     """
 
-    task_groups: dict[str, int] | None = None
-    """Named task groups with relative weights for heterogeneous multi-task scenes. Defaults to None.
+    clone_cfg: CloneCfg | None = None
+    """Clone configuration for flexible environment partitioning. Defaults to None.
 
-    When set, :class:`InteractiveScene` calls :func:`~isaaclab.scene.partition_env_ids` to
-    split ``num_envs`` across the declared groups and pre-registers every group in the
-    centralized :class:`~isaaclab.scene.EnvLayout`.  Assets and command terms can then
-    reference a group by setting ``task_group`` to one of the keys defined here.
+    When set, :class:`InteractiveScene` calls
+    :meth:`~isaaclab.scene.EnvLayout.apply_clone_cfg` to partition
+    ``num_envs`` across the declared groups and register assets to
+    their groups.  Assets referenced in
+    :attr:`~isaaclab.scene.InclusionSet.assets` are only cloned into
+    their groups' environments.
 
     Example::
 
-        task_groups = {"lift": 1, "stack": 1, "reach": 1}
-        # Splits 24 envs into 3 equal groups of 8.
+        from isaaclab.scene import CloneCfg, InclusionSet
+
+        clone_cfg = CloneCfg(
+            clone_groups={
+                "lift":    InclusionSet(assets=["table", "lift_obj"], weight=1),
+                "cabinet": InclusionSet(assets=["cabinet"], weight=1),
+                "reach":   InclusionSet(assets=["table"], weight=1),
+            }
+        )
 
     """

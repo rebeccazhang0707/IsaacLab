@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import itertools
 import logging
 import math
 from collections.abc import Callable
@@ -15,169 +14,237 @@ import torch
 
 from pxr import Gf, Sdf, Usd, UsdGeom, Vt
 
-import isaaclab.sim as sim_utils
 from isaaclab.physics.scene_data_requirements import SceneDataRequirement, VisualizerPrebuiltArtifacts
 
+from .cloner_cfg import TemplateClonePlan
+
 if TYPE_CHECKING:
+    from isaaclab.scene.clone_cfg import CloneCfg
+
     from .cloner_cfg import TemplateCloneCfg
 
 logger = logging.getLogger(__name__)
 
 
+class ClonePlanBuilder:
+    """Accumulates prototype metadata during scene spawning and builds TemplateClonePlan.
+
+    This class encapsulates all the state and logic needed to build a clone plan:
+    - Registering prototypes as assets are spawned
+    - Expanding partitions based on prototype variants
+    - Computing the vectorized group_mask
+    - Returning the final TemplateClonePlan
+
+    Example:
+        >>> builder = ClonePlanBuilder("cuda:0")
+        >>> # During asset spawning:
+        >>> start_idx = builder.register("robot", "Robot/", num_variants=1)
+        >>> start_idx = builder.register("object", "Object/", num_variants=3)
+        >>> # After spawning:
+        >>> group_assignment, group_names = builder.finalize(cloner_cfg, clone_cfg, num_envs=64)
+        >>> # cloner_cfg.clone_plan is now populated
+    """
+
+    def __init__(self, device: str):
+        """Initialize an empty builder.
+
+        Args:
+            device: Torch device for tensor allocation.
+        """
+        self._device = device
+        self._proto_mapping: dict[str, list[int]] = {}
+        self._dest_paths: list[str] = []
+        self._asset_names: list[str] = []
+        self._asset_num_variants: list[int] = []
+        self._proto_asset_idx: list[int] = []
+        self._proto_variant: list[int] = []
+        self._counter = 0
+
+    def _extend_protos(self, asset_idx: int, dest_path: str, num_variants: int, variant_start: int = 0) -> int:
+        """Extend prototype lists for an asset. Returns starting proto index."""
+        start = self._counter
+        self._dest_paths.extend([dest_path] * num_variants)
+        self._proto_asset_idx.extend([asset_idx] * num_variants)
+        self._proto_variant.extend(range(variant_start, variant_start + num_variants))
+        self._counter += num_variants
+        return start
+
+    def register(self, asset_name: str, dest_path: str, num_variants: int = 1) -> int:
+        """Register prototypes for an asset.
+
+        Args:
+            asset_name: Unique name for the asset.
+            dest_path: Destination path relative to environment root (e.g., "Robot/").
+            num_variants: Number of prototype variants for this asset.
+
+        Returns:
+            Starting prototype index for this asset.
+        """
+        asset_idx = len(self._asset_names)
+        self._asset_names.append(asset_name)
+        self._asset_num_variants.append(num_variants)
+        start = self._extend_protos(asset_idx, dest_path, num_variants)
+        self._proto_mapping[asset_name] = list(range(start, start + num_variants))
+        return start
+
+    def register_into_collection(self, collection_name: str, dest_path: str, num_variants: int = 1) -> int:
+        """Register prototypes into a named collection incrementally.
+
+        Used for RigidObjectCollection where each object registers separately.
+        Creates the collection on first call, extends it on subsequent calls.
+
+        Args:
+            collection_name: Unique name for the collection.
+            dest_path: Destination path relative to environment root.
+            num_variants: Number of prototype variants for this object.
+
+        Returns:
+            Starting prototype index for this object.
+        """
+        if collection_name not in self._proto_mapping:
+            return self.register(collection_name, dest_path, num_variants)
+
+        # Extend existing collection
+        asset_idx = self._asset_names.index(collection_name)
+        prev_variants = self._asset_num_variants[asset_idx]
+        self._asset_num_variants[asset_idx] += num_variants
+        start = self._extend_protos(asset_idx, dest_path, num_variants, prev_variants)
+        self._proto_mapping[collection_name].extend(range(start, start + num_variants))
+        return start
+
+    @property
+    def proto_count(self) -> int:
+        """Total number of registered prototypes."""
+        return self._counter
+
+    @property
+    def proto_mapping(self) -> dict[str, list[int]]:
+        """Mapping from asset name to prototype indices."""
+        return self._proto_mapping
+
+    @property
+    def dest_paths(self) -> list[str]:
+        """Destination paths for all prototypes."""
+        return self._dest_paths
+
+    def finalize(
+        self, cloner_cfg: TemplateCloneCfg, clone_cfg: CloneCfg | None, num_envs: int
+    ) -> tuple[torch.Tensor, tuple[str, ...]]:
+        """Finalize the clone plan and populate the cloner config.
+
+        Args:
+            cloner_cfg: The cloner config to populate with the built plan.
+            clone_cfg: Clone configuration specifying groups and strategy, or None for homogeneous.
+            num_envs: Number of environments to clone.
+
+        Returns:
+            Tuple of (group_assignment, group_names):
+            - group_assignment: Per-env group index tensor [num_envs]
+            - group_names: Ordered tuple of group names
+        """
+        n_protos, dev = self._counter, self._device
+        pid = cloner_cfg.template_prototype_identifier
+        proto_paths = tuple(f"{cloner_cfg.template_root}/{pid}_{i}" for i in range(n_protos))
+        dest_paths = tuple(self._dest_paths)
+
+        # Homogeneous case
+        if clone_cfg is None or n_protos == 0:
+            zeros = torch.zeros(num_envs, dtype=torch.long, device=dev)
+            homogeneous_mask = torch.ones((1, n_protos), dtype=torch.bool, device=dev)
+            cloner_cfg.clone_plan = TemplateClonePlan(proto_paths, dest_paths, zeros, homogeneous_mask)
+            return zeros, ()
+
+        # Build asset membership and max variants per group
+        groups = clone_cfg.clone_groups
+        group_names = tuple(groups.keys())
+        n_groups, n_assets = len(group_names), len(self._asset_names)
+        asset_idx = {name: i for i, name in enumerate(self._asset_names)}
+        asset_in_groups = torch.zeros((n_assets, n_groups), dtype=torch.bool, device=dev)
+        max_vars, weights = [], []
+        for g, (name, inc) in enumerate(groups.items()):
+            weights.append(inc.weight)
+            mv = 1
+            for a in inc.assets:
+                if a in asset_idx:
+                    asset_in_groups[asset_idx[a], g] = True
+                    mv = max(mv, self._asset_num_variants[asset_idx[a]])
+            max_vars.append(mv)
+
+        # Partition expansion and strategy
+        part_var = torch.cat([torch.arange(m, device=dev) for m in max_vars])
+        max_vars = torch.tensor(max_vars, dtype=torch.long, device=dev)
+        weights = torch.tensor(weights, dtype=torch.float32, device=dev)
+        part_group = torch.repeat_interleave(torch.arange(n_groups, device=dev), max_vars)
+        assignment = clone_cfg.clone_strategy(torch.repeat_interleave(weights / max_vars, max_vars), num_envs, dev)
+
+        # Group mask computation
+        proto_asset = torch.tensor(self._proto_asset_idx, dtype=torch.long, device=dev)
+        proto_var = torch.tensor(self._proto_variant, dtype=torch.long, device=dev)
+        asset_vars = torch.tensor(self._asset_num_variants, dtype=torch.long, device=dev)
+        proto_grp = asset_in_groups[proto_asset]
+        is_global = ~proto_grp.any(dim=1)
+        grp_match = proto_grp[:, part_group].T
+        var_match = proto_var == (part_var.unsqueeze(1) % asset_vars[proto_asset])
+        mask = is_global | (grp_match & var_match)
+
+        cloner_cfg.clone_plan = TemplateClonePlan(proto_paths, dest_paths, assignment, mask)
+        return part_group[assignment], group_names
+
+
 def clone_from_template(stage: Usd.Stage, num_clones: int, template_clone_cfg: TemplateCloneCfg) -> None:
     """Clone assets from a template root into per-environment destinations.
 
-    This utility discovers prototype prims under ``cfg.template_root`` whose names start with
-    ``cfg.template_prototype_identifier``, builds a per-prototype mapping across
-    ``num_clones`` environments (random or modulo), and then performs USD and/or PhysX replication
-    according to the flags in ``cfg``.
-
-    When :attr:`~TemplateCloneCfg.asset_env_masks` is set, assets are only
-    cloned to their assigned environments, enabling heterogeneous multi-task
-    scenes where different subsets of environments contain different objects.
+    Uses the flat prototype structure where each prototype is at
+    ``/World/template/prototype_N``. The clone plan's ``group_mask`` directly
+    specifies which prototypes to clone for each partition, and ``dest_paths``
+    specifies where each prototype should be placed in the cloned environments.
 
     Args:
         stage: The USD stage to author into.
-        num_clones: Number of environments to clone to (typically equals ``cfg.num_clones``).
+        num_clones: Number of environments to clone to.
         template_clone_cfg: Configuration describing template location, destination pattern,
             and replication/mapping behavior.
     """
     cfg: TemplateCloneCfg = template_clone_cfg
+    clone_plan = cfg.clone_plan
     world_indices = torch.arange(num_clones, device=cfg.device)
     clone_path_fmt = cfg.clone_regex.replace(".*", "{}")
-    prototype_id = cfg.template_prototype_identifier
-    prototypes = sim_utils.get_all_matching_child_prims(
-        cfg.template_root,
-        predicate=lambda prim: str(prim.GetPath()).split("/")[-1].startswith(prototype_id),
-    )
-    if len(prototypes) > 0:
-        prototype_root_set = {"/".join(str(prototype.GetPath()).split("/")[:-1]) for prototype in prototypes}
-        # discover prototypes per root then make a clone plan
-        src: list[list[str]] = []
-        dest: list[str] = []
 
-        for prototype_root in prototype_root_set:
-            protos = sim_utils.find_matching_prim_paths(f"{prototype_root}/.*")
-            protos = [proto for proto in protos if proto.split("/")[-1].startswith(prototype_id)]
-            src.append(protos)
-            dest.append(prototype_root.replace(cfg.template_root, clone_path_fmt))
+    # Build destination paths using the plan's dest_paths (relative to env)
+    src_paths = list(clone_plan.prototype_paths)
+    dest_paths = [f"{clone_path_fmt}/{dp}" for dp in clone_plan.dest_paths]
 
-        src_paths, dest_paths, clone_masking = make_clone_plan(src, dest, num_clones, cfg.clone_strategy, cfg.device)
+    # group_mask[partition_assignment] -> [num_envs, num_protos], transpose to [num_protos, num_envs]
+    clone_masking = clone_plan.group_mask[clone_plan.partition_assignment].T
 
-        # Apply per-asset env masks to restrict which envs each asset is cloned to.
-        asset_env_masks = cfg.asset_env_masks
-        has_partial_cloning = bool(asset_env_masks)
-        if has_partial_cloning and asset_env_masks is not None:
-            _apply_asset_env_masks(src_paths, clone_masking, asset_env_masks, num_clones)
+    is_homogeneous = clone_plan.group_mask.shape[0] == 1 and bool(clone_plan.group_mask.all().item())
 
-        # Spawn the first instance of clones from prototypes, then deactivate the prototypes, those first instances
-        # will be served as sources for usd and physics replication.
-        proto_idx = clone_masking.to(torch.int32).argmax(dim=1)
-        proto_mask = torch.zeros_like(clone_masking)
-        proto_mask.scatter_(1, proto_idx.view(-1, 1).to(torch.long), clone_masking.any(dim=1, keepdim=True))
-        usd_replicate(stage, src_paths, dest_paths, world_indices, proto_mask)
-        stage.GetPrimAtPath(cfg.template_root).SetActive(False)
-        get_pos = lambda path: stage.GetPrimAtPath(path).GetAttribute("xformOp:translate").Get()  # noqa: E731
-        positions = torch.tensor([get_pos(clone_path_fmt.format(i)) for i in world_indices])
-        # If all prototypes map to env_0 and no partial cloning, clone whole env_0 to all envs;
-        # otherwise clone per-object to respect per-asset env masks.
-        if torch.all(proto_idx == 0) and not has_partial_cloning:
-            mapping = clone_masking.new_ones(1, num_clones)
-            replicate_args = [clone_path_fmt.format(0)], [clone_path_fmt], world_indices, mapping
-            if cfg.clone_physics and cfg.physics_clone_fn is not None:
-                cfg.physics_clone_fn(stage, *replicate_args, positions=positions, device=cfg.device)
-            if cfg.visualizer_clone_fn is not None:
-                cfg.visualizer_clone_fn(stage, *replicate_args, positions=positions, device=cfg.device)
-            if cfg.clone_usd:
-                # parse env_origins directly from clone_path
-                usd_replicate(stage, *replicate_args, positions=positions)
+    # Spawn the first instance of clones from prototypes, then deactivate the prototypes
+    proto_idx_per_src = clone_masking.to(torch.int32).argmax(dim=1)
+    proto_mask = torch.zeros_like(clone_masking)
+    proto_mask.scatter_(1, proto_idx_per_src.view(-1, 1).to(torch.long), clone_masking.any(dim=1, keepdim=True))
+    usd_replicate(stage, src_paths, dest_paths, world_indices, proto_mask)
+    stage.GetPrimAtPath(cfg.template_root).SetActive(False)
+    get_pos = lambda path: stage.GetPrimAtPath(path).GetAttribute("xformOp:translate").Get()  # noqa: E731
+    positions = torch.tensor([get_pos(clone_path_fmt.format(i)) for i in world_indices])
 
-        else:
-            selected_src = [tpl.format(int(idx)) for tpl, idx in zip(dest_paths, proto_idx.tolist())]
-            replicate_args = selected_src, dest_paths, world_indices, clone_masking
-            if cfg.clone_physics and cfg.physics_clone_fn is not None:
-                cfg.physics_clone_fn(stage, *replicate_args, positions=positions, device=cfg.device)
-            if cfg.visualizer_clone_fn is not None:
-                cfg.visualizer_clone_fn(stage, *replicate_args, positions=positions, device=cfg.device)
-            if cfg.clone_usd:
-                usd_replicate(stage, *replicate_args)
+    # If all prototypes map to env_0 and the plan is homogeneous,
+    # clone whole env_0 to all envs; otherwise clone per-object
+    if torch.all(proto_idx_per_src == 0) and is_homogeneous:
+        mapping = clone_masking.new_ones(1, num_clones)
+        replicate_args = [clone_path_fmt.format(0)], [clone_path_fmt], world_indices, mapping
+        usd_positions = positions
+    else:
+        selected_src = [tpl.format(int(idx)) for tpl, idx in zip(dest_paths, proto_idx_per_src.tolist())]
+        replicate_args = selected_src, dest_paths, world_indices, clone_masking
+        usd_positions = None
 
-
-def _apply_asset_env_masks(
-    src_paths: list[str],
-    clone_masking: torch.Tensor,
-    asset_env_masks: dict[str, list[int]],
-    num_clones: int,
-) -> None:
-    """Zero out ``clone_masking`` columns for envs excluded by per-asset masks.
-
-    For each row in *clone_masking* whose prototype root matches an entry in
-    *asset_env_masks*, only the listed environment columns are kept; all others
-    are set to ``False``.  Rows whose prototype root has no entry are left
-    untouched (cloned to all envs).
-
-    Args:
-        src_paths: Flattened prototype prim paths (one per masking row).
-        clone_masking: Boolean tensor ``[num_src, num_clones]`` modified **in-place**.
-        asset_env_masks: Maps template asset path to list of target env indices.
-        num_clones: Total number of environments.
-    """
-    for row_idx, src_path in enumerate(src_paths):
-        proto_root = "/".join(src_path.split("/")[:-1])
-        if proto_root in asset_env_masks:
-            allowed = asset_env_masks[proto_root]
-            env_filter = torch.zeros(num_clones, dtype=torch.bool, device=clone_masking.device)
-            env_filter[torch.tensor(allowed, dtype=torch.long, device=clone_masking.device)] = True
-            clone_masking[row_idx] &= env_filter
-
-
-def make_clone_plan(
-    sources: list[list[str]],
-    destinations: list[str],
-    num_clones: int,
-    clone_strategy: callable,
-    device: str = "cpu",
-) -> tuple[list[str], list[str], torch.Tensor]:
-    """Construct a cloning plan mapping prototype prims to per-environment destinations.
-
-    The plan enumerates all combinations of prototypes, selects a combination per environment using ``clone_strategy``,
-    and builds a boolean masking matrix indicating which prototype populates each environment slot.
-
-    Args:
-        sources: Prototype prim paths grouped by asset type (e.g., [[robot_a, robot_b], [obj_x]]).
-        destinations: Destination path templates (one per group) with ``"{}"`` placeholder for env id.
-        num_clones: Number of environments to populate.
-        clone_strategy: Function that picks a prototype combo per environment; signature
-            ``clone_strategy(combos: Tensor, num_clones: int, device: str) -> Tensor[num_clones, num_groups]``.
-        device: Torch device for tensors in the plan. Defaults to ``"cpu"``.
-
-    Returns:
-        tuple: ``(src, dest, masking)`` where ``src`` and ``dest`` are flattened lists of prototype and
-            destination paths, and ``masking`` is a ``[num_src, num_clones]`` boolean tensor with True
-            when source ``src[i]`` is used for clone ``j``.
-    """
-    # 1) Flatten into src and dest lists
-    src = [p for group in sources for p in group]
-    dest = [dst for dst, group in zip(destinations, sources) for _ in group]
-    group_sizes = [len(group) for group in sources]
-
-    # 2) Enumerate all combinations of "one prototype per group"
-    #    all_combos: list of tuples (g0_idx, g1_idx, ..., g_{G-1}_idx)
-    all_combos = list(itertools.product(*[range(s) for s in group_sizes]))
-    combos = torch.tensor(all_combos, dtype=torch.long, device=device)
-
-    # 3) Assign a combination to each environment
-    chosen = clone_strategy(combos, num_clones, device)
-
-    # 4) Build masking: [num_src, num_clones] boolean
-    #    For each env, for each group, mark exactly one prototype row as True.
-    group_offsets = torch.tensor([0] + list(itertools.accumulate(group_sizes[:-1])), dtype=torch.long, device=device)
-    rows = (chosen + group_offsets).view(-1)
-    cols = torch.arange(num_clones, device=device).view(-1, 1).expand(-1, len(group_sizes)).reshape(-1)
-
-    masking = torch.zeros((sum(group_sizes), num_clones), dtype=torch.bool, device=device)
-    masking[rows, cols] = True
-    return src, dest, masking
+    if cfg.clone_physics and cfg.physics_clone_fn is not None:
+        cfg.physics_clone_fn(stage, *replicate_args, positions=positions, device=cfg.device)
+    if cfg.visualizer_clone_fn is not None:
+        cfg.visualizer_clone_fn(stage, *replicate_args, positions=positions, device=cfg.device)
+    if cfg.clone_usd:
+        usd_replicate(stage, *replicate_args, positions=usd_positions)
 
 
 def usd_replicate(

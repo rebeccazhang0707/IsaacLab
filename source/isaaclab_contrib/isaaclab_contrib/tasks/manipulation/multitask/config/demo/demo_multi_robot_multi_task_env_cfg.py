@@ -13,8 +13,7 @@ disjoint groups.
 
 All MDP terms use **explicit batched classes** that iterate
 ``robot_meta`` (keyed by task-group name) and fill their output
-tensors via ``layout.env_slice(group_key)``.  No ``task_group``
-scoping is used on any term config.
+tensors via ``layout.env_slice(group_key)``.
 
 Layout (3 groups, evenly split):
     Group 0:  OpenArm  -- Lift cube
@@ -43,7 +42,7 @@ from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.markers.config import FRAME_MARKER_CFG
-from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.scene import CloneCfg, InclusionSet, InteractiveSceneCfg
 from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
@@ -52,7 +51,12 @@ from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from isaaclab_contrib.tasks.manipulation.multitask import mdp
-from isaaclab_contrib.tasks.manipulation.multitask.mdp.utils import CabinetGroupCfg, LiftGroupCfg, ReachGroupCfg
+from isaaclab_contrib.tasks.manipulation.multitask.mdp.utils import (
+    CabinetGroupCfg,
+    LiftGroupCfg,
+    PoseCommandRanges,
+    ReachGroupCfg,
+)
 
 from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG
 from isaaclab_assets.robots.openarm import OPENARM_UNI_HIGH_PD_CFG
@@ -67,6 +71,52 @@ from .demo_multi_robot_reach_env_cfg import MultitaskPhysicsCfg
 TASK_OPENARM_LIFT = "openarm_lift"
 TASK_FRANKA_CABINET = "franka_cabinet"
 TASK_UR10_REACH = "ur10_reach"
+
+# Robot metadata - defined at module level so term configs can reference it.
+# SceneEntityCfg instances are auto-resolved when passed via term params.
+ROBOT_META = {
+    TASK_OPENARM_LIFT: LiftGroupCfg(
+        asset_cfg=SceneEntityCfg(
+            "openarm_robot",
+            body_names=["openarm_hand"],
+            joint_names=["openarm_joint.*", "openarm_finger_joint.*"],
+        ),
+        command_name="ee_pose",
+        command_ranges=PoseCommandRanges(
+            pos_x=(0.2, 0.4),
+            pos_y=(-0.2, 0.2),
+            pos_z=(0.15, 0.4),
+            roll=(-math.pi / 6, math.pi / 6),
+            pitch=(math.pi / 2, math.pi / 2),
+            yaw=(-math.pi / 9, math.pi / 9),
+        ),
+        robot_cfg=SceneEntityCfg("openarm_robot"),
+        object_cfg=SceneEntityCfg("openarm_object"),
+        ee_frame_cfg=SceneEntityCfg("openarm_ee_frame"),
+    ),
+    TASK_FRANKA_CABINET: CabinetGroupCfg(
+        asset_cfg=SceneEntityCfg(
+            "franka_robot",
+            body_names=["panda_hand"],
+            joint_names=["panda_joint.*", "panda_finger.*"],
+        ),
+        ee_frame_cfg=SceneEntityCfg("franka_ee_frame"),
+        cabinet_frame_cfg=SceneEntityCfg("cabinet_frame"),
+        cabinet_asset_cfg=SceneEntityCfg("cabinet", joint_names=["drawer_top_joint"]),
+    ),
+    TASK_UR10_REACH: ReachGroupCfg(
+        asset_cfg=SceneEntityCfg("ur10_robot", body_names=["ee_link"], joint_names=[".*"]),
+        command_name="ee_pose",
+        command_ranges=PoseCommandRanges(
+            pos_x=(0.35, 0.65),
+            pos_y=(-0.2, 0.2),
+            pos_z=(0.15, 0.5),
+            roll=(0.0, 0.0),
+            pitch=(math.pi / 2, math.pi / 2),
+            yaw=(-3.14, 3.14),
+        ),
+    ),
+}
 
 _TABLE_SPAWN = UsdFileCfg(
     usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/SeattleLabTable/table_instanceable.usd",
@@ -113,11 +163,17 @@ _IK_CTRL = DifferentialIKControllerCfg(
 class MultiRobotMultiTaskSceneCfg(InteractiveSceneCfg):
     """Three robot types, each performing a different task."""
 
-    task_groups = {
-        TASK_OPENARM_LIFT: 1,
-        TASK_FRANKA_CABINET: 1,
-        TASK_UR10_REACH: 1,
-    }
+    clone_cfg = CloneCfg(
+        clone_groups={
+            TASK_OPENARM_LIFT: InclusionSet(
+                assets=["openarm_table", "openarm_robot", "openarm_object", "openarm_ee_frame"], weight=1
+            ),
+            TASK_FRANKA_CABINET: InclusionSet(
+                assets=["franka_robot", "cabinet", "franka_ee_frame", "cabinet_frame"], weight=1
+            ),
+            TASK_UR10_REACH: InclusionSet(assets=["ur10_table", "ur10_robot"], weight=1),
+        }
+    )
 
     plane = AssetBaseCfg(
         prim_path="/World/GroundPlane",
@@ -134,17 +190,14 @@ class MultiRobotMultiTaskSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/OpenArmTable",
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.5, 0.0, 0.0), rot=(0.0, 0.0, 0.707, 0.707)),
         spawn=_TABLE_SPAWN,
-        task_group=TASK_OPENARM_LIFT,
     )
     openarm_robot = OPENARM_UNI_HIGH_PD_CFG.replace(
         prim_path="{ENV_REGEX_NS}/OpenArm_Robot",
-        task_group=TASK_OPENARM_LIFT,
     )
     openarm_object = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/OpenArm_Object",
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.4, 0.0, 0.055), rot=(0.0, 0.0, 0.0, 1.0)),
         spawn=_CUBE_SPAWN,
-        task_group=TASK_OPENARM_LIFT,
     )
     openarm_ee_frame = FrameTransformerCfg(
         prim_path="{ENV_REGEX_NS}/OpenArm_Robot/openarm_link0",
@@ -156,13 +209,11 @@ class MultiRobotMultiTaskSceneCfg(InteractiveSceneCfg):
                 name="end_effector",
             ),
         ],
-        task_group=TASK_OPENARM_LIFT,
     )
 
     # ── Franka Cabinet ───────────────────────────────────────
     franka_robot = FRANKA_PANDA_HIGH_PD_CFG.replace(
         prim_path="{ENV_REGEX_NS}/Franka_Robot",
-        task_group=TASK_FRANKA_CABINET,
     )
     cabinet = ArticulationCfg(
         prim_path="{ENV_REGEX_NS}/Cabinet",
@@ -194,7 +245,6 @@ class MultiRobotMultiTaskSceneCfg(InteractiveSceneCfg):
                 damping=2.5,
             ),
         },
-        task_group=TASK_FRANKA_CABINET,
     )
     franka_ee_frame = FrameTransformerCfg(
         prim_path="{ENV_REGEX_NS}/Franka_Robot/panda_link0",
@@ -217,7 +267,6 @@ class MultiRobotMultiTaskSceneCfg(InteractiveSceneCfg):
                 offset=OffsetCfg(pos=(0.0, 0.0, 0.046)),
             ),
         ],
-        task_group=TASK_FRANKA_CABINET,
     )
     cabinet_frame = FrameTransformerCfg(
         prim_path="{ENV_REGEX_NS}/Cabinet/sektion",
@@ -233,7 +282,6 @@ class MultiRobotMultiTaskSceneCfg(InteractiveSceneCfg):
                 ),
             ),
         ],
-        task_group=TASK_FRANKA_CABINET,
     )
 
     # ── UR10 Reach ───────────────────────────────────────────
@@ -241,11 +289,9 @@ class MultiRobotMultiTaskSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/UR10Table",
         init_state=AssetBaseCfg.InitialStateCfg(pos=(0.5, 0.0, 0.0), rot=(0.0, 0.0, 0.707, 0.707)),
         spawn=_TABLE_SPAWN,
-        task_group=TASK_UR10_REACH,
     )
     ur10_robot = UR10_CFG.replace(
         prim_path="{ENV_REGEX_NS}/UR10_Robot",
-        task_group=TASK_UR10_REACH,
     )
 
 
@@ -306,41 +352,16 @@ class MultiRobotMultiTaskActionsCfg:
 
 @configclass
 class MultiRobotMultiTaskCommandsCfg:
-    """Task-specific commands for lift and reach groups.
+    """Single batched pose command — per-group ranges live in ``robot_meta``.
 
-    The cabinet task does not use a pose command -- the goal is
+    The cabinet task does not use a pose command — the goal is
     defined by the drawer joint position.
     """
 
-    openarm_object_pose = mdp.UniformPoseCommandCfg(
-        asset_name="openarm_robot",
-        body_name="openarm_hand",
-        task_group=TASK_OPENARM_LIFT,
+    ee_pose = mdp.BatchedPoseCommandCfg(
         resampling_time_range=(5.0, 5.0),
         debug_vis=False,
-        ranges=mdp.UniformPoseCommandCfg.Ranges(
-            pos_x=(0.2, 0.4),
-            pos_y=(-0.2, 0.2),
-            pos_z=(0.15, 0.4),
-            roll=(-math.pi / 6, math.pi / 6),
-            pitch=(math.pi / 2, math.pi / 2),
-            yaw=(-math.pi / 9, math.pi / 9),
-        ),
-    )
-    ur10_ee_pose = mdp.UniformPoseCommandCfg(
-        asset_name="ur10_robot",
-        body_name="ee_link",
-        task_group=TASK_UR10_REACH,
-        resampling_time_range=(5.0, 5.0),
-        debug_vis=True,
-        ranges=mdp.UniformPoseCommandCfg.Ranges(
-            pos_x=(0.35, 0.65),
-            pos_y=(-0.2, 0.2),
-            pos_z=(0.15, 0.5),
-            roll=(0.0, 0.0),
-            pitch=(math.pi / 2, math.pi / 2),
-            yaw=(-3.14, 3.14),
-        ),
+        robot_meta=ROBOT_META,
     )
 
 
@@ -509,32 +530,35 @@ class MultiRobotMultiTaskTerminationsCfg:
 
 @configclass
 class MultiRobotMultiTaskEventsCfg:
-    """Reset events for the multi-robot multi-task layout."""
+    """Reset events for heterogeneous multi-robot layout.
+
+    Uses batched terms that handle dual-indexing (global for env_origins,
+    local for asset data).
+    """
 
     reset_to_default = EventTerm(
         func=mdp.batched_reset_to_default,
         mode="reset",
-        params={"reset_joint_targets": True},
+        params={"robot_meta": ROBOT_META, "reset_joint_targets": True},
     )
     reset_joints = EventTerm(
-        func=mdp.batched_reset_joints_by_scale,
+        func=mdp.batched_reset_joints,
         mode="reset",
-        params={
-            "position_range": (0.5, 1.25),
-            "velocity_range": (0.0, 0.0),
-        },
+        params={"robot_meta": ROBOT_META, "position_range": (0.5, 1.25), "velocity_range": (0.0, 0.0)},
     )
-    reset_openarm_object = EventTerm(
-        func=mdp.batched_reset_object_state_uniform,
+    reset_object = EventTerm(
+        func=mdp.batched_reset_object_uniform,
         mode="reset",
         params={
+            "robot_meta": ROBOT_META,
             "pose_range": {"x": (-0.1, 0.1), "y": (-0.25, 0.25), "z": (0.0, 0.0)},
             "velocity_range": {},
         },
     )
     reset_cabinet = EventTerm(
-        func=mdp.batched_reset_cabinet_to_default,
+        func=mdp.batched_reset_cabinet,
         mode="reset",
+        params={"robot_meta": ROBOT_META},
     )
 
 
@@ -580,36 +604,8 @@ class MultiRobotMultiTaskEnvCfg(ManagerBasedRLEnvCfg):
     scene: MultiRobotMultiTaskSceneCfg = MultiRobotMultiTaskSceneCfg(
         num_envs=4096,
         env_spacing=2.5,
-        replicate_physics=False,
+        replicate_physics=True,
     )
-
-    robot_meta = {
-        TASK_OPENARM_LIFT: LiftGroupCfg(
-            asset_cfg=SceneEntityCfg(
-                "openarm_robot",
-                body_names=["openarm_hand"],
-                joint_names=["openarm_joint.*", "openarm_finger_joint.*"],
-            ),
-            command_name="openarm_object_pose",
-            robot_cfg=SceneEntityCfg("openarm_robot"),
-            object_cfg=SceneEntityCfg("openarm_object"),
-            ee_frame_cfg=SceneEntityCfg("openarm_ee_frame"),
-        ),
-        TASK_FRANKA_CABINET: CabinetGroupCfg(
-            asset_cfg=SceneEntityCfg(
-                "franka_robot",
-                body_names=["panda_hand"],
-                joint_names=["panda_joint.*", "panda_finger.*"],
-            ),
-            ee_frame_cfg=SceneEntityCfg("franka_ee_frame"),
-            cabinet_frame_cfg=SceneEntityCfg("cabinet_frame"),
-            cabinet_asset_cfg=SceneEntityCfg("cabinet", joint_names=["drawer_top_joint"]),
-        ),
-        TASK_UR10_REACH: ReachGroupCfg(
-            asset_cfg=SceneEntityCfg("ur10_robot", body_names=["ee_link"], joint_names=[".*"]),
-            command_name="ur10_ee_pose",
-        ),
-    }
 
     actions: MultiRobotMultiTaskActionsCfg = MultiRobotMultiTaskActionsCfg()
     commands: MultiRobotMultiTaskCommandsCfg = MultiRobotMultiTaskCommandsCfg()

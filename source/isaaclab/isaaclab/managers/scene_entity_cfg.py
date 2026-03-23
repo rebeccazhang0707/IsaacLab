@@ -115,6 +115,9 @@ class SceneEntityCfg:
 
     """
 
+    _resolved: bool = False
+    """Internal flag to prevent double resolution."""
+
     def resolve(self, scene: InteractiveScene):
         """Resolves the scene entity and converts the joint and body names to indices.
 
@@ -133,6 +136,11 @@ class SceneEntityCfg:
             ValueError: If both ``object_collection_names`` and ``object_collection_ids`` are specified and
                 are not consistent.
         """
+        # idempotency guard: skip if already resolved
+        if self._resolved:
+            return
+        self._resolved = True
+
         # check if the entity is valid
         if self.name not in scene.keys():
             raise ValueError(f"The scene entity '{self.name}' does not exist. Available entities: {scene.keys()}.")

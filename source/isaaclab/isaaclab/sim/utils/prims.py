@@ -678,12 +678,13 @@ def clone(func: Callable) -> Callable:
         #       Sdf.CopySpec it to every remaining parent so every parent ends up with
         #       the child prim.
         #
-        #   (B) ".*" in asset_path only  e.g. /World/template/Object/proto_asset_.*
+        #   (B) ".*" in asset_path only  e.g. /World/template/prototype_.*
         #       No matching prims exist yet; source_prim_paths == [root_path] (one entry).
-        #       Replacing ".*" → "0" in asset_path gives the intended name proto_asset_0.
+        #       Replacing ".*" with the spawn_idx_offset gives the intended name.
         #       No copy step runs because there is only one parent.
         #
-        prim_spawn_path = f"{source_prim_paths[0]}/{asset_path.replace('.*', '0')}"
+        idx_offset = getattr(cfg, "spawn_idx_offset", 0)
+        prim_spawn_path = f"{source_prim_paths[0]}/{asset_path.replace('.*', str(idx_offset))}"
         # spawn single instance
         prim = func(prim_spawn_path, cfg, *args, **kwargs)
         # set the prim visibility
@@ -710,7 +711,7 @@ def clone(func: Callable) -> Callable:
             _schemas.activate_contact_sensors(prim_spawn_path)
         # clone asset using cloner API
         if len(source_prim_paths) > 1:
-            sanitized_asset = asset_path.replace(".*", "0")
+            sanitized_asset = asset_path.replace(".*", str(idx_offset))
             rl = stage.GetRootLayer()
             with Sdf.ChangeBlock():
                 for src_parent in source_prim_paths[1:]:

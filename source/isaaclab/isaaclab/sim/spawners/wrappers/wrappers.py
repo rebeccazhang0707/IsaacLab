@@ -59,6 +59,7 @@ def spawn_multi_asset(
             "Use `isaaclab.scene.interactive_scene_cfg.InteractiveSceneCfg.random_heterogeneous_cloning` instead."
         )
 
+    idx_offset = getattr(cfg, "spawn_idx_offset", 0)
     proto_prim_paths = list()
     for index, asset_cfg in enumerate(cfg.assets_cfg):
         # append semantic tags if specified
@@ -74,7 +75,7 @@ def spawn_multi_asset(
             if hasattr(asset_cfg, attr_name) and attr_value is not None:
                 setattr(asset_cfg, attr_name, attr_value)
 
-        proto_prim_path = f"{prefix_path}/{base_name.replace('.*', str(index))}"
+        proto_prim_path = f"{prefix_path}/{base_name.replace('.*', str(index + idx_offset))}"
         asset_cfg.func(
             proto_prim_path,
             asset_cfg,

@@ -8,6 +8,10 @@ __all__ = [
     "ReachGroupCfg",
     "LiftGroupCfg",
     "CabinetGroupCfg",
+    "PoseCommandRanges",
+    # batched commands
+    "BatchedPoseCommandCfg",
+    "BatchedPoseCommand",
     # batched observations
     "batched_ee_pose",
     "batched_ee_pos_error",
@@ -20,6 +24,7 @@ __all__ = [
     "batched_cabinet_joint_pos",
     "batched_cabinet_joint_vel",
     "batched_cabinet_rel_ee_drawer_distance",
+    "multi_task_onehot",
     # batched rewards
     "batched_joint_vel_l2",
     "batched_position_command_error",
@@ -41,11 +46,9 @@ __all__ = [
     "batched_cabinet_drawer_opened",
     # batched events
     "batched_reset_to_default",
-    "batched_reset_joints_by_scale",
-    "batched_reset_object_state_uniform",
-    "batched_reset_cabinet_to_default",
-    # observations (non-batched)
-    "multi_task_onehot",
+    "batched_reset_joints",
+    "batched_reset_object_uniform",
+    "batched_reset_cabinet",
     # re-exported from isaaclab core
     "UniformPoseCommandCfg",
     "action_rate_l2",
@@ -55,9 +58,9 @@ __all__ = [
 ]
 
 from .batched_events import (
-    batched_reset_cabinet_to_default,
-    batched_reset_joints_by_scale,
-    batched_reset_object_state_uniform,
+    batched_reset_cabinet,
+    batched_reset_joints,
+    batched_reset_object_uniform,
     batched_reset_to_default,
 )
 from .batched_obs import (
@@ -72,6 +75,7 @@ from .batched_obs import (
     batched_joint_vel,
     batched_object_pos_in_robot_frame,
     batched_object_target_pos_error,
+    multi_task_onehot,
 )
 from .batched_rewards import (
     batched_cabinet_align_ee_handle,
@@ -90,9 +94,10 @@ from .batched_rewards import (
     batched_position_command_error,
     batched_position_command_error_tanh,
 )
+from .batched_commands import BatchedPoseCommand
+from .batched_commands_cfg import BatchedPoseCommandCfg
 from .batched_terminations import batched_cabinet_drawer_opened, batched_object_height_below_minimum
-from .observations import multi_task_onehot
-from .utils import CabinetGroupCfg, LiftGroupCfg, ReachGroupCfg, RobotGroupCfg
+from .utils import CabinetGroupCfg, LiftGroupCfg, PoseCommandRanges, ReachGroupCfg, RobotGroupCfg
 
 from isaaclab.envs.mdp import (
     UniformPoseCommandCfg,

@@ -4,12 +4,15 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 __all__ = [
+    "CloneCfg",
     "EnvLayout",
+    "GroupView",
+    "InclusionSet",
     "InteractiveScene",
     "InteractiveSceneCfg",
-    "partition_env_ids",
 ]
 
-from .env_layout import EnvLayout, partition_env_ids
+from .clone_cfg import CloneCfg, InclusionSet
+from .env_layout import EnvLayout, GroupView
 from .interactive_scene import InteractiveScene
 from .interactive_scene_cfg import InteractiveSceneCfg

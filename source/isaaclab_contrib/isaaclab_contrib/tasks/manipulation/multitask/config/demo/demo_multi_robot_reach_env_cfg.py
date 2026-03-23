@@ -40,13 +40,13 @@ from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
-from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.scene import CloneCfg, InclusionSet, InteractiveSceneCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from isaaclab_contrib.tasks.manipulation.multitask import mdp
-from isaaclab_contrib.tasks.manipulation.multitask.mdp.utils import ReachGroupCfg
+from isaaclab_contrib.tasks.manipulation.multitask.mdp.utils import PoseCommandRanges, ReachGroupCfg
 
 from isaaclab_tasks.utils import PresetCfg
 
@@ -61,6 +61,45 @@ from isaaclab_assets.robots.universal_robots import UR10_CFG
 TASK_OPENARM = "openarm_reach"
 TASK_FRANKA = "franka_reach"
 TASK_UR10 = "ur10_reach"
+
+ROBOT_META = {
+    TASK_OPENARM: ReachGroupCfg(
+        asset_cfg=SceneEntityCfg("openarm_robot", body_names=["openarm_hand"], joint_names=["openarm_joint.*"]),
+        command_name="ee_pose",
+        command_ranges=PoseCommandRanges(
+            pos_x=(0.25, 0.35),
+            pos_y=(-0.2, 0.2),
+            pos_z=(0.3, 0.4),
+            roll=(-math.pi / 6, math.pi / 6),
+            pitch=(math.pi / 2, math.pi / 2),
+            yaw=(-math.pi / 9, math.pi / 9),
+        ),
+    ),
+    TASK_FRANKA: ReachGroupCfg(
+        asset_cfg=SceneEntityCfg("franka_robot", body_names=["panda_hand"], joint_names=["panda_joint.*"]),
+        command_name="ee_pose",
+        command_ranges=PoseCommandRanges(
+            pos_x=(0.35, 0.65),
+            pos_y=(-0.2, 0.2),
+            pos_z=(0.15, 0.5),
+            roll=(0.0, 0.0),
+            pitch=(math.pi, math.pi),
+            yaw=(-3.14, 3.14),
+        ),
+    ),
+    TASK_UR10: ReachGroupCfg(
+        asset_cfg=SceneEntityCfg("ur10_robot", body_names=["ee_link"], joint_names=[".*"]),
+        command_name="ee_pose",
+        command_ranges=PoseCommandRanges(
+            pos_x=(0.35, 0.65),
+            pos_y=(-0.2, 0.2),
+            pos_z=(0.15, 0.5),
+            roll=(0.0, 0.0),
+            pitch=(math.pi / 2, math.pi / 2),
+            yaw=(-3.14, 3.14),
+        ),
+    ),
+}
 
 _TABLE_SPAWN = UsdFileCfg(
     usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/SeattleLabTable/table_instanceable.usd",
@@ -107,11 +146,13 @@ class MultitaskPhysicsCfg(PresetCfg):
 class MultiRobotReachSceneCfg(InteractiveSceneCfg):
     """Three robot types, all doing reach (no objects)."""
 
-    task_groups = {
-        TASK_OPENARM: 1,
-        TASK_FRANKA: 1,
-        TASK_UR10: 1,
-    }
+    clone_cfg = CloneCfg(
+        clone_groups={
+            TASK_OPENARM: InclusionSet(assets=["openarm_robot"], weight=1),
+            TASK_FRANKA: InclusionSet(assets=["franka_robot"], weight=1),
+            TASK_UR10: InclusionSet(assets=["ur10_robot"], weight=1),
+        }
+    )
 
     plane = AssetBaseCfg(
         prim_path="/World/GroundPlane",
@@ -137,15 +178,12 @@ class MultiRobotReachSceneCfg(InteractiveSceneCfg):
     )
     openarm_robot = OPENARM_UNI_HIGH_PD_CFG.replace(
         prim_path="{ENV_REGEX_NS}/OpenArm_Robot",
-        task_group=TASK_OPENARM,
     )
     franka_robot = FRANKA_PANDA_HIGH_PD_CFG.replace(
         prim_path="{ENV_REGEX_NS}/Franka_Robot",
-        task_group=TASK_FRANKA,
     )
     ur10_robot = UR10_CFG.replace(
         prim_path="{ENV_REGEX_NS}/UR10_Robot",
-        task_group=TASK_UR10,
     )
 
 
@@ -199,49 +237,12 @@ class MultiRobotReachActionsCfg:
 
 @configclass
 class MultiRobotReachCommandsCfg:
-    """Per-group reach command targets."""
+    """Single batched pose command — per-group ranges live in ``robot_meta``."""
 
-    openarm_ee_pose = mdp.UniformPoseCommandCfg(
-        asset_name="openarm_robot",
-        body_name="openarm_hand",
+    ee_pose = mdp.BatchedPoseCommandCfg(
         resampling_time_range=(3.0, 3.0),
         debug_vis=True,
-        ranges=mdp.UniformPoseCommandCfg.Ranges(
-            pos_x=(0.25, 0.35),
-            pos_y=(-0.2, 0.2),
-            pos_z=(0.3, 0.4),
-            roll=(-math.pi / 6, math.pi / 6),
-            pitch=(math.pi / 2, math.pi / 2),
-            yaw=(-math.pi / 9, math.pi / 9),
-        ),
-    )
-    franka_ee_pose = mdp.UniformPoseCommandCfg(
-        asset_name="franka_robot",
-        body_name="panda_hand",
-        resampling_time_range=(3.0, 3.0),
-        debug_vis=True,
-        ranges=mdp.UniformPoseCommandCfg.Ranges(
-            pos_x=(0.35, 0.65),
-            pos_y=(-0.2, 0.2),
-            pos_z=(0.15, 0.5),
-            roll=(0.0, 0.0),
-            pitch=(math.pi, math.pi),
-            yaw=(-3.14, 3.14),
-        ),
-    )
-    ur10_ee_pose = mdp.UniformPoseCommandCfg(
-        asset_name="ur10_robot",
-        body_name="ee_link",
-        resampling_time_range=(3.0, 3.0),
-        debug_vis=True,
-        ranges=mdp.UniformPoseCommandCfg.Ranges(
-            pos_x=(0.35, 0.65),
-            pos_y=(-0.2, 0.2),
-            pos_z=(0.15, 0.5),
-            roll=(0.0, 0.0),
-            pitch=(math.pi / 2, math.pi / 2),
-            yaw=(-3.14, 3.14),
-        ),
+        robot_meta=ROBOT_META,
     )
 
 
@@ -335,7 +336,7 @@ class MultiRobotReachEventsCfg:
         params={"reset_joint_targets": True},
     )
     reset_joints = EventTerm(
-        func=mdp.batched_reset_joints_by_scale,
+        func=mdp.batched_reset_joints,
         mode="reset",
         params={
             "position_range": (0.5, 1.25),
@@ -382,28 +383,8 @@ class MultiRobotReachEnvCfg(ManagerBasedRLEnvCfg):
     scene: MultiRobotReachSceneCfg = MultiRobotReachSceneCfg(
         num_envs=4096,
         env_spacing=2.0,
-        replicate_physics=False,
+        replicate_physics=True,
     )
-    # Per-robot metadata used by batched MDP term classes.
-    # Each key is a scene asset name.  Batched classes iterate these entries at init time to
-    # discover robot groups and pre-allocate staging buffers:
-    #   asset_cfg    – SceneEntityCfg identifying the EE body and arm joints.
-    #   command_name – name of the UniformPoseCommandCfg that generates the reach target.
-    robot_meta = {
-        TASK_OPENARM: ReachGroupCfg(
-            asset_cfg=SceneEntityCfg("openarm_robot", body_names=["openarm_hand"], joint_names=["openarm_joint.*"]),
-            command_name="openarm_ee_pose",
-        ),
-        TASK_FRANKA: ReachGroupCfg(
-            asset_cfg=SceneEntityCfg("franka_robot", body_names=["panda_hand"], joint_names=["panda_joint.*"]),
-            command_name="franka_ee_pose",
-        ),
-        TASK_UR10: ReachGroupCfg(
-            asset_cfg=SceneEntityCfg("ur10_robot", body_names=["ee_link"], joint_names=[".*"]),
-            command_name="ur10_ee_pose",
-        ),
-    }
-
     actions: MultiRobotReachActionsCfg = MultiRobotReachActionsCfg()
     commands: MultiRobotReachCommandsCfg = MultiRobotReachCommandsCfg()
     observations: MultiRobotReachObsCfg = MultiRobotReachObsCfg()

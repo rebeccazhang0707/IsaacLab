@@ -3,238 +3,231 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Batched event terms for multi-robot environments.
+"""Batched event terms for heterogeneous multi-robot environments.
 
-Each class iterates ``robot_meta`` to discover robot groups and
-dispatches the underlying reset logic per group with properly
-filtered ``env_ids``.  This replaces the former ``per_robot=True``
-dispatch mechanism with explicit, self-contained classes.
+These handle the dual-indexing needed when assets don't span all envs:
+- ``global_ids``: for env_origins lookup
+- ``local_ids``: for asset data indexing
 
-``robot_meta`` is keyed by **task-group name** (not asset name).
+Usage::
+
+    reset_joints = EventTerm(
+        func=batched_reset_joints,
+        mode="reset",
+        params={"robot_meta": ROBOT_META, "position_range": (0.5, 1.5)},
+    )
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import torch
 import warp as wp
 
-import isaaclab.utils.math as math_utils
-from isaaclab.managers import ManagerTermBase, SceneEntityCfg
+from isaaclab.managers import ManagerTermBase
+from isaaclab.utils import math as math_utils
 
-from .utils import CabinetGroupCfg, LiftGroupCfg, asset_env_ids, filter_env_ids, resolve_scene_entity_cfg
+from .utils import RobotGroupCfg
 
 if TYPE_CHECKING:
+    from isaaclab.assets import Articulation, RigidObject
     from isaaclab.envs import ManagerBasedEnv
     from isaaclab.managers import ManagerTermBaseCfg
 
 
-class batched_reset_to_default(ManagerTermBase):
-    """Reset all robot groups (and their objects) to default state.
+def _iter_groups(
+    env: ManagerBasedEnv, env_ids: torch.Tensor, robot_meta: dict[str, RobotGroupCfg], asset_key: str = "asset_cfg"
+) -> Iterator[tuple[str, RobotGroupCfg, torch.Tensor, torch.Tensor, Articulation | RigidObject]]:
+    """Iterate over groups, yielding (group_key, meta, global_ids, local_ids, asset).
 
-    Iterates ``robot_meta`` and resets each robot's articulation root
-    pose, root velocity, and joint state.  When the metadata includes
-    ``object_cfg`` (:class:`LiftGroupCfg`), the corresponding rigid
-    object is also reset.
+    Yields:
+        group_key: Group key string.
+        meta: Group config (e.g., LiftGroupCfg).
+        global_ids: Global env indices for this group (for env_origins).
+        local_ids: Local asset indices (for asset data).
+        asset: The asset object (Articulation or RigidObject).
     """
+    layout = env.scene.layout
+    for group_key, meta in robot_meta.items():
+        cfg = getattr(meta, asset_key, None)
+        if cfg is None:
+            continue
+        group_view = layout[group_key]
+        _, global_ids = group_view.filter(env_ids)
+        if global_ids.numel() == 0:
+            continue
+        # Local indices if asset exclusive to group
+        asset_groups = layout.assets.get(cfg.name)
+        if asset_groups and len(asset_groups) == 1 and asset_groups[0] == group_key:
+            local_ids = group_view.to_local(global_ids)
+        else:
+            local_ids = global_ids
+        asset: Articulation | RigidObject = env.scene[cfg.name]
+        yield group_key, meta, global_ids, local_ids, asset
+
+
+class batched_reset_to_default(ManagerTermBase):
+    """Reset robots and objects to default state."""
 
     def __init__(self, cfg: ManagerTermBaseCfg, env: ManagerBasedEnv):
         super().__init__(cfg, env)
-        layout = env.scene.layout
-        robot_meta = getattr(env.cfg, "robot_meta", None) or {}
-        self._entries: list[tuple[SceneEntityCfg, SceneEntityCfg | None, str]] = []
-        for group_key, meta in robot_meta.items():
-            resolve_scene_entity_cfg(env, meta.asset_cfg)
+        self._robot_meta = cfg.params.get("robot_meta") or {}
+
+    def __call__(
+        self,
+        env: ManagerBasedEnv,
+        env_ids: torch.Tensor,
+        reset_joint_targets: bool = False,
+        robot_meta: dict | None = None,
+    ):
+        for group_key, meta, global_ids, local_ids, art in _iter_groups(env, env_ids, self._robot_meta):
+            # Root state
+            pose = wp.to_torch(art.data.default_root_pose)[local_ids].clone()
+            vel = wp.to_torch(art.data.default_root_vel)[local_ids].clone()
+            pose[:, :3] += env.scene.env_origins[global_ids]
+            art.write_root_pose_to_sim_index(root_pose=pose, env_ids=local_ids)
+            art.write_root_velocity_to_sim_index(root_velocity=vel, env_ids=local_ids)
+            # Joint state
+            jpos = wp.to_torch(art.data.default_joint_pos)[local_ids].clone()
+            jvel = wp.to_torch(art.data.default_joint_vel)[local_ids].clone()
+            art.write_joint_position_to_sim_index(position=jpos, env_ids=local_ids)
+            art.write_joint_velocity_to_sim_index(velocity=jvel, env_ids=local_ids)
+            if reset_joint_targets:
+                art.set_joint_position_target_index(target=jpos, env_ids=local_ids)
+                art.set_joint_velocity_target_index(target=jvel, env_ids=local_ids)
+            # Object if present
             obj_cfg = getattr(meta, "object_cfg", None)
             if obj_cfg is not None:
-                resolve_scene_entity_cfg(env, obj_cfg)
-            self._entries.append((meta.asset_cfg, obj_cfg, group_key))
-
-    def __call__(
-        self,
-        env: ManagerBasedEnv,
-        env_ids: torch.Tensor | None,
-        reset_joint_targets: bool = False,
-    ) -> None:
-        layout = env.scene.layout
-        for asset_cfg, object_cfg, gk in self._entries:
-            group_env_ids, skip = filter_env_ids(layout, gk, env_ids)
-            if skip:
-                continue
-            a_ids = asset_env_ids(layout, gk, asset_cfg.name, group_env_ids)
-
-            art = env.scene[asset_cfg.name]
-            default_pose = wp.to_torch(art.data.default_root_pose)[a_ids].clone()
-            default_vel = wp.to_torch(art.data.default_root_vel)[a_ids].clone()
-            default_pose[:, :3] += env.scene.env_origins[group_env_ids]
-            art.write_root_pose_to_sim_index(root_pose=default_pose, env_ids=a_ids)
-            art.write_root_velocity_to_sim_index(root_velocity=default_vel, env_ids=a_ids)
-
-            default_jpos = wp.to_torch(art.data.default_joint_pos)[a_ids].clone()
-            default_jvel = wp.to_torch(art.data.default_joint_vel)[a_ids].clone()
-            art.write_joint_position_to_sim_index(position=default_jpos, env_ids=a_ids)
-            art.write_joint_velocity_to_sim_index(velocity=default_jvel, env_ids=a_ids)
-            if reset_joint_targets:
-                art.set_joint_position_target_index(target=default_jpos, env_ids=a_ids)
-                art.set_joint_velocity_target_index(target=default_jvel, env_ids=a_ids)
-
-            if object_cfg is not None:
-                o_ids = asset_env_ids(layout, gk, object_cfg.name, group_env_ids)
-                obj = env.scene[object_cfg.name]
-                obj_pose = wp.to_torch(obj.data.default_root_pose)[o_ids].clone()
-                obj_vel = wp.to_torch(obj.data.default_root_vel)[o_ids].clone()
-                obj_pose[:, :3] += env.scene.env_origins[group_env_ids]
-                obj.write_root_pose_to_sim_index(root_pose=obj_pose, env_ids=o_ids)
-                obj.write_root_velocity_to_sim_index(root_velocity=obj_vel, env_ids=o_ids)
+                obj: RigidObject = env.scene[obj_cfg.name]
+                asset_groups = env.scene.layout.assets.get(obj_cfg.name)
+                group_view = env.scene.layout[group_key]
+                if asset_groups and len(asset_groups) == 1 and asset_groups[0] == group_key:
+                    obj_local_ids = group_view.to_local(global_ids)
+                else:
+                    obj_local_ids = global_ids
+                obj_pose = wp.to_torch(obj.data.default_root_pose)[obj_local_ids].clone()
+                obj_vel = wp.to_torch(obj.data.default_root_vel)[obj_local_ids].clone()
+                obj_pose[:, :3] += env.scene.env_origins[global_ids]
+                obj.write_root_pose_to_sim_index(root_pose=obj_pose, env_ids=obj_local_ids)
+                obj.write_root_velocity_to_sim_index(root_velocity=obj_vel, env_ids=obj_local_ids)
 
 
-class batched_reset_joints_by_scale(ManagerTermBase):
-    """Reset joint positions/velocities by scaling defaults, batched across robot groups.
-
-    Iterates ``robot_meta`` and randomizes joint positions within
-    ``[default * position_range[0], default * position_range[1]]``
-    and velocities within ``velocity_range``.
-    """
+class batched_reset_joints(ManagerTermBase):
+    """Reset robot joints by scaling default positions."""
 
     def __init__(self, cfg: ManagerTermBaseCfg, env: ManagerBasedEnv):
         super().__init__(cfg, env)
-        layout = env.scene.layout
-        robot_meta = getattr(env.cfg, "robot_meta", None) or {}
-        self._entries: list[tuple[SceneEntityCfg, list | slice, str]] = []
-        for group_key, meta in robot_meta.items():
-            resolve_scene_entity_cfg(env, meta.asset_cfg)
-            self._entries.append((meta.asset_cfg, meta.asset_cfg.joint_ids, group_key))
+        self._robot_meta = cfg.params.get("robot_meta") or {}
 
     def __call__(
         self,
         env: ManagerBasedEnv,
-        env_ids: torch.Tensor | None,
-        position_range: tuple[float, float] = (0.5, 1.5),
+        env_ids: torch.Tensor,
+        position_range: tuple[float, float] = (1.0, 1.0),
         velocity_range: tuple[float, float] = (0.0, 0.0),
-    ) -> None:
-        layout = env.scene.layout
-        for asset_cfg, jids, gk in self._entries:
-            group_env_ids, skip = filter_env_ids(layout, gk, env_ids)
-            if skip:
-                continue
-            a_ids = asset_env_ids(layout, gk, asset_cfg.name, group_env_ids)
-
-            art = env.scene[asset_cfg.name]
-            default_jpos = wp.to_torch(art.data.default_joint_pos)[a_ids]
-            default_jvel = wp.to_torch(art.data.default_joint_vel)[a_ids]
-
-            jpos = default_jpos.clone()
-            jvel = default_jvel.clone()
-            jpos[:, jids] *= torch.empty_like(jpos[:, jids]).uniform_(*position_range)
-            jvel[:, jids] = torch.empty_like(jvel[:, jids]).uniform_(*velocity_range)
-
-            limits = wp.to_torch(art.data.soft_joint_pos_limits)[a_ids]
-            jpos = jpos.clamp(limits[..., 0], limits[..., 1])
-
-            art.write_joint_position_to_sim_index(position=jpos, env_ids=a_ids)
-            art.write_joint_velocity_to_sim_index(velocity=jvel, env_ids=a_ids)
-            art.set_joint_position_target_index(target=jpos, env_ids=a_ids)
-            art.set_joint_velocity_target_index(target=jvel, env_ids=a_ids)
+        robot_meta: dict | None = None,
+    ):
+        for _, meta, _, local_ids, art in _iter_groups(env, env_ids, self._robot_meta):
+            cfg = meta.asset_cfg
+            jids = cfg.joint_ids if cfg.joint_ids != slice(None) else slice(None)
+            idx = local_ids[:, None] if jids != slice(None) else local_ids
+            jpos = wp.to_torch(art.data.default_joint_pos)[idx, jids].clone()
+            jvel = wp.to_torch(art.data.default_joint_vel)[idx, jids].clone()
+            jpos *= math_utils.sample_uniform(*position_range, jpos.shape, jpos.device)
+            jvel *= math_utils.sample_uniform(*velocity_range, jvel.shape, jvel.device)
+            limits = wp.to_torch(art.data.soft_joint_pos_limits)[idx, jids]
+            jpos = jpos.clamp_(limits[..., 0], limits[..., 1])
+            vlim = wp.to_torch(art.data.soft_joint_vel_limits)[idx, jids]
+            jvel = jvel.clamp_(-vlim, vlim)
+            art.write_joint_position_to_sim_index(position=jpos, joint_ids=jids, env_ids=local_ids)
+            art.write_joint_velocity_to_sim_index(velocity=jvel, joint_ids=jids, env_ids=local_ids)
 
 
-class batched_reset_object_state_uniform(ManagerTermBase):
-    """Reset object root states with uniform randomization, batched across lift groups.
-
-    Iterates :class:`LiftGroupCfg` entries that have ``object_cfg``
-    and randomizes the object's root pose and velocity relative to
-    its default state.
-    """
+class batched_reset_object_uniform(ManagerTermBase):
+    """Reset objects with random position/velocity offsets."""
 
     def __init__(self, cfg: ManagerTermBaseCfg, env: ManagerBasedEnv):
         super().__init__(cfg, env)
-        layout = env.scene.layout
-        robot_meta = getattr(env.cfg, "robot_meta", None) or {}
-        self._entries: list[tuple[SceneEntityCfg, str]] = []
-        for group_key, meta in robot_meta.items():
-            if not isinstance(meta, LiftGroupCfg):
-                continue
-            self._entries.append((meta.object_cfg, group_key))
+        self._robot_meta = cfg.params.get("robot_meta") or {}
 
     def __call__(
         self,
         env: ManagerBasedEnv,
-        env_ids: torch.Tensor | None,
+        env_ids: torch.Tensor,
         pose_range: dict[str, tuple[float, float]] | None = None,
         velocity_range: dict[str, tuple[float, float]] | None = None,
-    ) -> None:
-        if pose_range is None:
-            pose_range = {}
-        if velocity_range is None:
-            velocity_range = {}
-
+        robot_meta: dict | None = None,
+    ):
+        pose_range = pose_range or {}
+        velocity_range = velocity_range or {}
         layout = env.scene.layout
-        for obj_cfg, gk in self._entries:
-            group_env_ids, skip = filter_env_ids(layout, gk, env_ids)
-            if skip:
+
+        for group_key, meta, global_ids, _, _ in _iter_groups(env, env_ids, self._robot_meta):
+            obj_cfg = getattr(meta, "object_cfg", None)
+            if obj_cfg is None:
                 continue
-            o_ids = asset_env_ids(layout, gk, obj_cfg.name, group_env_ids)
+            obj: RigidObject = env.scene[obj_cfg.name]
+            group_view = layout[group_key]
+            asset_groups = layout.assets.get(obj_cfg.name)
+            if asset_groups and len(asset_groups) == 1 and asset_groups[0] == group_key:
+                local_ids = group_view.to_local(global_ids)
+            else:
+                local_ids = global_ids
 
-            asset = env.scene[obj_cfg.name]
-            default_root_pose = wp.to_torch(asset.data.default_root_pose)[o_ids].clone()
-            default_root_vel = wp.to_torch(asset.data.default_root_vel)[o_ids].clone()
+            # Pose
+            pose = wp.to_torch(obj.data.default_root_pose)[local_ids].clone()
+            vel = wp.to_torch(obj.data.default_root_vel)[local_ids].clone()
+            ranges = torch.tensor(
+                [pose_range.get(k, (0.0, 0.0)) for k in ("x", "y", "z", "roll", "pitch", "yaw")], device=obj.device
+            )
+            samples = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], (len(local_ids), 6), device=obj.device)
+            pose[:, :3] += env.scene.env_origins[global_ids] + samples[:, :3]
+            qd = math_utils.quat_from_euler_xyz(samples[:, 3], samples[:, 4], samples[:, 5])
+            pose[:, 3:7] = math_utils.quat_mul(pose[:, 3:7], qd)
+            # Velocity
+            vranges = torch.tensor(
+                [velocity_range.get(k, (0.0, 0.0)) for k in ("x", "y", "z", "roll", "pitch", "yaw")], device=obj.device
+            )
+            vsamples = math_utils.sample_uniform(vranges[:, 0], vranges[:, 1], (len(local_ids), 6), device=obj.device)
+            vel += vsamples
 
-            n = len(o_ids) if o_ids is not None else asset.num_instances
-            range_list = [pose_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]]
-            ranges = torch.tensor(range_list, device=asset.device)
-            rand_samples = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], (n, 6), device=asset.device)
-
-            positions = default_root_pose[:, :3] + env.scene.env_origins[group_env_ids] + rand_samples[:, :3]
-            ori_delta = math_utils.quat_from_euler_xyz(rand_samples[:, 3], rand_samples[:, 4], rand_samples[:, 5])
-            orientations = math_utils.quat_mul(default_root_pose[:, 3:7], ori_delta)
-
-            range_list = [velocity_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]]
-            ranges = torch.tensor(range_list, device=asset.device)
-            rand_samples = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], (n, 6), device=asset.device)
-            velocities = default_root_vel + rand_samples
-
-            asset.write_root_pose_to_sim_index(root_pose=torch.cat([positions, orientations], dim=-1), env_ids=o_ids)
-            asset.write_root_velocity_to_sim_index(root_velocity=velocities, env_ids=o_ids)
+            obj.write_root_pose_to_sim_index(root_pose=pose, env_ids=local_ids)
+            obj.write_root_velocity_to_sim_index(root_velocity=vel, env_ids=local_ids)
 
 
-class batched_reset_cabinet_to_default(ManagerTermBase):
-    """Reset cabinet articulations to default state, batched across cabinet groups.
-
-    Iterates :class:`CabinetGroupCfg` entries and resets the cabinet's
-    root pose, root velocity, and joint state.
-    """
+class batched_reset_cabinet(ManagerTermBase):
+    """Reset cabinet articulation to default state."""
 
     def __init__(self, cfg: ManagerTermBaseCfg, env: ManagerBasedEnv):
         super().__init__(cfg, env)
+        self._robot_meta = cfg.params.get("robot_meta") or {}
+
+    def __call__(self, env: ManagerBasedEnv, env_ids: torch.Tensor, robot_meta: dict | None = None):
         layout = env.scene.layout
-        robot_meta = getattr(env.cfg, "robot_meta", None) or {}
-        self._entries: list[tuple[SceneEntityCfg, str]] = []
-        for group_key, meta in robot_meta.items():
-            if not isinstance(meta, CabinetGroupCfg):
+        for group_key, meta in self._robot_meta.items():
+            cab_cfg = getattr(meta, "cabinet_asset_cfg", None)
+            if cab_cfg is None:
                 continue
-            resolve_scene_entity_cfg(env, meta.cabinet_asset_cfg)
-            self._entries.append((meta.cabinet_asset_cfg, group_key))
-
-    def __call__(
-        self,
-        env: ManagerBasedEnv,
-        env_ids: torch.Tensor | None,
-    ) -> None:
-        layout = env.scene.layout
-        for cab_cfg, gk in self._entries:
-            group_env_ids, skip = filter_env_ids(layout, gk, env_ids)
-            if skip:
+            group_view = layout[group_key]
+            _, global_ids = group_view.filter(env_ids)
+            if global_ids.numel() == 0:
                 continue
-            c_ids = asset_env_ids(layout, gk, cab_cfg.name, group_env_ids)
-
-            art = env.scene[cab_cfg.name]
-            default_pose = wp.to_torch(art.data.default_root_pose)[c_ids].clone()
-            default_vel = wp.to_torch(art.data.default_root_vel)[c_ids].clone()
-            default_pose[:, :3] += env.scene.env_origins[group_env_ids]
-            art.write_root_pose_to_sim_index(root_pose=default_pose, env_ids=c_ids)
-            art.write_root_velocity_to_sim_index(root_velocity=default_vel, env_ids=c_ids)
-
-            default_jpos = wp.to_torch(art.data.default_joint_pos)[c_ids].clone()
-            default_jvel = wp.to_torch(art.data.default_joint_vel)[c_ids].clone()
-            art.write_joint_position_to_sim_index(position=default_jpos, env_ids=c_ids)
-            art.write_joint_velocity_to_sim_index(velocity=default_jvel, env_ids=c_ids)
+            cab: Articulation = env.scene[cab_cfg.name]
+            asset_groups = layout.assets.get(cab_cfg.name)
+            if asset_groups and len(asset_groups) == 1 and asset_groups[0] == group_key:
+                local_ids = group_view.to_local(global_ids)
+            else:
+                local_ids = global_ids
+            # Root state
+            pose = wp.to_torch(cab.data.default_root_pose)[local_ids].clone()
+            vel = wp.to_torch(cab.data.default_root_vel)[local_ids].clone()
+            pose[:, :3] += env.scene.env_origins[global_ids]
+            cab.write_root_pose_to_sim_index(root_pose=pose, env_ids=local_ids)
+            cab.write_root_velocity_to_sim_index(root_velocity=vel, env_ids=local_ids)
+            # Joint state
+            jpos = wp.to_torch(cab.data.default_joint_pos)[local_ids].clone()
+            jvel = wp.to_torch(cab.data.default_joint_vel)[local_ids].clone()
+            cab.write_joint_position_to_sim_index(position=jpos, env_ids=local_ids)
+            cab.write_joint_velocity_to_sim_index(velocity=jvel, env_ids=local_ids)

@@ -21,7 +21,7 @@ import warp as wp
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg, RigidObjectCfg
-from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
+from isaaclab.scene import CloneCfg, InclusionSet, InteractiveScene, InteractiveSceneCfg
 from isaaclab.sim import build_simulation_context
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
@@ -177,6 +177,52 @@ def test_clone_environments_non_cfg_invokes_visualizer_clone_fn(monkeypatch: pyt
     assert len(physics_calls) == 0
     assert len(visualizer_calls) == 1
     assert len(usd_calls) == 1
+
+
+def test_build_clone_plan_with_flat_prototypes():
+    """Test ClonePlanBuilder with flat prototype structure."""
+    from isaaclab.cloner import ClonePlanBuilder, TemplateCloneCfg
+
+    builder = ClonePlanBuilder("cpu")
+
+    # Register assets: robot, table, light (global - not in any clone group)
+    builder.register("robot", "Robot/", num_variants=1)
+    builder.register("table", "Table/", num_variants=1)
+    builder.register("light", "Light/", num_variants=1)
+
+    assert builder.proto_count == 3
+    assert builder.proto_mapping == {"robot": [0], "table": [1], "light": [2]}
+    assert builder.dest_paths == ["Robot/", "Table/", "Light/"]
+
+    # Create cloner config and finalize
+    cloner_cfg = TemplateCloneCfg(
+        template_root="/World/template",
+        template_prototype_identifier="proto_asset",
+    )
+    clone_cfg = CloneCfg(
+        clone_groups={
+            "lift": InclusionSet(assets=["robot", "table"], weight=1),
+            "reach": InclusionSet(assets=["table"], weight=1),
+        }
+    )
+    group_assignment, group_names = builder.finalize(cloner_cfg, clone_cfg, num_envs=8)
+
+    assert cloner_cfg.clone_plan is not None
+    assert group_names == ("lift", "reach")
+
+    # Flat prototype paths
+    assert cloner_cfg.clone_plan.prototype_paths == (
+        "/World/template/proto_asset_0",
+        "/World/template/proto_asset_1",
+        "/World/template/proto_asset_2",
+    )
+    assert cloner_cfg.clone_plan.dest_paths == ("Robot/", "Table/", "Light/")
+
+    # lift: robot+table+light, reach: table+light (robot not in reach)
+    assert cloner_cfg.clone_plan.group_mask.cpu().tolist() == [
+        [True, True, True],  # lift: all prototypes
+        [False, True, True],  # reach: table + light (global)
+    ]
 
 
 def assert_state_equal(s1: dict, s2: dict, path=""):
