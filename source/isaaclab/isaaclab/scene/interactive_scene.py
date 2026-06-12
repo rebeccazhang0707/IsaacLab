@@ -273,17 +273,42 @@ class InteractiveScene:
         asset_env_ids: dict[str, torch.Tensor] = {}
         for asset_name in self._scene_asset_names:
             tensors = planned_by_asset.get(asset_name)
-            if not tensors:
-                asset_env_ids[asset_name] = all_indices
-            elif len(tensors) == 1:
-                asset_env_ids[asset_name] = tensors[0].unique().sort().values
+            if tensors:
+                asset_env_ids[asset_name] = (
+                    (tensors[0] if len(tensors) == 1 else torch.cat(tensors)).unique().sort().values
+                )
             else:
-                asset_env_ids[asset_name] = torch.cat(tensors).unique().sort().values
+                # No clone-plan row owns this entity directly. Entities without a replication
+                # row of their own -- notably sensors -- still live under a planned asset whose
+                # prim_path they share, so resolve their env coverage from the plan. This keeps a
+                # heterogeneous sensor's selector mapping consistent with the env subset it was
+                # sized to; an entity matching no row (e.g. a global prim) spans all envs.
+                asset_env_ids[asset_name] = self._entity_env_ids_from_plan(asset_name, plan, all_indices)
 
         self._inactive_selector_assets = {
             asset_name for asset_name, env_ids in asset_env_ids.items() if env_ids.numel() == 0
         }
         self._selector.apply_asset_env_ids(asset_env_ids)
+
+    def _entity_env_ids_from_plan(
+        self, asset_name: str, plan: cloner.ClonePlan, all_indices: torch.Tensor
+    ) -> torch.Tensor:
+        """Resolve the envs an entity occupies from the clone plan via its ``prim_path``.
+
+        Used for entities that have no replication row of their own (e.g. sensors). Returns the
+        union of envs owned by the clone-plan rows that own the entity's ``prim_path``, or
+        ``all_indices`` when the entity is not under any planned asset (e.g. a global prim).
+        """
+        cfg = getattr(self.cfg, asset_name, None)
+        prim_path = getattr(cfg, "prim_path", None)
+        if not isinstance(prim_path, str) or self.env_ns not in prim_path:
+            return all_indices
+        matched: set[int] = set()
+        for *_, env_ids in cloner.iter_clone_plan_matches(plan, prim_path):
+            matched.update(env_ids)
+        if not matched:
+            return all_indices
+        return torch.tensor(sorted(matched), dtype=torch.long, device=self.device)
 
     def _aggregate_scene_data_requirements(self, visualizer_types=()) -> None:
         """Aggregate scene-data requirements from visualizers and sensor renderers.

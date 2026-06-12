@@ -20,3 +20,8 @@ Fixed
   nested (sub-env) destinations, which offset static assets to the wrong place.
   Env-origin transforms are now authored only on env-root prims; nested assets keep
   their intra-env transform and inherit the origin from their env parent.
+* Fixed sensors (e.g. :class:`~isaaclab.sensors.FrameTransformer`) mounted on an asset
+  that is cloned into only a subset of envs. Such a sensor is now sized to that env
+  subset instead of the full env count (which raised ``IndexError`` during
+  initialization), and its selector mapping is resolved from the clone plan so resets
+  index the sensor's own buffers correctly.

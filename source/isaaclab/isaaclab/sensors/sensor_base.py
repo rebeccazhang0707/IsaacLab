@@ -234,8 +234,15 @@ class SensorBase(ABC):
         if clone_plan is not None:
             clone_plan_matches = tuple(iter_clone_plan_matches(clone_plan, self.cfg.prim_path))
         if clone_plan_matches:
+            # The sensor lives under a planned asset. In heterogeneous scenes that asset may be
+            # cloned into only a subset of envs, so size the sensor to the envs its matching rows
+            # actually populate (their union) -- not the total env count -- so the sensor's views
+            # and per-env buffers stay consistent.
             self._parent_prims = []
-            self._num_envs = int(clone_plan.clone_mask.shape[1])
+            matched_env_ids: set[int] = set()
+            for *_, env_ids in clone_plan_matches:
+                matched_env_ids.update(env_ids)
+            self._num_envs = len(matched_env_ids)
         elif clone_plan is not None:
             env_prim_path_expr = self.cfg.prim_path.rsplit("/", 1)[0]
             self._parent_prims = sim_utils.find_matching_prims(env_prim_path_expr)
