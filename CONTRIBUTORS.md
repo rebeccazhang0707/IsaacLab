@@ -157,7 +157,7 @@ Guidelines for modifications:
 * Qingyang Jiang
 * Qinxi Yu
 * Rafael Wiltz
-* Rebecca (Rui) Zhang
+* Rebecca Zhang
 * Renaud Poncelet
 * René Zurbrügg
 * Richard Schmitt

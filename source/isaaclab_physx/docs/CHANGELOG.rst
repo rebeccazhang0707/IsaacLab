@@ -1,6 +1,35 @@
 Changelog
 ---------
 
+2.0.1 (2026-06-16)
+~~~~~~~~~~~~~~~~~~
+
+Changed
+^^^^^^^
+
+* Reused shared path-expression helpers when deriving PhysX schema-root view expressions and deletion invalidation matches.
+
+
+2.0.0 (2026-06-13)
+~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Fixed the optional ``newton[sim]`` dependency pin to use Newton commit
+  ``811968bfb7cc7ff4e37b9260a2ba56930a3e605e``.
+
+
+1.1.6 (2026-06-12)
+~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Fixed PhysX scene-data rigid-body view discovery to ignore USD joint prims
+  even when an asset authors ``RigidBodyAPI`` on them.
+
+
 1.1.5 (2026-06-09)
 ~~~~~~~~~~~~~~~~~~
 

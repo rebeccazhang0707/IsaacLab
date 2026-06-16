@@ -13,6 +13,7 @@ import torch
 from pxr import Gf, Sdf, Usd, UsdGeom, Vt
 
 from ._fabric_notices import disabled_fabric_change_notifies
+from .cloner_utils import split_clone_template
 from .replicate_session import REPLICATION_QUEUE
 
 
@@ -55,8 +56,10 @@ class UsdReplicateContext:
             source: Source prim path.
             destination: Destination path template with ``"{}"`` for env id.
             env_ids: Environment ids selected for this source row.
-            positions: Optional per-environment world positions [m].
-            quaternions: Optional per-environment orientations in xyzw order.
+            positions: Optional per-environment world positions [m]. Authored only for
+                instance-root destination templates (for example, ``.../env_{}``).
+            quaternions: Optional per-environment orientations in xyzw order. Authored only
+                for instance-root destination templates (for example, ``.../env_{}``).
         """
         # ``positions``/``quaternions`` place an env *instance* at its grid origin, so they are
         # only meaningful when ``destination`` targets the env-root prim itself (its ``"{}"`` env
@@ -85,8 +88,10 @@ class UsdReplicateContext:
             destinations: Destination path templates with ``"{}"`` for env id.
             env_ids: Environment indices.
             mask: Optional per-source or shared mask.
-            positions: Optional per-environment world positions [m].
-            quaternions: Optional per-environment orientations in xyzw order.
+            positions: Optional per-environment world positions [m]. Authored only for
+                instance-root destination templates (for example, ``.../env_{}``).
+            quaternions: Optional per-environment orientations in xyzw order. Authored only
+                for instance-root destination templates (for example, ``.../env_{}``).
         """
         for i, source in enumerate(sources):
             self.queue(
@@ -123,6 +128,9 @@ class UsdReplicateContext:
         for depth in sorted(depth_to_items.keys()):
             with Sdf.ChangeBlock():
                 for src, tmpl, target_envs, positions, quaternions in depth_to_items[depth]:
+                    _, clone_suffix = split_clone_template(tmpl)
+                    is_instance_root = clone_suffix == ""
+
                     for wid in target_envs.tolist():
                         wid = int(wid)
                         dp = tmpl.format(wid)
@@ -130,7 +138,8 @@ class UsdReplicateContext:
                         if src != dp:
                             Sdf.CopySpec(rl, Sdf.Path(src), rl, Sdf.Path(dp))
 
-                        if positions is not None or quaternions is not None:
+                        # Author positions/quaternions for instance roots only.
+                        if is_instance_root and (positions is not None or quaternions is not None):
                             ps = rl.GetPrimAtPath(dp)
                             op_names = []
                             if positions is not None:
@@ -185,8 +194,10 @@ def usd_replicate(
         destinations: Destination formattable templates with ``"{}"`` for env index.
         env_ids: Environment indices.
         mask: Optional per-source or shared mask. ``None`` selects all.
-        positions: Optional positions [m], shape ``[E, 3]``, authored as ``xformOp:translate``.
-        quaternions: Optional orientations in xyzw order, shape ``[E, 4]``, authored as ``xformOp:orient``.
+        positions: Optional positions [m], shape ``[E, 3]``. Authored as ``xformOp:translate`` only
+            for env-instance root destinations (``.../env_{}``).
+        quaternions: Optional orientations in xyzw order, shape ``[E, 4]``. Authored as
+            ``xformOp:orient`` only for env-instance root destinations (``.../env_{}``).
     """
     ctx = UsdReplicateContext(stage)
     ctx.queue_mapping(sources, destinations, env_ids, mask, positions=positions, quaternions=quaternions)
