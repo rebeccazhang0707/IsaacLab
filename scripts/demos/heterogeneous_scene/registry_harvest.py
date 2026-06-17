@@ -60,9 +60,10 @@ ARM_HINTS = ("panda", "franka", "ur5", "ur10", "kinova", "sawyer", "flexiv", "al
 
 # Selectable clone strategies (prototype-combination -> env assignment). Only the
 # deterministic round-robin strategies are exposed; the cloner's :func:`~isaaclab.cloner.random`
-# is omitted on purpose. This demo relies on the analytic ``env i -> task i % n`` map for
-# per-task reset, grouping, and the report, and on every task getting envs -- ``random`` breaks
-# both (non-deterministic split, uneven coverage). ``interleaved`` is a readability alias.
+# is omitted on purpose. This demo relies on the analytic ``env i -> task i % n`` map for the
+# per-prototype forward lookup (``Prototype.env_ids``) used at reset and in the report, and on
+# every task getting envs -- ``random`` breaks both (non-deterministic split, uneven coverage).
+# ``interleaved`` is a readability alias.
 STRATEGIES = {"sequential": sequential, "interleaved": interleaved}
 
 # Per-model display tweaks, matched against the spawn's USD basename. Robots that are
@@ -166,11 +167,6 @@ def noise_scale(asset_name: str) -> float:
     if any(h in lname for h in ARM_HINTS):
         return ARM_NOISE
     return DEFAULT_NOISE
-
-
-def is_locomotion(task: TaskGroup) -> bool:
-    """Classify a task as locomotion (legged/control) vs manipulation for grouped driving."""
-    return any(h in (task.task_id + " " + " ".join(task.prototype_names)).lower() for h in LEGGED_HINTS)
 
 
 # ------------------------------------------------------------------

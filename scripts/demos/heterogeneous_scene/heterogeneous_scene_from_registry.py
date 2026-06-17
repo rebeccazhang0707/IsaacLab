@@ -16,11 +16,15 @@ form:
   across the two workflows collapse to a single cloned prototype.
 * ``--clone-api {implicit, explicit}`` --
     * ``implicit`` : high-level :class:`~isaaclab.scene.InteractiveScene` + a
-      heterogeneous :class:`~isaaclab.cloner.CloneCfg` (cloning/selector/physics
-      managed for you).
+      heterogeneous :class:`~isaaclab.cloner.CloneCfg` (env layout, cloning, and
+      physics views managed for you).
     * ``explicit`` : low-level ``grid_transforms`` + ``usd_replicate`` +
       :class:`~isaaclab.cloner.ReplicateSession` (you spawn each prototype in
       ``env_0`` and clone it yourself, then drive the bare asset objects).
+
+This variant focuses on the clone API only: it does not use the runtime selector and
+drives every environment together (no locomotion/manipulation grouping). See
+:mod:`clone_engines` for why a selector is unnecessary when all envs reset at once.
 * ``--clone_strategy {sequential, interleaved}`` -- prototype-combination -> env
   assignment (both round-robin). ``random`` is intentionally not offered; see
   :data:`~registry_harvest.STRATEGIES` for why.
@@ -151,7 +155,7 @@ def main() -> None:
     # 3) Build the scene
     sim = SimulationContext(sim_utils.SimulationCfg(dt=1.0 / 60.0, device=args_cli.device))
     sim.set_camera_view(eye=[6.0, 6.0, 4.0], target=[0.0, 0.0, 0.5])
-    print(f"[INFO] Building scene via the {args_cli.clone_api} clone API; locomotion / manipulation groups alternate.")
+    print(f"[INFO] Building scene via the {args_cli.clone_api} clone API; all envs reset and drive together.")
 
     # 4) Run the simulation
     strategy = common.STRATEGIES[args_cli.clone_strategy]
