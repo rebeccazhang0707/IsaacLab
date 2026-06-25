@@ -27,6 +27,8 @@ import re
 from dataclasses import MISSING
 
 import gymnasium as gym
+from asset_inspect import articulation_dof_exceeds, model_label, spawn_signature, unique_prim_name
+from log import note_log, skip_log
 
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.cloner import interleaved, sequential
@@ -50,14 +52,6 @@ CONTRIB_TASK_PREFIX = "isaaclab_tasks.contrib"
 _GROUND_SPAWN_NAMES = {"GroundPlaneCfg"}
 _TERRAIN_CFG_NAMES = {"TerrainImporterCfg"}
 
-# Random joint-perturbation magnitude per robot family; legged platforms wiggle
-# less than arms so they stay upright while remaining visually expressive.
-ARM_NOISE = 0.4
-LEG_NOISE = 0.06
-DEFAULT_NOISE = 0.15
-LEGGED_HINTS = ("anymal", "unitree", "spot", "a1", "go1", "go2", "cassie", "digit", "h1", "g1", "humanoid", "ant")
-ARM_HINTS = ("panda", "franka", "ur5", "ur10", "kinova", "sawyer", "flexiv", "allegro", "shadow", "robot", "arm")
-
 # Selectable clone strategies (prototype-combination -> env assignment). Only the
 # deterministic round-robin strategies are exposed; the cloner's :func:`~isaaclab.cloner.random`
 # is omitted on purpose. This demo relies on the analytic ``env i -> task i % n`` map for the
@@ -78,37 +72,8 @@ TASK_Z_OFFSETS = {"Place-Mug-Agibot-Left-Arm": -1.0}
 
 
 # ------------------------------------------------------------------
-# Prototype identity: signature (de-dup) + display label + unique name
+# Prototype identity (de-dup policy)
 # ------------------------------------------------------------------
-
-
-def spawn_signature(cfg: AssetBaseCfg) -> str:
-    """String identifying the physical model a spawn produces (USD set + scale)."""
-    spawn = getattr(cfg, "spawn", None)
-    if spawn is None:
-        return f"{type(cfg).__name__}:no_spawn"
-    usd = getattr(spawn, "usd_path", None)
-    sub = getattr(spawn, "assets_cfg", None)
-    if usd is not None:
-        body = usd
-    elif sub:
-        body = "+".join(sorted(getattr(s, "usd_path", None) or type(s).__name__ for s in sub))
-    else:
-        body = type(spawn).__name__
-    return f"{type(cfg).__name__}|{body}|scale={getattr(spawn, 'scale', None)}"
-
-
-def model_label(cfg: AssetBaseCfg) -> str:
-    """Short human-readable model name for reports (USD file, shape class, or variant set)."""
-    spawn = getattr(cfg, "spawn", None)
-    usd = getattr(spawn, "usd_path", None)
-    sub = getattr(spawn, "assets_cfg", None)
-    if usd:
-        return usd.split("/")[-1]
-    if sub:
-        labels = [(getattr(s, "usd_path", None) or "").split("/")[-1] or type(s).__name__ for s in sub]
-        return "{" + ", ".join(labels) + "}"
-    return type(spawn).__name__ if spawn else "-"
 
 
 def prototype_key(cfg: AssetBaseCfg, occurrence: int) -> str:
@@ -129,44 +94,6 @@ def prototype_key(cfg: AssetBaseCfg, occurrence: int) -> str:
         rot = tuple(round(float(x), 3) for x in (getattr(init, "rot", None) or (1.0, 0.0, 0.0, 0.0)))
         key += f"|pos={pos}|rot={rot}"
     return key
-
-
-def unique_prim_name(cfg: AssetBaseCfg, taken: set[str]) -> str:
-    """A unique scene-field name (and prim leaf) derived from the asset's model."""
-    spawn = getattr(cfg, "spawn", None)
-    usd = getattr(spawn, "usd_path", None)
-    sub = getattr(spawn, "assets_cfg", None)
-    if usd:
-        stem = usd.split("/")[-1].rsplit(".", 1)[0]
-    elif sub:
-        first_usd = getattr(sub[0], "usd_path", None)
-        stem = (first_usd.split("/")[-1].rsplit(".", 1)[0] + "_multi") if first_usd else "multi_asset"
-    elif spawn is not None:
-        stem = type(spawn).__name__.replace("Cfg", "")
-    else:
-        stem = type(cfg).__name__
-    base = re.sub(r"[^0-9a-zA-Z]+", "_", stem).strip("_").lower() or "asset"
-    name, i = base, 1
-    while name in taken:
-        i += 1
-        name = f"{base}_{i}"
-    taken.add(name)
-    return name
-
-
-# ------------------------------------------------------------------
-# Task driving semantics (used by the engines' run loop)
-# ------------------------------------------------------------------
-
-
-def noise_scale(asset_name: str) -> float:
-    """Per-asset joint-perturbation magnitude inferred from the asset name."""
-    lname = asset_name.lower()
-    if any(h in lname for h in LEGGED_HINTS):
-        return LEG_NOISE
-    if any(h in lname for h in ARM_HINTS):
-        return ARM_NOISE
-    return DEFAULT_NOISE
 
 
 # ------------------------------------------------------------------
@@ -275,7 +202,7 @@ def _harvest_task(task_id: str, fields: dict, randomize_variants: bool) -> tuple
         (DeformableObjectCfg and isinstance(v, DeformableObjectCfg)) or "Deformable" in type(v).__name__
         for v in fields.values()
     ):
-        print(f"[skip] {task_id}: deformable (cloth/soft) task filtered")
+        skip_log(f"[skip] {task_id}: deformable (cloth/soft) task filtered")
         return None
 
     ground_z = 0.0
@@ -307,10 +234,10 @@ def _harvest_task(task_id: str, fields: dict, randomize_variants: bool) -> tuple
         env_scoped.append(value)
 
     if dropped_grippers:
-        print(f"[note] {task_id}: dropped {len(dropped_grippers)} SurfaceGripper asset(s) (CPU-only backend)")
+        note_log(f"[note] {task_id}: dropped {len(dropped_grippers)} SurfaceGripper asset(s) (CPU-only backend)")
 
     if not env_scoped:
-        print(f"[skip] {task_id}: no env-scoped assets")
+        skip_log(f"[skip] {task_id}: no env-scoped assets")
         return None
 
     delta = -ground_z  # lift the whole group so its ground lands at world z=0
@@ -357,6 +284,7 @@ def harvest_tasks(
     prim_prefix: str,
     device: str,
     max_tasks: int | None = None,
+    max_dof: int | None = None,
     randomize_variants: bool = False,
 ) -> tuple[list[TaskGroup], list[Prototype]]:
     """Harvest tasks into ``(tasks, prototypes)`` with same-model assets de-duplicated.
@@ -366,6 +294,8 @@ def harvest_tasks(
             (use :func:`asset_fields`).
         prim_prefix: Env-namespace prefix for cloned prim paths, e.g. ``"{ENV_REGEX_NS}"``
             for InteractiveScene or ``"/World/envs/env_.*"`` for the manual clone path.
+        max_dof: If set, drop any task containing an articulation whose DOF count exceeds
+            this value (see :func:`articulation_dof_exceeds`). ``None`` keeps all tasks.
     """
     tasks: list[TaskGroup] = []
     prototypes: list[Prototype] = []  # registration order == stable scene-field order
@@ -377,13 +307,22 @@ def harvest_tasks(
         try:
             cfg = parse_env_cfg(task_id, device=device, num_envs=1)
         except Exception as exc:  # noqa: BLE001 - one bad task must not abort discovery
-            print(f"[skip] {task_id}: cfg load failed ({type(exc).__name__}: {exc})")
+            skip_log(f"[skip] {task_id}: cfg load failed ({type(exc).__name__}: {exc})")
             continue
         fields = fields_of(cfg)
         harvested = _harvest_task(task_id, fields, randomize_variants)
         if harvested is None:
             continue
         ground_z, asset_cfgs = harvested
+
+        # Drop the whole task as soon as one of its articulations is too high-DOF (e.g.
+        # hands, humanoids), keeping the scene light. Stops at the first offender instead
+        # of scanning them all. Only inspected when --max_dof_filter is set.
+        if max_dof is not None:
+            over = next((c for c in asset_cfgs if articulation_dof_exceeds(c, max_dof)), None)
+            if over is not None:
+                skip_log(f"[skip] {task_id}: articulation '{model_label(over)}' exceeds --max_dof_filter={max_dof}")
+                continue
 
         # Number same-model duplicates within a task (#0, #1, ...) so two identical
         # cubes stay distinct while still sharing the k-th slot across tasks.
@@ -397,7 +336,7 @@ def harvest_tasks(
 
         task_sig = frozenset(key for key, _ in keyed_assets)
         if task_sig in seen_task_sigs:
-            print(f"[dup ] {task_id}: asset set identical to an earlier task, skipped")
+            skip_log(f"[dup ] {task_id}: asset set identical to an earlier task, skipped")
             continue
         seen_task_sigs.add(task_sig)
 

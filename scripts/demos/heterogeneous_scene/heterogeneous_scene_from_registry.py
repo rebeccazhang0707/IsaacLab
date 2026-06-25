@@ -37,6 +37,8 @@ Harvest/identity/report live in :mod:`registry_harvest`; the two clone engines
     DEMO=scripts/demos/heterogeneous_scene/heterogeneous_scene_from_registry.py
     ./isaaclab.sh -p $DEMO --workflow both --clone_api implicit     # all core tasks, high-level
     ./isaaclab.sh -p $DEMO --workflow direct --clone_api explicit   # Direct tasks, low-level
+    ./isaaclab.sh -p $DEMO --physics newton_mjwarp                  # run on the Newton backend
+    ./isaaclab.sh -p $DEMO --max_dof_filter 12                      # drop high-DOF tasks (hands/humanoids)
     ./isaaclab.sh -p $DEMO --include_contrib --list_only            # add contrib tasks; inspect only
 
 """
@@ -71,10 +73,22 @@ parser.add_argument(
     "--max_tasks", type=int, default=None, help="Cap total tasks (after filtering) for a lighter scene."
 )
 parser.add_argument(
+    "--max_dof_filter",
+    type=int,
+    default=None,
+    help="Drop any task with an articulation whose DOF count exceeds this value (e.g. skip hands/humanoids).",
+)
+parser.add_argument(
     "--clone_strategy",
     choices=["sequential", "interleaved"],
     default="sequential",
     help="Prototype-combination -> env assignment (both round-robin); see registry_harvest.STRATEGIES.",
+)
+parser.add_argument(
+    "--physics",
+    default="physx",
+    choices=["physx", "newton_mjwarp"],
+    help="Physics backend: 'physx' (default) or 'newton_mjwarp' (Newton + MuJoCo-Warp solver).",
 )
 parser.add_argument("--list_only", action="store_true", help="Print the pre-processing report and exit (no sim).")
 parser.add_argument(
@@ -96,6 +110,7 @@ import clone_engines as engines
 import registry_harvest as common
 
 import isaaclab.sim as sim_utils
+from isaaclab.app import make_physics_cfg
 from isaaclab.sim import SimulationContext
 
 # Importing isaaclab_tasks registers every core and contrib gym task as a side effect.
@@ -132,6 +147,7 @@ def main() -> None:
         prim_prefix=engine_cls.PRIM_PREFIX,
         device=args_cli.device,
         max_tasks=args_cli.max_tasks,
+        max_dof=args_cli.max_dof_filter,
         randomize_variants=args_cli.randomize_object_variants,
     )
     if not tasks:
@@ -152,10 +168,14 @@ def main() -> None:
         print("[INFO] --list_only set; skipping SimulationContext and cloning.")
         return
 
-    # 3) Build the scene
-    sim = SimulationContext(sim_utils.SimulationCfg(dt=1.0 / 60.0, device=args_cli.device))
+    # 3) Build the scene on the requested physics backend (physx or newton_mjwarp).
+    physics_cfg = make_physics_cfg(args_cli.physics)
+    sim = SimulationContext(sim_utils.SimulationCfg(dt=1.0 / 60.0, device=args_cli.device, physics=physics_cfg))
     sim.set_camera_view(eye=[6.0, 6.0, 4.0], target=[0.0, 0.0, 0.5])
-    print(f"[INFO] Building scene via the {args_cli.clone_api} clone API; all envs reset and drive together.")
+    print(
+        f"[INFO] Building scene via the {args_cli.clone_api} clone API on the {args_cli.physics} backend; "
+        "all envs reset and drive together."
+    )
 
     # 4) Run the simulation
     strategy = common.STRATEGIES[args_cli.clone_strategy]

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import torch
 import warp as wp
-from registry_harvest import Prototype, TaskGroup, noise_scale
+from registry_harvest import Prototype, TaskGroup
 
 import isaaclab.sim as sim_utils
 from isaaclab import cloner
@@ -42,6 +42,24 @@ from isaaclab.utils.configclass import configclass
 # expanded regex), so each engine exposes its own via ``PRIM_PREFIX``.
 PRIM_PREFIX_INTERACTIVE_SCENE = "{ENV_REGEX_NS}"
 PRIM_PREFIX_MANUAL = "/World/envs/env_.*"
+
+# Random joint-perturbation magnitude per robot family; legged platforms wiggle less than
+# arms so they stay upright while remaining visually expressive.
+ARM_NOISE = 0.4
+LEG_NOISE = 0.06
+DEFAULT_NOISE = 0.15
+LEGGED_HINTS = ("anymal", "unitree", "spot", "a1", "go1", "go2", "cassie", "digit", "h1", "g1", "humanoid", "ant")
+ARM_HINTS = ("panda", "franka", "ur5", "ur10", "kinova", "sawyer", "flexiv", "allegro", "shadow", "robot", "arm")
+
+
+def noise_scale(asset_name: str) -> float:
+    """Per-asset joint-perturbation magnitude inferred from the asset name."""
+    lname = asset_name.lower()
+    if any(h in lname for h in LEGGED_HINTS):
+        return LEG_NOISE
+    if any(h in lname for h in ARM_HINTS):
+        return ARM_NOISE
+    return DEFAULT_NOISE
 
 
 def _is_clone_group(cfg) -> bool:
