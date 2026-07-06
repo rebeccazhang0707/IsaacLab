@@ -10,4 +10,5 @@ Importing this package registers the contributed gym environments. ``train.py`` 
 """
 
 # Importing each leaf config package runs its ``gym.register`` calls.
+from .manipulation.libero.config import franka  # noqa: F401
 from .manipulation.multitask.config import demo  # noqa: F401
