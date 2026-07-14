@@ -43,9 +43,18 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 # local imports
 import cli_args  # isort: skip
 
+# ``common`` lives in scripts/reinforcement_learning (one directory up); make it importable
+# whether this file runs directly or via the unified dispatcher.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from common import prelaunch_kit_before_cfg  # isort: skip  # noqa: E402
+
 # PLACEHOLDER: Extension template (do not remove this comment)
 with contextlib.suppress(ImportError):
     import isaaclab_tasks_experimental  # noqa: F401
+
+# Register contributed tasks (e.g. LIBERO multitask) so their gym IDs resolve.
+with contextlib.suppress(ImportError):
+    import isaaclab_contrib.tasks  # noqa: F401
 
 # -- argparse ----------------------------------------------------------------
 parser = argparse.ArgumentParser(description="Play a checkpoint of an RL agent from RSL-RL.")
@@ -91,6 +100,11 @@ sys.argv = [sys.argv[0]] + remaining_args
 # Check for installed RSL-RL version
 installed_version = metadata.version("rsl-rl-lib")
 
+# Establish the Kit linker namespace before the hydra decorator builds the (potentially
+# heavy) config, so it cannot crash carb's dlmopen; launch_simulation() below relaunches
+# as a no-op. main() mirrors the launched device below.
+_EARLY_APP_LAUNCHER = prelaunch_kit_before_cfg(args_cli, sys.argv)
+
 
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
@@ -110,7 +124,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # set the environment seed
         # note: certain randomizations occur in the environment initialization so we set the seed here
         env_cfg.seed = agent_cfg.seed
-        env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+        if args_cli.device is not None:
+            env_cfg.sim.device = args_cli.device
+        elif _EARLY_APP_LAUNCHER is not None and hasattr(_EARLY_APP_LAUNCHER, "device"):
+            # launch_simulation() skips device propagation when Kit is already running.
+            env_cfg.sim.device = _EARLY_APP_LAUNCHER.device
 
         # specify directory for logging experiments
         log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)

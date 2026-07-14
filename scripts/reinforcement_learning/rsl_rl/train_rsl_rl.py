@@ -26,6 +26,7 @@ from common import (
     dump_train_configs,
     enable_cameras_for_video,
     import_local_module,
+    prelaunch_kit_before_cfg,
     set_hydra_args,
     validate_distributed_device,
     wrap_record_video,
@@ -43,6 +44,10 @@ CLI_ARGS = import_local_module("isaaclab_rsl_rl_cli_args", RL_ROOT / "rsl_rl" / 
 # PLACEHOLDER: Extension template (do not remove this comment)
 with contextlib.suppress(ImportError):
     import isaaclab_tasks_experimental  # noqa: F401
+
+# Register contributed tasks (e.g. LIBERO multitask) so their gym IDs resolve.
+with contextlib.suppress(ImportError):
+    import isaaclab_contrib.tasks  # noqa: F401
 
 
 def _check_rsl_rl_version() -> str:
@@ -114,7 +119,17 @@ def run(argv: list[str]) -> None:
 
     args_cli = _parse_args(argv)
     installed_version = _check_rsl_rl_version()
+
+    # Establish the Kit linker namespace before the (potentially heavy) config build so it
+    # cannot crash carb's dlmopen; launch_simulation() below relaunches as a no-op.
+    early_app_launcher = prelaunch_kit_before_cfg(args_cli, argv)
+
     env_cfg, agent_cfg = resolve_task_config(args_cli.task, args_cli.agent)
+
+    # launch_simulation() skips its own device propagation when Kit is already running,
+    # so mirror it here from the early launcher.
+    if early_app_launcher is not None and hasattr(env_cfg, "sim") and hasattr(early_app_launcher, "device"):
+        env_cfg.sim.device = early_app_launcher.device
 
     with launch_simulation(env_cfg, args_cli):
         agent_cfg = CLI_ARGS.update_rsl_rl_cfg(agent_cfg, args_cli)

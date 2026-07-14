@@ -349,8 +349,15 @@ class _UnifiedLiberoCommandBackend:
         if libero_cfg is None or not hasattr(libero_cfg, "env_task_assignments"):
             raise ValueError("libero_config with env_task_assignments is required.")
         raw_assignments = list(libero_cfg.env_task_assignments)
+        if not raw_assignments:
+            raise ValueError("libero_config.env_task_assignments is empty.")
         if len(raw_assignments) != self.num_envs:
-            raise ValueError(f"Mismatch: num_envs={self.num_envs}, assignments={len(raw_assignments)}.")
+            # env_task_assignments is baked from the config's default num_envs at
+            # construction time, before the CLI `--num_envs` override is applied. Re-tile
+            # the deterministic ``env i -> task (i % n_tasks)`` cycle to the actual env
+            # count so any --num_envs works (mirrors build_env_task_assignments()).
+            unique_cycle = list(dict.fromkeys(raw_assignments))
+            raw_assignments = [unique_cycle[i % len(unique_cycle)] for i in range(self.num_envs)]
         assignments = [_decode_assignment(a) for a in raw_assignments]
         if not os.path.isdir(self.cfg.datasets_root):
             raise FileNotFoundError(f"Datasets root '{self.cfg.datasets_root}' does not exist.")
