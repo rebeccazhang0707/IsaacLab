@@ -5,4 +5,9 @@
 
 """Robot module definitions for the LIBERO multitask environment."""
 
-from .franka import FRANKA, LiberoFrankaRobotCfg
+from .franka_osc import FRANKA_OSC, LiberoFrankaOscRobotCfg
+
+__all__ = [
+    "FRANKA_OSC",
+    "LiberoFrankaOscRobotCfg",
+]

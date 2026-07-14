@@ -38,12 +38,13 @@ from ..common.suite_loader import load_suite
 
 # Internal suite name -> per-task scene-key prefix, harvested in this order.  The
 # order fixes the task index (and therefore the ``env i -> task i % n_tasks``
-# assignment and the ``task_onehot`` column) for the combined environment.
+# assignment).  DGPO+ABC eval uses :data:`~...dgpo_layout.DGPO_ABC_HARVEST_SUITES`
+# instead (libero_10 / object / spatial / goal) to match playground assignment order.
 LIBERO_SUITES: tuple[tuple[str, str], ...] = (
     ("libero_spatial", "spatial"),
     ("libero_goal", "goal"),
     ("libero_object", "object"),
-    ("libero_long", "libero_long"),
+    ("libero_long", "long"),
 )
 
 
@@ -91,6 +92,8 @@ class ObjectBinding:
 
     proto_name: str
     """Name of the shared prototype this slot maps to."""
+    canonical_name: str
+    """Raw LIBERO object name (e.g. ``alphabet_soup_1``); matches pose-buffer columns."""
     pos: tuple[float, float, float]
     """This task's init position in the env frame [m]."""
     rot: tuple[float, float, float, float]
@@ -115,12 +118,27 @@ class TaskBinding:
     """Prototype name of the manipulated object (``obj_of_interest``)."""
     target_proto: str | None
     """Prototype name of the goal object (falls back to the primary object)."""
-    success_xy_threshold: float
+    interest_names: tuple[str, ...] = ()
+    """Raw ``obj_of_interest`` names for DGPO pose-buffer activation."""
+    target_names: tuple[str, ...] = ()
+    """Raw ``targets`` names for DGPO pose-buffer activation."""
+    success_xy_threshold: float = 0.10
     """Planar success tolerance [m] (from the BDDL goal)."""
-    success_height_threshold: float
+    success_height_threshold: float = 0.10
     """Vertical success tolerance [m] (from the BDDL goal)."""
-    primary_rest_z: float
+    primary_rest_z: float = 0.9
     """Env-frame resting height [m] of the primary object."""
+    workspace_shift: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    """``ROBOT_BASE_KITCHEN - task_robot_base`` [m]; added to demo ``initial_state`` poses on load."""
+
+    @property
+    def active_canonical_names(self) -> tuple[str, ...]:
+        """Ordered unique interest+target names used to activate pose-buffer slots."""
+        seen: list[str] = []
+        for name in (*self.interest_names, *self.target_names):
+            if name not in seen:
+                seen.append(name)
+        return tuple(seen)
 
 
 def harvest_libero_prototypes(
@@ -204,7 +222,13 @@ def harvest_libero_prototypes(
                 if layout.name not in proto.task_names:
                     proto.task_names.append(layout.name)
                 object_bindings.append(
-                    ObjectBinding(proto_name=proto.name, pos=obj.pos, rot=obj.rot, is_articulation=obj.is_articulation)
+                    ObjectBinding(
+                        proto_name=proto.name,
+                        canonical_name=obj.obj_name,
+                        pos=obj.pos,
+                        rot=obj.rot,
+                        is_articulation=obj.is_articulation,
+                    )
                 )
                 proto_by_object_key[obj.key] = proto.name
 
@@ -218,9 +242,12 @@ def harvest_libero_prototypes(
                     object_bindings=object_bindings,
                     primary_proto=primary_proto,
                     target_proto=target_proto,
+                    interest_names=layout.interest_names,
+                    target_names=layout.target_names,
                     success_xy_threshold=layout.success_xy_threshold,
                     success_height_threshold=layout.success_height_threshold,
                     primary_rest_z=layout.primary_rest_z,
+                    workspace_shift=layout.workspace_shift,
                 )
             )
 

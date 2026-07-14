@@ -36,9 +36,9 @@ from ... import mdp
 from ...assets import OBJECT_RIGID_PROPS, libero_assets_dir
 
 if TYPE_CHECKING:
-    from isaaclab_contrib.tasks.manipulation.libero.robots.franka import LiberoFrankaRobotCfg
+    from isaaclab_contrib.tasks.manipulation.multitask.robots._base import RobotModuleCfg
 
-# Fixed scene names for the single LIBERO robot (see ``robots/franka.py``).
+# Fixed scene names for the single LIBERO robot (see ``robots/franka_osc.py``).
 _ROBOT_ASSET = "franka_robot"
 _EE_FRAME_ASSET = "franka_ee_frame"
 
@@ -415,7 +415,7 @@ class LiberoManipulationTaskCfg(TaskModuleCfg):
         """
         return {self._table_key(): kitchen_table(self._table_key())}
 
-    def scene_assets(self, group: str, robot: LiberoFrankaRobotCfg) -> dict[str, object]:
+    def scene_assets(self, group: str, robot: RobotModuleCfg) -> dict[str, object]:
         assets: dict[str, object] = dict(self.fixture_assets())
         assets.update(self.object_assets())
         return assets
@@ -424,14 +424,14 @@ class LiberoManipulationTaskCfg(TaskModuleCfg):
     # Commands (sparse reward — no goal command stream)
     # ------------------------------------------------------------------
 
-    def command_terms(self, group: str, robot: LiberoFrankaRobotCfg) -> dict[str, object]:
+    def command_terms(self, group: str, robot: RobotModuleCfg) -> dict[str, object]:
         return {}
 
     # ------------------------------------------------------------------
     # Observations
     # ------------------------------------------------------------------
 
-    def task_obs_terms(self, group: str, robot: LiberoFrankaRobotCfg) -> dict[str, ObsTerm]:
+    def task_obs_terms(self, group: str, robot: RobotModuleCfg) -> dict[str, ObsTerm]:
         terms: dict[str, ObsTerm] = {}
         for key in self.rigid_object_keys():
             terms[f"{key}_pos"] = ObsTerm(
@@ -443,7 +443,7 @@ class LiberoManipulationTaskCfg(TaskModuleCfg):
             )
         return terms
 
-    def scatter_obs_terms(self, group: str, robot: LiberoFrankaRobotCfg) -> dict[str, tuple[int | None, TermCfg]]:
+    def scatter_obs_terms(self, group: str, robot: RobotModuleCfg) -> dict[str, tuple[int | None, TermCfg]]:
         return {}
 
     # ------------------------------------------------------------------
@@ -468,7 +468,7 @@ class LiberoManipulationTaskCfg(TaskModuleCfg):
             params=self._success_params(group),
         )
 
-    def _shaping_reward_terms(self, group: str, robot: LiberoFrankaRobotCfg) -> dict[str, RewTerm]:
+    def _shaping_reward_terms(self, group: str, robot: RobotModuleCfg) -> dict[str, RewTerm]:
         """Dense reach → lift → place shaping (demo-free, goal-derived)."""
         primary_cfg = SceneEntityCfg(self.primary_object_key, selector=group)
         target_cfg = SceneEntityCfg(self.target_object_key, selector=group)
@@ -491,17 +491,17 @@ class LiberoManipulationTaskCfg(TaskModuleCfg):
             ),
         }
 
-    def _goal_reward_terms(self, group: str, robot: LiberoFrankaRobotCfg) -> dict[str, RewTerm]:
+    def _goal_reward_terms(self, group: str, robot: RobotModuleCfg) -> dict[str, RewTerm]:
         """Sparse ``goal`` reward: success bonus only (plus global penalties)."""
         return {f"{group}_task_success": self._success_reward_term(group)}
 
-    def _metaworld_dense_reward_terms(self, group: str, robot: LiberoFrankaRobotCfg) -> dict[str, RewTerm]:
+    def _metaworld_dense_reward_terms(self, group: str, robot: RobotModuleCfg) -> dict[str, RewTerm]:
         """Demo-free dense reward: reach/lift/place shaping + success bonus."""
         terms = self._shaping_reward_terms(group, robot)
         terms[f"{group}_task_success"] = self._success_reward_term(group)
         return terms
 
-    def _world_prediction_reward_terms(self, group: str, robot: LiberoFrankaRobotCfg) -> dict[str, RewTerm]:
+    def _world_prediction_reward_terms(self, group: str, robot: RobotModuleCfg) -> dict[str, RewTerm]:
         """Dense demo/trajectory-tracking reward (gated).
 
         The reference implementation tracks a per-step demo trajectory: EE
@@ -529,7 +529,7 @@ class LiberoManipulationTaskCfg(TaskModuleCfg):
             _WORLD_PREDICTION_WARNED = True
         return {f"{group}_task_success": self._success_reward_term(group)}
 
-    def reward_terms(self, group: str, robot: LiberoFrankaRobotCfg) -> dict[str, RewTerm]:
+    def reward_terms(self, group: str, robot: RobotModuleCfg) -> dict[str, RewTerm]:
         # Relational / articulation goals (open drawer, turn on stove) have no
         # manipulated rigid object (``primary_object_key is None``); every task
         # reward here is keyed on a rigid primary object, so contribute no
@@ -549,7 +549,7 @@ class LiberoManipulationTaskCfg(TaskModuleCfg):
     # Terminations
     # ------------------------------------------------------------------
 
-    def termination_terms(self, group: str, robot: LiberoFrankaRobotCfg) -> dict[str, DoneTerm]:
+    def termination_terms(self, group: str, robot: RobotModuleCfg) -> dict[str, DoneTerm]:
         # Both terminations track the rigid primary object; a relational goal
         # (``primary_object_key is None``) has none, so it terminates only on
         # time-out. Consistent with the harvest path (no primary -> no drop /
@@ -574,7 +574,7 @@ class LiberoManipulationTaskCfg(TaskModuleCfg):
     # Reset events
     # ------------------------------------------------------------------
 
-    def reset_events(self, group: str, robot: LiberoFrankaRobotCfg) -> dict[str, EventTerm]:
+    def reset_events(self, group: str, robot: RobotModuleCfg) -> dict[str, EventTerm]:
         object_cfgs = [SceneEntityCfg(key, selector=group) for key in self.rigid_object_keys()]
         object_cfgs += [SceneEntityCfg(key, selector=group) for key in self.articulation_keys()]
         events = {

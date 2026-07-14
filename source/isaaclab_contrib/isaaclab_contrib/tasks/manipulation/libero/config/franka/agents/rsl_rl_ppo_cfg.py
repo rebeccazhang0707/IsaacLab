@@ -9,19 +9,35 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 
 
 @configclass
-class LiberoMultiTaskPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+class LiberoAllDgpoPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    """PPO runner for the DGPO harvest+OSC training path.
+
+    Architecture mirrors RobotLearningLab ``MultiTaskLiberoAdaptiveBCRunnerCfg``:
+    ``[512, 256, 128]`` MLPs with ``noise_std_type="log"`` so legacy
+    ``model_32500.pt`` (actor 512x324, critic 512x572) still loads under
+    rsl-rl >= 4.0, and fresh DGPO training uses the same layout.
+    """
+
     num_steps_per_env = 24
     max_iterations = 4000
     save_interval = 200
-    experiment_name = "libero_multi_task"
+    experiment_name = "libero_all_dgpo"
+    # rsl-rl >= 4.0 uses the "actor" key (not legacy "policy"). Missing "actor"
+    # falls back to the env's single "policy" group (277) and breaks ckpt load.
+    # Actor: policy(277)+proprio(47)=324; critic: +privileged_proprio(248)=572.
+    obs_groups = {
+        "actor": ["policy", "proprio"],
+        "critic": ["policy", "proprio", "privileged_proprio"],
+    }
     run_name = ""
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=1.0,
+        init_noise_std=0.8,
         actor_obs_normalization=True,
         critic_obs_normalization=True,
-        actor_hidden_dims=[256, 128, 64],
-        critic_hidden_dims=[256, 128, 64],
+        actor_hidden_dims=[512, 256, 128],
+        critic_hidden_dims=[512, 256, 128],
         activation="elu",
+        noise_std_type="log",
     )
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
@@ -39,36 +55,5 @@ class LiberoMultiTaskPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     )
 
 
-@configclass
-class LiberoObjectPPORunnerCfg(LiberoMultiTaskPPORunnerCfg):
-    """PPO runner for the LIBERO-Object per-task multi-task env (10 groups)."""
-
-    experiment_name = "libero_object"
-
-
-@configclass
-class LiberoLongPPORunnerCfg(LiberoMultiTaskPPORunnerCfg):
-    """PPO runner for the LIBERO-Long per-task multi-task env (10 groups)."""
-
-    experiment_name = "libero_long"
-
-
-@configclass
-class LiberoAllPPORunnerCfg(LiberoMultiTaskPPORunnerCfg):
-    """PPO runner for the combined 40-task LIBERO env (object-level prototype sharing)."""
-
-    experiment_name = "libero_all"
-
-
-@configclass
-class LiberoGoalPPORunnerCfg(LiberoMultiTaskPPORunnerCfg):
-    """PPO runner for the goal-only harvest env (10 tasks, object-level prototype sharing)."""
-
-    experiment_name = "libero_goal"
-
-
-@configclass
-class LiberoSpatialPPORunnerCfg(LiberoMultiTaskPPORunnerCfg):
-    """PPO runner for the spatial-only harvest env (10 tasks, object-level prototype sharing)."""
-
-    experiment_name = "libero_spatial"
+# Backward-compatible alias (older tests / docs).
+LiberoAllCompatPPORunnerCfg = LiberoAllDgpoPPORunnerCfg

@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import MISSING
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+import torch
 from packaging import version
 
 if TYPE_CHECKING:
@@ -17,6 +20,113 @@ if TYPE_CHECKING:
 _V4_0_0 = version.parse("4.0.0")
 _V5_0_0 = version.parse("5.0.0")
 _MODEL_CFG_NAMES = ("actor", "critic", "student", "teacher")
+
+
+def migrate_legacy_rsl_rl_checkpoint(loaded_dict: dict[str, Any]) -> dict[str, Any]:
+    """Convert a pre-4.0 ``model_state_dict`` checkpoint into the split actor/critic format.
+
+    Legacy :class:`~rsl_rl.modules.ActorCritic` checkpoints store a single
+    ``model_state_dict`` with keys such as ``actor.*``, ``critic.*``,
+    ``actor_obs_normalizer.*``, ``critic_obs_normalizer.*``, and ``log_std`` /
+    ``std``. Newer ``rsl-rl`` (>= 4.0) expects ``actor_state_dict`` /
+    ``critic_state_dict`` with ``mlp.*``, ``obs_normalizer.*``, and
+    ``distribution.(log_)std_param``.
+
+    Args:
+        loaded_dict: Checkpoint dictionary as returned by ``torch.load``.
+
+    Returns:
+        A new dictionary with ``actor_state_dict`` / ``critic_state_dict``. If
+        the input is already in the new format, it is returned unchanged.
+
+    Raises:
+        KeyError: If neither the new nor the legacy model keys are present.
+        ValueError: If legacy keys cannot be mapped to the new layout.
+    """
+    if "actor_state_dict" in loaded_dict and "critic_state_dict" in loaded_dict:
+        return loaded_dict
+
+    if "model_state_dict" not in loaded_dict:
+        raise KeyError(
+            "Checkpoint is missing both 'actor_state_dict'/'critic_state_dict' and legacy "
+            f"'model_state_dict'. Found keys: {list(loaded_dict.keys())}"
+        )
+
+    model_state = loaded_dict["model_state_dict"]
+    actor_state: dict[str, torch.Tensor] = {}
+    critic_state: dict[str, torch.Tensor] = {}
+    skipped: list[str] = []
+
+    for key, value in model_state.items():
+        if key == "log_std":
+            actor_state["distribution.log_std_param"] = value
+        elif key == "std":
+            actor_state["distribution.std_param"] = value
+        elif key.startswith("actor_obs_normalizer."):
+            actor_state["obs_normalizer." + key[len("actor_obs_normalizer.") :]] = value
+        elif key.startswith("critic_obs_normalizer."):
+            critic_state["obs_normalizer." + key[len("critic_obs_normalizer.") :]] = value
+        elif key.startswith("actor."):
+            actor_state["mlp." + key[len("actor.") :]] = value
+        elif key.startswith("critic."):
+            critic_state["mlp." + key[len("critic.") :]] = value
+        else:
+            skipped.append(key)
+
+    if not actor_state or not critic_state:
+        raise ValueError(
+            "Failed to migrate legacy 'model_state_dict': expected actor/critic weights. "
+            f"Got actor keys={list(actor_state)}, critic keys={list(critic_state)}, "
+            f"skipped={skipped}"
+        )
+
+    if skipped:
+        print(f"[WARNING]: Skipping unmapped legacy checkpoint keys during migration: {skipped}")
+
+    converted: dict[str, Any] = {
+        "actor_state_dict": actor_state,
+        "critic_state_dict": critic_state,
+        "iter": loaded_dict.get("iter", 0),
+        "infos": loaded_dict.get("infos"),
+    }
+    # Optimizer layouts differ across rsl-rl major versions; play/eval does not need it.
+    # Preserve non-model extras (e.g. ImportanceAwarePPO state) for callers that care.
+    for extra_key, extra_value in loaded_dict.items():
+        if extra_key in {"model_state_dict", "optimizer_state_dict", "iter", "infos"}:
+            continue
+        converted[extra_key] = extra_value
+
+    print(
+        "[INFO]: Migrated legacy rsl-rl checkpoint "
+        f"(actor={len(actor_state)} tensors, critic={len(critic_state)} tensors)."
+    )
+    return converted
+
+
+def ensure_rsl_rl_checkpoint_compatible(path: str, map_location: str | None = None) -> str:
+    """Return a checkpoint path loadable by current ``rsl-rl`` (>= 4.0).
+
+    If ``path`` already uses ``actor_state_dict`` / ``critic_state_dict``, it is
+    returned unchanged. Legacy ``model_state_dict`` checkpoints are migrated and
+    written to a temporary ``.pt`` file whose path is returned.
+
+    Args:
+        path: Path to a ``model_*.pt`` checkpoint.
+        map_location: Optional device mapping passed to ``torch.load``.
+
+    Returns:
+        Path to a checkpoint in the current rsl-rl format.
+    """
+    loaded_dict = torch.load(path, weights_only=False, map_location=map_location)
+    if "actor_state_dict" in loaded_dict and "critic_state_dict" in loaded_dict:
+        return path
+
+    converted = migrate_legacy_rsl_rl_checkpoint(loaded_dict)
+    fd, converted_path = tempfile.mkstemp(prefix="rsl_rl_migrated_", suffix=".pt")
+    os.close(fd)
+    torch.save(converted, converted_path)
+    print(f"[INFO]: Wrote migrated checkpoint to: {converted_path}")
+    return converted_path
 
 
 def handle_deprecated_rsl_rl_cfg(agent_cfg: RslRlBaseRunnerCfg, installed_version) -> RslRlBaseRunnerCfg:

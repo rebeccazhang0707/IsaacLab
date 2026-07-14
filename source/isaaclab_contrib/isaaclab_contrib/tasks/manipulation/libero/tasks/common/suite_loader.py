@@ -33,7 +33,10 @@ Tasks span several workspaces (``floor``, ``living_room_table``, ``study_table``
 fixed at the kitchen base :data:`ROBOT_BASE_KITCHEN`.  Every object and fixture
 pose is rigidly translated by ``ROBOT_BASE_KITCHEN - task_robot_base`` so the
 robot base coincides with the shared robot; this preserves each task's authored
-robot-relative geometry exactly.
+robot-relative geometry exactly.  The same ``workspace_shift`` is stored on
+:class:`TaskLayout` / harvest :class:`TaskBinding` and applied to demo
+``initial_state`` poses when loading the DGPO trajectory bank (otherwise
+floor/living-room demos write objects at z≈0 under the raised fixture).
 """
 
 from __future__ import annotations
@@ -132,10 +135,16 @@ class TaskLayout:
     """Scene key of the manipulated object (``obj_of_interest``)."""
     target_key: str | None = None
     """Scene key of the goal object (``targets``); may be ``None``."""
+    interest_names: tuple[str, ...] = ()
+    """Raw LIBERO ``obj_of_interest`` names (e.g. ``alphabet_soup_1``) for pose-buffer activation."""
+    target_names: tuple[str, ...] = ()
+    """Raw LIBERO ``targets`` names for pose-buffer activation."""
     success_xy_threshold: float = 0.10
     """Planar tolerance [m] for the geometric success proxy (from the BDDL goal)."""
     success_height_threshold: float = 0.10
     """Vertical tolerance [m] for the geometric success proxy (from the BDDL goal)."""
+    workspace_shift: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    """``ROBOT_BASE_KITCHEN - task_robot_base`` [m]; applied to fixtures/objects and demo poses."""
 
     @property
     def rigid_object_keys(self) -> list[str]:
@@ -259,6 +268,7 @@ def load_suite(suite_name: str, task_prefix: str) -> list[TaskLayout]:
         dx = ROBOT_BASE_KITCHEN[0] - float(base[0])
         dy = ROBOT_BASE_KITCHEN[1] - float(base[1])
         dz = ROBOT_BASE_KITCHEN[2] - float(base[2])
+        workspace_shift = (dx, dy, dz)
 
         # ── Fixture (one per task) ────────────────────────────────────────
         fx_name, fx_meta = next(iter(task["fixtures"].items()))
@@ -299,8 +309,10 @@ def load_suite(suite_name: str, task_prefix: str) -> list[TaskLayout]:
                 )
             )
 
-        primary_obj = (task.get("obj_of_interest") or [None])[0]
-        target_obj = (task.get("targets") or [None])[0]
+        interest_names = tuple(n for n in (task.get("obj_of_interest") or []) if n in key_by_object)
+        target_names = tuple(n for n in (task.get("targets") or []) if n in key_by_object)
+        primary_obj = interest_names[0] if interest_names else None
+        target_obj = target_names[0] if target_names else None
 
         # ── Goal predicate → geometric success thresholds ────────────────
         # Prefer the first relational ("on" / "in") goal: its ref/target names
@@ -312,8 +324,12 @@ def load_suite(suite_name: str, task_prefix: str) -> list[TaskLayout]:
             if goal.get("relationship") in ("on", "in") and goal.get("ref_obj") and goal.get("target"):
                 if goal["ref_obj"] in key_by_object:
                     primary_obj = goal["ref_obj"]
+                    if goal["ref_obj"] not in interest_names:
+                        interest_names = interest_names + (goal["ref_obj"],)
                 if goal["target"] in key_by_object:
                     target_obj = goal["target"]
+                    if goal["target"] not in target_names:
+                        target_names = target_names + (goal["target"],)
                 xy_thr = float(goal.get("xy_threshold", xy_thr))
                 hz_thr = float(goal.get("height_threshold", hz_thr))
                 break
@@ -325,8 +341,11 @@ def load_suite(suite_name: str, task_prefix: str) -> list[TaskLayout]:
                 objects=objects,
                 primary_key=key_by_object.get(primary_obj),
                 target_key=key_by_object.get(target_obj),
+                interest_names=interest_names,
+                target_names=target_names,
                 success_xy_threshold=xy_thr,
                 success_height_threshold=hz_thr,
+                workspace_shift=workspace_shift,
             )
         )
     return layouts

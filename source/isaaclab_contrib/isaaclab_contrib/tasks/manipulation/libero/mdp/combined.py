@@ -3,9 +3,9 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Per-env task-gather MDP for the combined (object-level prototype-sharing) LIBERO env.
+"""Per-env task-gather MDP for the harvest (object-level prototype-sharing) LIBERO env.
 
-The combined ``Isaac-Libero-All-*`` scene shares identical object models as a
+The combined ``Isaac-Libero-*-Dgpo-Osc-*`` scene shares identical object models as a
 single :class:`~isaaclab.assets.AssetView` across every task that uses them (see
 :mod:`..tasks.harvest.prototypes`).  A shared AssetView therefore spans envs belonging to
 *different* tasks, so the usual per-clone-group ``SceneEntityCfg(selector=group)``
@@ -16,8 +16,7 @@ Instead every task-dependent term gathers **per env by task id**.  The scene is
 cloned with the deterministic :func:`~isaaclab.cloner.sequential` strategy, so env
 ``i`` runs task ``i % n_tasks``.  From that map we build, once per env instance:
 
-* the per-env task id (drives :func:`libero_task_onehot`),
-* per-env success tolerances and lift/drop heights,
+* per-env success tolerances,
 * for each *distinct* prototype, the global envs for which it is the primary /
   target object -- so a single loop over prototypes scatters each env's own
   goal object pose into a full ``(num_envs, ...)`` buffer.
@@ -35,11 +34,9 @@ import torch
 import warp as wp
 
 import isaaclab.utils.math as math_utils
-from isaaclab.managers import ManagerTermBase
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv, ManagerBasedRLEnv
-    from isaaclab.managers import ManagerTermBaseCfg
 
     from ..tasks.harvest.prototypes import TaskBinding
 
@@ -64,11 +61,8 @@ class _LiberoRuntime:
 
         xy = torch.tensor([t.success_xy_threshold for t in tasks], device=device)
         hz = torch.tensor([t.success_height_threshold for t in tasks], device=device)
-        rest = torch.tensor([t.primary_rest_z for t in tasks], device=device)
         self.xy_threshold = xy[self.env_task]
         self.height_threshold = hz[self.env_task]
-        self.lift_height = rest[self.env_task] + 0.03
-        self.drop_height = rest[self.env_task] - 0.45
 
         # prototype name -> global env ids for which it is the primary / target object
         self.primary_envs = self._group_by_proto(tasks, "primary_proto", device)
@@ -121,87 +115,6 @@ def _gather_object_state(
     return pos_w, speed
 
 
-# ---------------------------------------------------------------------------
-# Observations
-# ---------------------------------------------------------------------------
-
-
-class libero_task_onehot(ManagerTermBase):
-    """Per-env one-hot task id across all combined LIBERO tasks.
-
-    Uses the deterministic ``env i -> task i % n_tasks`` clone map (not the
-    selector groups, which overlap under prototype sharing).  Returns shape
-    ``(num_envs, num_tasks)``.
-    """
-
-    def __init__(self, cfg: ManagerTermBaseCfg, env: ManagerBasedRLEnv):
-        super().__init__(cfg, env)
-        num_tasks = int(cfg.params["num_tasks"])
-        env_task = torch.arange(env.num_envs, device=env.device, dtype=torch.long) % num_tasks
-        self._onehot = torch.nn.functional.one_hot(env_task, num_classes=num_tasks).float()
-
-    def __call__(self, env: ManagerBasedRLEnv, num_tasks: int) -> torch.Tensor:
-        return self._onehot
-
-
-def libero_object_positions(
-    env: ManagerBasedRLEnv, proto_names: list[str], robot_name: str = "franka_robot"
-) -> torch.Tensor:
-    """Every prototype's position in the robot base frame [m], zero where absent.
-
-    One fixed-width slot (3 dims) per prototype; an env only sees non-zero values
-    for the prototypes its task actually clones.  Returns shape
-    ``(num_envs, 3 * len(proto_names))``.
-    """
-    selector = env.scene.selector
-    robot = env.scene[robot_name]
-    root_pos = wp.to_torch(robot.data.root_pos_w)
-    root_quat = wp.to_torch(robot.data.root_quat_w)
-    all_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
-    out = torch.zeros(env.num_envs, 3 * len(proto_names), device=env.device)
-    for i, name in enumerate(proto_names):
-        global_ids, view_ids = selector.filter_reset_ids(name, all_ids)
-        if global_ids.numel() == 0:
-            continue
-        obj_pos = wp.to_torch(env.scene[name].data.root_pos_w)[view_ids, :3]
-        obj_b, _ = math_utils.subtract_frame_transforms(root_pos[global_ids], root_quat[global_ids], obj_pos)
-        out[global_ids, i * 3 : (i + 1) * 3] = obj_b
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Rewards (per-env gather; the config picks which to add per reward mode)
-# ---------------------------------------------------------------------------
-
-
-def libero_reach_reward(
-    env: ManagerBasedRLEnv, tasks: list[TaskBinding], std: float = 0.1, ee_frame_name: str = "franka_ee_frame"
-) -> torch.Tensor:
-    """Tanh-shaped reach reward: EE toward each env's primary object [--]."""
-    rt = _runtime(env, tasks)
-    primary_pos, _ = _gather_object_state(env, rt.primary_envs)
-    ee_pos = wp.to_torch(env.scene[ee_frame_name].data.target_pos_w)[:, 0, :]
-    dist = torch.linalg.norm(primary_pos - ee_pos, dim=-1)
-    return 1.0 - torch.tanh(dist / std)
-
-
-def libero_lift_reward(env: ManagerBasedRLEnv, tasks: list[TaskBinding]) -> torch.Tensor:
-    """Sparse bonus for lifting each env's primary object above its lift height [--]."""
-    rt = _runtime(env, tasks)
-    primary_pos, _ = _gather_object_state(env, rt.primary_envs)
-    height = primary_pos[:, 2] - env.scene.env_origins[:, 2]
-    return (height > rt.lift_height).float()
-
-
-def libero_place_reward(env: ManagerBasedRLEnv, tasks: list[TaskBinding], std: float = 0.1) -> torch.Tensor:
-    """Tanh-shaped place reward: primary object toward its target object [--]."""
-    rt = _runtime(env, tasks)
-    primary_pos, _ = _gather_object_state(env, rt.primary_envs)
-    target_pos, _ = _gather_object_state(env, rt.target_envs)
-    dist = torch.linalg.norm(primary_pos - target_pos, dim=-1)
-    return 1.0 - torch.tanh(dist / std)
-
-
 def _success_mask(env: ManagerBasedRLEnv, rt: _LiberoRuntime, speed_threshold: float | None) -> torch.Tensor:
     """Per-env geometric success: primary near target (xy + height) and near rest."""
     primary_pos, primary_speed = _gather_object_state(env, rt.primary_envs)
@@ -212,14 +125,6 @@ def _success_mask(env: ManagerBasedRLEnv, rt: _LiberoRuntime, speed_threshold: f
     if speed_threshold is not None:
         reached &= primary_speed < speed_threshold
     return reached
-
-
-def libero_success_bonus(
-    env: ManagerBasedRLEnv, tasks: list[TaskBinding], speed_threshold: float | None = 0.4
-) -> torch.Tensor:
-    """Sparse task-success bonus (1.0 on success, else 0.0) [--]."""
-    rt = _runtime(env, tasks)
-    return _success_mask(env, rt, speed_threshold).float()
 
 
 # ---------------------------------------------------------------------------
@@ -233,14 +138,6 @@ def libero_task_success(
     """Episode ends when the per-env geometric success proxy is met."""
     rt = _runtime(env, tasks)
     return _success_mask(env, rt, speed_threshold)
-
-
-def libero_object_dropped(env: ManagerBasedRLEnv, tasks: list[TaskBinding]) -> torch.Tensor:
-    """Episode ends when an env's primary object falls below its drop height."""
-    rt = _runtime(env, tasks)
-    primary_pos, _ = _gather_object_state(env, rt.primary_envs)
-    height = primary_pos[:, 2] - env.scene.env_origins[:, 2]
-    return height < rt.drop_height
 
 
 # ---------------------------------------------------------------------------

@@ -8,9 +8,11 @@ __all__ = [
     "RslRlDistillationRunnerCfg",
     "RslRlDistillationStudentTeacherCfg",
     "RslRlDistillationStudentTeacherRecurrentCfg",
+    "ensure_rsl_rl_checkpoint_compatible",
     "export_policy_as_jit",
     "export_policy_as_onnx",
     "handle_deprecated_rsl_rl_cfg",
+    "migrate_legacy_rsl_rl_checkpoint",
     "CNNModel",
     "RslRlBaseRunnerCfg",
     "RslRlCNNModelCfg",
@@ -45,5 +47,9 @@ from .rl_cfg import (
 )
 from .rnd_cfg import RslRlRndCfg
 from .symmetry_cfg import RslRlSymmetryCfg
-from .utils import handle_deprecated_rsl_rl_cfg
+from .utils import (
+    ensure_rsl_rl_checkpoint_compatible,
+    handle_deprecated_rsl_rl_cfg,
+    migrate_legacy_rsl_rl_checkpoint,
+)
 from .vecenv_wrapper import RslRlVecEnvWrapper

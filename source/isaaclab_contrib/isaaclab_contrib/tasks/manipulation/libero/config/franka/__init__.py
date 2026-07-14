@@ -3,186 +3,69 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Gym registration for the LIBERO multitask environments.
+"""Gym registration for LIBERO DGPO (OSC) multitask environments.
 
-Every environment is built by the harvest+selector factory
-(:func:`.libero_all_env_cfg.make_libero_combined_env_cfg`): identical object
-models are de-duplicated into one shared :class:`~isaaclab.assets.AssetView` and
-the task-dependent MDP is gathered per env by task id.  Importing this package
-(which happens when ``isaaclab_contrib.tasks`` is imported) registers the ids
-below with gymnasium:
+Every environment is built by
+:func:`~...envs.dgpo_env_cfg.make_libero_dgpo_env_cfg` /
+:func:`~...envs.dgpo_env_cfg.make_libero_dgpo_play_cfg`: harvest+cloner scene,
+OSC actions (dim 7), and DGPO obs groups (actor=324 / critic=572). Suite order
+for All matches :data:`~...dgpo_layout.DGPO_ABC_HARVEST_SUITES`
+(long → object → spatial → goal). Importing this package registers:
 
-* ``Isaac-Libero-Spatial-Franka-Multi-Task-v0`` — spatial suite alone (10 tasks).
-* ``Isaac-Libero-Goal-Franka-Multi-Task-v0`` — goal suite alone (10 tasks).
-* ``Isaac-Libero-Object-Franka-Multi-Task-v0`` — object suite alone (10 tasks).
-* ``Isaac-Libero-Long-Franka-Multi-Task-v0`` — long-horizon suite alone (10 tasks).
-* ``Isaac-Libero-All-Franka-Multi-Task-v0`` — all four suites (40 tasks) trained
-  together with object-level prototype sharing.
-* ``Isaac-Libero-Spatial-Goal-Franka-Multi-Task-v0`` — spatial + goal combo (20 tasks).
-* ``Isaac-Libero-Object-Long-Franka-Multi-Task-v0`` — object + long combo (20 tasks).
+* ``Isaac-Libero-All-Dgpo-Osc-v0`` — train all four suites (40 tasks).
+* ``Isaac-Libero-All-Dgpo-Osc-Play-v0`` — play/eval all suites.
+* ``Isaac-Libero-{Long,Object,Spatial,Goal}-Dgpo-Osc-Play-v0`` — single-suite
+  play (10 tasks).
+* ``Isaac-Libero-Spatial-Goal-Dgpo-Osc-Play-v0`` — spatial + goal play
+  (20 tasks).
+* ``Isaac-Libero-Object-Long-Dgpo-Osc-Play-v0`` — long + object play
+  (20 tasks; DGPO relative order).
 
-All ids resolve to :mod:`.libero_all_env_cfg`; arbitrary subsets can be built with
-:func:`.libero_all_env_cfg.make_libero_combined_env_cfg`.  Each id has a
-``-Play-`` variant with fewer envs and no observation corruption.
+Play variants use one env per task and disable observation corruption.
+Subset train configs still exist on :mod:`.libero_dgpo_env_cfg` for
+programmatic use (no separate gym ids).
 """
+
+from __future__ import annotations
 
 import gymnasium as gym
 
 from . import agents
 
-# ---------------------------------------------------------------------------
-# Single-suite harvest envs (object-level prototype sharing + per-env task gather)
-# ---------------------------------------------------------------------------
+_DGPO_ENTRY = "isaaclab_contrib.tasks.manipulation.libero.envs.dgpo_env:DgpoManagerBasedRLEnv"
+_DGPO_AGENT = f"{agents.__name__}.rsl_rl_ppo_cfg:LiberoAllDgpoPPORunnerCfg"
+_CFG = f"{__name__}.libero_dgpo_env_cfg"
 
-gym.register(
-    id="Isaac-Libero-Goal-Franka-Multi-Task-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.libero_all_env_cfg:LiberoGoalEnvCfg",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:LiberoGoalPPORunnerCfg",
-    },
-)
 
-gym.register(
-    id="Isaac-Libero-Goal-Franka-Multi-Task-Play-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.libero_all_env_cfg:LiberoGoalEnvCfg_PLAY",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:LiberoGoalPPORunnerCfg",
-    },
-)
+def _register_dgpo(gym_id: str, env_cfg_attr: str) -> None:
+    """Register a DGPO OSC env (train or play) with the shared runner cfg."""
+    gym.register(
+        id=gym_id,
+        entry_point=_DGPO_ENTRY,
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": f"{_CFG}:{env_cfg_attr}",
+            "rsl_rl_cfg_entry_point": _DGPO_AGENT,
+        },
+    )
 
-gym.register(
-    id="Isaac-Libero-Spatial-Franka-Multi-Task-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.libero_all_env_cfg:LiberoSpatialEnvCfg",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:LiberoSpatialPPORunnerCfg",
-    },
-)
-
-gym.register(
-    id="Isaac-Libero-Spatial-Franka-Multi-Task-Play-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.libero_all_env_cfg:LiberoSpatialEnvCfg_PLAY",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:LiberoSpatialPPORunnerCfg",
-    },
-)
 
 # ---------------------------------------------------------------------------
-# LIBERO-Object suite (object-level prototype sharing, 10 tasks)
+# Train: all suites (40 tasks)
 # ---------------------------------------------------------------------------
 
-gym.register(
-    id="Isaac-Libero-Object-Franka-Multi-Task-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.libero_all_env_cfg:LiberoObjectEnvCfg",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:LiberoObjectPPORunnerCfg",
-    },
-)
-
-gym.register(
-    id="Isaac-Libero-Object-Franka-Multi-Task-Play-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.libero_all_env_cfg:LiberoObjectEnvCfg_PLAY",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:LiberoObjectPPORunnerCfg",
-    },
-)
+_register_dgpo("Isaac-Libero-All-Dgpo-Osc-v0", "LiberoAllDgpoOscEnvCfg")
 
 # ---------------------------------------------------------------------------
-# LIBERO-Long (long-horizon) suite (object-level prototype sharing, 10 tasks)
+# Play / eval: all suites + suite subsets
 # ---------------------------------------------------------------------------
 
-gym.register(
-    id="Isaac-Libero-Long-Franka-Multi-Task-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.libero_all_env_cfg:LiberoLongEnvCfg",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:LiberoLongPPORunnerCfg",
-    },
-)
+_register_dgpo("Isaac-Libero-All-Dgpo-Osc-Play-v0", "LiberoAllDgpoOscEnvCfg_PLAY")
 
-gym.register(
-    id="Isaac-Libero-Long-Franka-Multi-Task-Play-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.libero_all_env_cfg:LiberoLongEnvCfg_PLAY",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:LiberoLongPPORunnerCfg",
-    },
-)
+_register_dgpo("Isaac-Libero-Long-Dgpo-Osc-Play-v0", "LiberoLongDgpoOscEnvCfg_PLAY")
+_register_dgpo("Isaac-Libero-Object-Dgpo-Osc-Play-v0", "LiberoObjectDgpoOscEnvCfg_PLAY")
+_register_dgpo("Isaac-Libero-Spatial-Dgpo-Osc-Play-v0", "LiberoSpatialDgpoOscEnvCfg_PLAY")
+_register_dgpo("Isaac-Libero-Goal-Dgpo-Osc-Play-v0", "LiberoGoalDgpoOscEnvCfg_PLAY")
 
-# ---------------------------------------------------------------------------
-# Combined 40-task env (object-level prototype sharing across all four suites)
-# ---------------------------------------------------------------------------
-
-gym.register(
-    id="Isaac-Libero-All-Franka-Multi-Task-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.libero_all_env_cfg:LiberoAllEnvCfg",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:LiberoAllPPORunnerCfg",
-    },
-)
-
-gym.register(
-    id="Isaac-Libero-All-Franka-Multi-Task-Play-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.libero_all_env_cfg:LiberoAllEnvCfg_PLAY",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:LiberoAllPPORunnerCfg",
-    },
-)
-
-# Representative cross-suite combos built from the same factory.
-gym.register(
-    id="Isaac-Libero-Spatial-Goal-Franka-Multi-Task-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.libero_all_env_cfg:LiberoSpatialGoalEnvCfg",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:LiberoMultiTaskPPORunnerCfg",
-    },
-)
-
-gym.register(
-    id="Isaac-Libero-Spatial-Goal-Franka-Multi-Task-Play-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.libero_all_env_cfg:LiberoSpatialGoalEnvCfg_PLAY",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:LiberoMultiTaskPPORunnerCfg",
-    },
-)
-
-gym.register(
-    id="Isaac-Libero-Object-Long-Franka-Multi-Task-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.libero_all_env_cfg:LiberoObjectLongEnvCfg",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:LiberoAllPPORunnerCfg",
-    },
-)
-
-gym.register(
-    id="Isaac-Libero-Object-Long-Franka-Multi-Task-Play-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": f"{__name__}.libero_all_env_cfg:LiberoObjectLongEnvCfg_PLAY",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:LiberoAllPPORunnerCfg",
-    },
-)
+_register_dgpo("Isaac-Libero-Spatial-Goal-Dgpo-Osc-Play-v0", "LiberoSpatialGoalDgpoOscEnvCfg_PLAY")
+_register_dgpo("Isaac-Libero-Object-Long-Dgpo-Osc-Play-v0", "LiberoObjectLongDgpoOscEnvCfg_PLAY")

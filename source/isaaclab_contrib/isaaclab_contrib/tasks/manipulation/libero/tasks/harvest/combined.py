@@ -30,7 +30,7 @@ from ..common.base import fixture, flat_stove, microwave, rigid_object, white_ca
 from .prototypes import LIBERO_SUITES, Prototype, TaskBinding, harvest_libero_prototypes
 
 if TYPE_CHECKING:
-    from ...robots.franka import LiberoFrankaRobotCfg
+    from isaaclab_contrib.tasks.manipulation.multitask.robots._base import RobotModuleCfg
 
 _ARTICULATION_BUILDERS = {
     "wooden_cabinet": wooden_cabinet,
@@ -79,25 +79,25 @@ class LiberoPrototypeTaskCfg(TaskModuleCfg):
     def name(self) -> str:
         return self.task_name
 
-    def scene_assets(self, group: str, robot: LiberoFrankaRobotCfg) -> dict[str, object]:
+    def scene_assets(self, group: str, robot: RobotModuleCfg) -> dict[str, object]:
         return dict(self.proto_cfgs)
 
-    def command_terms(self, group: str, robot: LiberoFrankaRobotCfg) -> dict[str, object]:
+    def command_terms(self, group: str, robot: RobotModuleCfg) -> dict[str, object]:
         return {}
 
-    def task_obs_terms(self, group: str, robot: LiberoFrankaRobotCfg) -> dict[str, object]:
+    def task_obs_terms(self, group: str, robot: RobotModuleCfg) -> dict[str, object]:
         return {}
 
-    def scatter_obs_terms(self, group: str, robot: LiberoFrankaRobotCfg) -> dict[str, object]:
+    def scatter_obs_terms(self, group: str, robot: RobotModuleCfg) -> dict[str, object]:
         return {}
 
-    def reward_terms(self, group: str, robot: LiberoFrankaRobotCfg) -> dict[str, object]:
+    def reward_terms(self, group: str, robot: RobotModuleCfg) -> dict[str, object]:
         return {}
 
-    def termination_terms(self, group: str, robot: LiberoFrankaRobotCfg) -> dict[str, object]:
+    def termination_terms(self, group: str, robot: RobotModuleCfg) -> dict[str, object]:
         return {}
 
-    def reset_events(self, group: str, robot: LiberoFrankaRobotCfg) -> dict[str, object]:
+    def reset_events(self, group: str, robot: RobotModuleCfg) -> dict[str, object]:
         return {}
 
 

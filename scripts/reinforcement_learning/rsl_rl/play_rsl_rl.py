@@ -26,6 +26,7 @@ from isaaclab.utils.string import list_intersection, string_to_callable
 from isaaclab_rl.rsl_rl import (
     RslRlBaseRunnerCfg,
     RslRlVecEnvWrapper,
+    ensure_rsl_rl_checkpoint_compatible,
     export_policy_as_jit,
     export_policy_as_onnx,
     handle_deprecated_rsl_rl_cfg,
@@ -155,6 +156,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+        # Migrate pre-4.0 ActorCritic checkpoints (model_state_dict) to the split
+        # actor_state_dict / critic_state_dict layout expected by current rsl-rl.
+        # Keep the original path for export/logging; migration may write a temp file.
+        checkpoint_path = resume_path
+        load_path = ensure_rsl_rl_checkpoint_compatible(resume_path)
         # load previously trained model
         if agent_cfg.class_name == "OnPolicyRunner":
             runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
@@ -162,13 +168,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
         else:
             raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
-        runner.load(resume_path)
+        # Play/eval only needs policy weights; skip optimizer (layout differs across rsl-rl majors).
+        if agent_cfg.class_name == "OnPolicyRunner":
+            runner.load(
+                load_path,
+                load_cfg={"actor": True, "critic": True, "optimizer": False, "iteration": True, "rnd": False},
+            )
+        else:
+            runner.load(load_path)
 
         # obtain the trained policy for inference
         policy = runner.get_inference_policy(device=env.unwrapped.device)
 
         # export the trained policy to JIT and ONNX formats
-        export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
+        export_model_dir = os.path.join(os.path.dirname(checkpoint_path), "exported")
 
         if version.parse(installed_version) >= version.parse("4.0.0"):
             # use the new export functions for rsl-rl >= 4.0.0
