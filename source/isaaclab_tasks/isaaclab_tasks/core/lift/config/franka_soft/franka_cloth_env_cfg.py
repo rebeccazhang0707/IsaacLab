@@ -11,7 +11,7 @@ from isaaclab_newton.sim.schemas import NewtonDeformableBodyPropertiesCfg
 from isaaclab_newton.sim.spawners.materials import NewtonSurfaceDeformableBodyMaterialCfg
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
+from isaaclab.assets import AssetBaseCfg
 from isaaclab.assets.deformable_object import DeformableObjectCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
@@ -96,13 +96,12 @@ class FrankaClothSceneCfg(_FrankaSoftSceneCfg):
     deformable: DeformableCfg = DeformableCfg()
 
     # Static collidable cube the cloth drops onto (sits on the table top at z = 0).
-    cube: RigidObjectCfg = RigidObjectCfg(
+    cube: AssetBaseCfg = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Cube",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.45, 0.0, 0.04)),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.45, 0.0, 0.04)),
         spawn=sim_utils.CuboidCfg(
             size=(0.03, 0.01, 0.08),
             collision_props=sim_utils.CollisionPropertiesCfg(),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.2, 0.25)),
         ),
     )

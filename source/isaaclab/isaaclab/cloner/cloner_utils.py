@@ -232,30 +232,26 @@ def make_valid_clone_combinations(
 ) -> torch.Tensor:
     """Build the valid clone-combination variant tensor.
 
+    Each combination contributes rows in proportion to its weight, split evenly
+    across its spawn variants and interleaved round-robin, so any prefix of the
+    tensor samples every combination.
+
     Args:
         asset_names: Clone-planned scene asset names, one per tensor column.
-        variant_counts: Number of spawn variants for each clone-planned asset.
-        clone_combinations: Legal clone combinations. Each combination marks
-            which assets are active; assets not mentioned by any combination
-            are active in every row.
+        variant_counts: Number of spawn variants per clone-planned asset.
+        clone_combinations: Legal clone combinations; assets not mentioned by
+            any combination are active in every row. ``None`` uses the full
+            cartesian product of variants.
         device: Torch device for the output tensor. Defaults to ``"cpu"``.
-        all_asset_names: Optional full scene asset-name list used to validate
-            clone-combination entries that may include selector-only assets.
+        all_asset_names: Optional full scene asset-name list; combination
+            entries may reference assets that are not clone-planned.
 
     Returns:
-        A ``[num_valid_combinations, num_assets]`` tensor. Each entry is the
-        source variant index for that asset, or ``-1`` when the asset is absent.
-        Each combination's total row multiplicity is proportional to its weight;
-        spawn-variant expansion divides that share evenly across the variants.
-        Rows with different variant counts are normalized to a common multiple,
-        so a weight-1 combination keeps the same overall share whether its
-        assets declare one spawn variant or many. Rows are ordered round-robin
-        across combinations, so strategies that consume a prefix of the tensor
-        still sample every combination.
+        A ``[num_valid_combinations, num_assets]`` tensor of source variant
+        indices, ``-1`` where an asset is absent.
 
     Raises:
-        ValueError: If the asset and variant-count inputs do not match, if a
-            variant count is invalid, or if no valid rows can be produced.
+        ValueError: If the inputs are inconsistent or no valid rows result.
     """
     if len(asset_names) != len(variant_counts):
         raise ValueError(f"Expected one variant count per asset, got {len(variant_counts)} and {len(asset_names)}.")

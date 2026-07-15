@@ -6,7 +6,7 @@
 """Compose a multi-robot scene from task configs and step physics only.
 
 The pipeline is: gather registered task scenes, filter scenes whose floor is
-not at level 0, fold them together with :func:`~isaaclab.scene.scene_add`
+not at level 0, fold them together with :func:`~isaaclab.scene.add`
 while skipping every task light and floor, then add one Dome light and one
 shared ground plane. No task environments or MDP managers are constructed;
 the demo owns generic PhysX simulation settings. ``-Play`` task variants are
@@ -23,14 +23,14 @@ floor are reported and skipped.
 .. code-block:: bash
 
     # Usage with every supported registered task scene.
-    ./isaaclab.sh -p scripts/demos/multitask_clone_scene.py
+    ./isaaclab.sh -p scripts/demos/heterogeneous_scene.py
 
     # Usage with a smaller composition.
-    ./isaaclab.sh -p scripts/demos/multitask_clone_scene.py --num_task 3 --num_envs 3
+    ./isaaclab.sh -p scripts/demos/heterogeneous_scene.py --num_task 3 --num_envs 3
 
     # Kitless Newton (MJWarp) physics with the Newton visualizer (no Isaac Sim).
     # Note: collapses to a single environment holding every task at per-task offsets.
-    ./isaaclab.sh -p scripts/demos/multitask_clone_scene.py \
+    ./isaaclab.sh -p scripts/demos/heterogeneous_scene.py \
         --physics newton_mjwarp --visualizer newton
 
 """
@@ -70,7 +70,8 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg
 from isaaclab.cloner import grid_transforms, sequential
 from isaaclab.physics import PhysicsCfg
-from isaaclab.scene import InteractiveSceneCfg, scene_add
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.scene import add as scene_add
 from isaaclab.terrains import TerrainImporterCfg
 
 from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg  # isort:skip

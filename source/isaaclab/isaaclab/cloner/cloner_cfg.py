@@ -10,7 +10,7 @@ from dataclasses import MISSING
 
 from isaaclab.utils.configclass import configclass
 
-from .cloner_strategies import random
+from .cloner_strategies import sequential
 
 
 @configclass
@@ -32,8 +32,8 @@ class CloneCfg:
     :func:`~isaaclab.cloner.make_clone_plan` when building per-env layouts.
     """
 
-    clone_strategy: Callable[..., object] = random
-    """Function used to build prototype-to-environment mapping. Default is :func:`random`."""
+    clone_strategy: Callable[..., object] = sequential
+    """Function used to build prototype-to-environment mapping. Default is :func:`sequential`."""
 
     clone_combinations: list[InclusionSet] = []
     """Legal scene-asset combinations for heterogeneous clone planning.
@@ -48,3 +48,17 @@ class CloneCfg:
 
     clone_regex: str = "/World/envs/env_.*"
     """Regex matching every replicated env prim. Used to expand ``{ENV_REGEX_NS}`` cfg macros."""
+
+
+def add(this: CloneCfg, other: InclusionSet) -> CloneCfg:
+    """Append one clone combination to ``this`` and return it.
+
+    Args:
+        this: Configuration that accumulates the combination.
+        other: Clone combination to append.
+
+    Returns:
+        ``this``, with the combination appended.
+    """
+    this.clone_combinations = [*this.clone_combinations, other]
+    return this

@@ -3,13 +3,23 @@ Added
 
 * Added :attr:`~isaaclab.cloner.CloneCfg.clone_combinations` support for
   heterogeneous scenes backed by direct clone plans.
-* Added :func:`~isaaclab.scene.scene_add` to compose environment-scoped scene
+* Added :func:`~isaaclab.scene.add` to fold environment-scoped scene
   assets into heterogeneous clone combinations while deduplicating equivalent
   environment definitions.
 * Added a direct clone-only demo that composes registered flat PhysX task
   scenes, excludes task scenes whose floor is not at level 0, and replaces
   task lights and floors with one Dome light and one shared ground plane,
   without constructing task environments.
+
+Changed
+^^^^^^^
+
+* Changed the :attr:`~isaaclab.cloner.CloneCfg.clone_strategy` default from
+  :func:`~isaaclab.cloner.random` to :func:`~isaaclab.cloner.sequential`,
+  matching :func:`~isaaclab.cloner.make_clone_plan` and
+  :class:`~isaaclab.cloner.ReplicateSession`. Set
+  ``clone_cfg.clone_strategy = random`` explicitly to keep random
+  prototype-to-environment assignment.
 
 Fixed
 ^^^^^

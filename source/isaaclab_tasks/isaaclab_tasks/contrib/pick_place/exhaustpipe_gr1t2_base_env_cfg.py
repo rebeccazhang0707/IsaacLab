@@ -44,13 +44,13 @@ class ObjectTableSceneCfg(InteractiveSceneCfg):
     """Configuration for the GR1T2 Exhaust Pipe Base Scene."""
 
     # Table
-    table = RigidObjectCfg(
+    table = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Table",
-        init_state=RigidObjectCfg.InitialStateCfg(pos=[0.0, 0.55, 0.0], rot=[0.0, 0.0, 0.0, 1.0]),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.55, 0.0], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=UsdFileCfg(
             usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Mimic/exhaust_pipe_task/exhaust_pipe_assets/table.usd",
             scale=(1.0, 1.0, 1.3),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
         ),
     )
 

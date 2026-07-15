@@ -93,11 +93,10 @@ class AssembleTrocarSceneCfg(InteractiveSceneCfg):
     left_wrist_camera = CameraPresets.left_dex3_wrist_camera()
     right_wrist_camera = CameraPresets.right_dex3_wrist_camera()
 
-    scene = RigidObjectCfg(
+    scene = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Scene",
         spawn=UsdFileCfg(
             usd_path=f"{USD_ROOT}/scene03.usd",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
         ),
     )
 

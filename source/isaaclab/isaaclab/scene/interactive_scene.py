@@ -37,7 +37,6 @@ from isaaclab.physics.scene_data_requirements import aggregate_requirements, res
 from isaaclab.sensors import ContactSensorCfg, FrameTransformerCfg, SensorBase, SensorBaseCfg
 from isaaclab.sim import SimulationContext
 from isaaclab.sim.utils.stage import get_current_stage, get_current_stage_id
-from isaaclab.sim.views import FrameView
 
 # Note: This is a temporary import for the VisuoTactileSensorCfg class.
 # It will be removed once the VisuoTactileSensor class is added to the core Isaac Lab framework.
@@ -459,11 +458,12 @@ class InteractiveScene:
         return self.sim.get_clone_plan()
 
     @property
-    def extras(self) -> dict[str, FrameView]:
+    def extras(self) -> dict[str, AssetBaseCfg]:
         """A dictionary of miscellaneous simulation objects that neither inherit from assets nor sensors.
 
-        The keys are the names of the miscellaneous objects, and the values are the
-        :class:`~isaaclab.sim.views.FrameView` instances of the corresponding prims.
+        The keys are the names of the miscellaneous objects, and the values are their
+        spawned configurations. Static assets create no runtime view: their prims are
+        kept exactly as cloned.
 
         As an example, lights or other props in the scene that do not have any attributes or properties that you
         want to alter at runtime can be added to this dictionary.
@@ -889,9 +889,11 @@ class InteractiveScene:
                         translation=asset_cfg.init_state.pos,
                         orientation=asset_cfg.init_state.rot,
                     )
-                # store xform prim view corresponding to this asset
-                # all prims in the scene are Xform prims (i.e. have a transform component)
-                self._extras[asset_name] = FrameView(asset_cfg.prim_path, device=self.device, stage=self.stage)
+                    # static assets have no asset class to queue their own replication:
+                    # queue the USD spread here so clones exist in every planned env
+                    cloner.queue_usd_replication(asset_cfg)
+                # static assets create no view: the prims are kept exactly as cloned
+                self._extras[asset_name] = asset_cfg
             else:
                 raise ValueError(f"Unknown asset config type for {asset_name}: {asset_cfg}")
 
