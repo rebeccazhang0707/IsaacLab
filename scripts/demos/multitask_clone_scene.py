@@ -13,6 +13,13 @@ the demo owns generic PhysX simulation settings. ``-Play`` task variants are
 excluded up front; Newton scenes and scenes without a declarative level-0
 floor are reported and skipped.
 
+.. note::
+    The heterogeneous composition (each environment holds one task's assets) requires
+    the PhysX backend. Newton's ``ArticulationView`` requires every asset to exist in
+    every environment with an identical topology. With ``--physics newton_mjwarp`` the
+    demo therefore collapses to a single environment that holds every task, shifting
+    each task's assets to a per-task sub-origin so the tasks sit side by side.
+
 .. code-block:: bash
 
     # Usage with every supported registered task scene.
@@ -20,6 +27,11 @@ floor are reported and skipped.
 
     # Usage with a smaller composition.
     ./isaaclab.sh -p scripts/demos/multitask_clone_scene.py --num_task 3 --num_envs 3
+
+    # Kitless Newton (MJWarp) physics with the Newton visualizer (no Isaac Sim).
+    # Note: collapses to a single environment holding every task at per-task offsets.
+    ./isaaclab.sh -p scripts/demos/multitask_clone_scene.py \
+        --physics newton_mjwarp --visualizer newton
 
 """
 
@@ -45,7 +57,7 @@ parser.add_argument(
     default=None,
     help="Number of tasks to use from the default order. Omit to use all tasks.",
 )
-parser.add_argument("--physics", default="physx", choices=["physx"], help="Physics backend.")
+parser.add_argument("--physics", default="physx", choices=["physx", "newton_mjwarp"], help="Physics backend.")
 add_launcher_args(parser)
 parser.set_defaults(visualizer=["kit"])
 args_cli, hydra_args = parser.parse_known_args()
@@ -56,10 +68,12 @@ import gymnasium as gym
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg
-from isaaclab.cloner import sequential
+from isaaclab.cloner import grid_transforms, sequential
 from isaaclab.physics import PhysicsCfg
 from isaaclab.scene import InteractiveSceneCfg, scene_add
 from isaaclab.terrains import TerrainImporterCfg
+
+from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg  # isort:skip
 
 from isaaclab_tasks.utils import resolve_task_config
 
@@ -139,6 +153,20 @@ def main() -> None:
     for task_scene_cfg in task_scene_cfgs:
         task_scene_cfg.env_spacing = args_cli.env_spacing
 
+    # Newton's ArticulationView requires every asset to exist in every environment, so
+    # the per-task heterogeneous clone combinations cannot be used. Instead, tile every
+    # task inside each environment: shift each task's assets to a per-task sub-origin.
+    newton_homogeneous = args_cli.physics == "newton_mjwarp"
+    if newton_homogeneous:
+        print("[INFO] Newton backend: tiling every task at a per-task offset inside one environment.")
+        task_offsets, _ = grid_transforms(len(task_scene_cfgs), args_cli.env_spacing)
+        for task_scene_cfg, offset in zip(task_scene_cfgs, task_offsets):
+            for name, value in vars(task_scene_cfg).items():
+                if name in InteractiveSceneCfg.__dataclass_fields__ or not isinstance(value, AssetBaseCfg):
+                    continue
+                pos = value.init_state.pos
+                value.init_state.pos = (pos[0] + float(offset[0]), pos[1] + float(offset[1]), pos[2])
+
     scene_cfg = task_scene_cfgs[0]
 
     def is_global_asset(a: AssetBaseCfg) -> bool:
@@ -155,8 +183,24 @@ def main() -> None:
     scene_cfg.num_envs = args_cli.num_envs
     scene_cfg.replicate_physics = True
     scene_cfg.clone_cfg.clone_strategy = sequential
+    if newton_homogeneous:
+        scene_cfg.clone_cfg.clone_combinations = []
+        scene_cfg.num_envs = 1
+        print(f"[INFO] Newton backend: single environment holding all {len(task_ids)} tasks at per-task offsets.")
 
     with launch_simulation(cfg=PhysicsCfg(), launcher_args=args_cli) as physics_cfg:
+        # The default newton mjwarp solver configuration needs to be tuned for this demo.
+        if isinstance(physics_cfg, NewtonCfg) and isinstance(physics_cfg.solver_cfg, MJWarpSolverCfg):
+            # Some task assets (e.g. the sorting-scale screen frame) carry planar mesh colliders
+            # that MuJoCo's contact generation rejects; let Newton's collision pipeline supply instead.
+            physics_cfg.solver_cfg.use_mujoco_contacts = False
+            physics_cfg.solver_cfg.nconmax = 1024
+            physics_cfg.solver_cfg.njmax = 2048
+            # The default explicit euler integrator diverges on the small-mass, contact-rich
+            # task robots (e.g. Ant) at this timestep; match the task presets and arms.py.
+            physics_cfg.solver_cfg.integrator = "implicitfast"
+            physics_cfg.num_substeps = 2
+
         sim = sim_utils.SimulationContext(
             sim_utils.SimulationCfg(dt=args_cli.sim_dt, device=args_cli.device, physics=physics_cfg)
         )
@@ -165,7 +209,7 @@ def main() -> None:
         sim.reset()
         scene.reset()
         scene.write_data_to_sim()
-        print(f"[INFO] Composed {len(task_ids)} task scenes into {args_cli.num_envs} environments. Stepping physics.")
+        print(f"[INFO] Composed {len(task_ids)} task scenes into {scene_cfg.num_envs} environments. Stepping physics.")
 
         sim_dt = sim.get_physics_dt()
         # Step while a visualizer window is still open (or none exist, e.g. headless).
