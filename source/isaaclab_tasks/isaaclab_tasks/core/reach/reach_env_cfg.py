@@ -10,7 +10,7 @@ from isaaclab_physx.physics import PhysxCfg
 
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
-from isaaclab.assets import ArticulationCfg, AssetBaseCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import ActionTermCfg as ActionTerm
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
@@ -57,16 +57,17 @@ class ReachPhysicsCfg(PresetCfg):
 
 @configclass
 class TableCfg(PresetCfg):
-    physx = AssetBaseCfg(
-        prim_path="/World/envs/env_.*/Table",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.5, 0, 0), rot=(0, 0, 0.707, 0.707)),
+    physx = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Table",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.5, 0, 0), rot=(0, 0, 0.707, 0.707)),
         spawn=sim_utils.UsdFileCfg(
             usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/SeattleLabTable/table_instanceable.usd",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
         ),
     )
 
     newton_mjwarp: ArticulationCfg = ArticulationCfg(
-        prim_path="/World/envs/env_.*/Table",
+        prim_path="{ENV_REGEX_NS}/Table",
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.5, 0, -0.5), rot=(0, 0, 0.707, 0.707), joint_pos={}, joint_vel={}
         ),

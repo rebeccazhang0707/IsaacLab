@@ -172,12 +172,13 @@ class RmpFlowAgibotPlaceUprightMugEnvCfg(place_toy2box_rmp_rel_env_cfg.PlaceToy2
         self.terminations = TerminationsCfg()
 
         # Table
-        self.scene.table = AssetBaseCfg(
+        self.scene.table = RigidObjectCfg(
             prim_path="{ENV_REGEX_NS}/Table",
-            init_state=AssetBaseCfg.InitialStateCfg(pos=[0.50, 0.0, 0.60], rot=[0.0, 0.0, 0.707, 0.707]),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=[0.50, 0.0, 0.60], rot=[0.0, 0.0, 0.707, 0.707]),
             spawn=UsdFileCfg(
                 usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/SeattleLabTable/table_instanceable.usd",
                 scale=(1.0, 1.0, 0.60),
+                rigid_props=RigidBodyPropertiesCfg(kinematic_enabled=True),
             ),
         )
 

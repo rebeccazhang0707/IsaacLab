@@ -268,9 +268,9 @@ class ObjectTableSceneCfg(InteractiveSceneCfg):
     """Configuration for the GR1T2 Pick Place Base Scene."""
 
     # Table
-    packing_table = AssetBaseCfg(
-        prim_path="/World/envs/env_.*/PackingTable",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.55, 0.0], rot=[0.0, 0.0, 0.0, 1.0]),
+    packing_table = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/PackingTable",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[0.0, 0.55, 0.0], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=UsdFileCfg(
             usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/PackingTable/packing_table.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
@@ -289,7 +289,7 @@ class ObjectTableSceneCfg(InteractiveSceneCfg):
 
     # Humanoid robot configured for pick-place manipulation tasks
     robot: ArticulationCfg = GR1T2_HIGH_PD_CFG.replace(
-        prim_path="/World/envs/env_.*/Robot",
+        prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0, 0, 0.93),
             rot=(0.0, 0.0, 0.7071, 0.7071),

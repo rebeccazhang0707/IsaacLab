@@ -286,12 +286,13 @@ class RmpFlowAgibotPlaceToy2BoxEnvCfg(PlaceToy2BoxEnvCfg):
         self.scene.robot = AGIBOT_A2D_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
         # add table
-        self.scene.table = AssetBaseCfg(
+        self.scene.table = RigidObjectCfg(
             prim_path="{ENV_REGEX_NS}/Table",
-            init_state=AssetBaseCfg.InitialStateCfg(pos=[0.5, 0.0, -0.7], rot=[0.0, 0.0, 0.707, 0.707]),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=[0.5, 0.0, -0.7], rot=[0.0, 0.0, 0.707, 0.707]),
             spawn=UsdFileCfg(
                 usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/SeattleLabTable/table_instanceable.usd",
                 scale=(1.8, 1.0, 0.30),
+                rigid_props=RigidBodyPropertiesCfg(kinematic_enabled=True),
             ),
         )
 

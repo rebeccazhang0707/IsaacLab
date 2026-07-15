@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import MISSING
 from typing import TYPE_CHECKING
 
+from isaaclab.cloner import CloneCfg
 from isaaclab.utils.configclass import configclass
 
 if TYPE_CHECKING:
@@ -129,3 +130,6 @@ class InteractiveSceneCfg:
     Queued replication no longer forwards this flag to the PhysX replicator;
     ``useFabricForReplication`` is always ``False``.
     """
+
+    clone_cfg: CloneCfg = CloneCfg()
+    """Clone execution and legal scene-combination configuration."""
