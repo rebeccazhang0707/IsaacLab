@@ -3,35 +3,29 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Benchmark LIBERO single-suite scene construction (harvest+selector).
+"""Benchmark LIBERO scene construction (DGPO harvest+OSC).
 
 Scenes use the ``harvest`` implementation -- object-level prototype sharing:
 identical object models are de-duplicated into one shared
 :class:`~isaaclab.assets.AssetView`, and all task-dependent MDP is gathered per
-env by task id (see
-``libero.config.franka.libero_all_env_cfg.make_libero_combined_env_cfg``).
+env by task id. Profiling always builds the DGPO OSC env
+(``Isaac-Libero-*-Dgpo-Osc-*`` layout; optional demos).
 
-For a single suite this script builds the env, runs an excluded warmup, then
-times stepping with a fixed action stream (identical seed -> identical actions)
-and reports build time, AssetView counts, step-time stats, throughput, and peak
-GPU memory.  One machine-readable JSON line (prefixed ``LIBERO_PROFILE_JSON``) is
-emitted per measurement repeat for aggregation.
-
-An earlier ``per_task_group`` implementation (one clone group per task) was
-benchmarked against ``harvest`` and subsequently removed;
-``scripts/benchmarks/libero_scene_profiling.md`` records that comparison.
+``--impl harvest`` and ``--impl compat_osc`` are aliases for the same DGPO path
+(kept so historical ``libero_scene_profiling.md`` / ``run_libero_profile.sh``
+commands still work).
 
 Usage (PhysX backend, headless)::
 
     LIBERO_ASSETS_DATA_DIR=<usd> LIBERO_CONFIG_DIR=<config> \
     ./isaaclab.sh -p scripts/benchmarks/profile_libero_scene.py \
-        --suite object --num_envs 64 \
+        --suite object --impl harvest --num_envs 64 \
         --num_steps 300 --warmup_steps 50 --repeats 3 --seed 0 --headless presets=physx
 
-Follows the AppLauncher-before-sim-imports pattern: argparse + AppLauncher args +
-:func:`setup_preset_cli` run before any heavy import; the env is registered as a
-temporary gym id and resolved through the same hydra/preset path as the shipped
-envs, so ``presets=physx`` selects the PhysX backend exactly as in training.
+    LIBERO_ASSETS_DATA_DIR=<usd> LIBERO_CONFIG_DIR=<config> \
+    ./isaaclab.sh -p scripts/benchmarks/profile_libero_scene.py \
+        --suite all --impl compat_osc --num_envs 40 \
+        --num_steps 50 --warmup_steps 10 --repeats 1 --seed 0 --headless presets=physx
 """
 
 from __future__ import annotations
@@ -44,16 +38,20 @@ from isaaclab.app import AppLauncher
 from isaaclab_tasks.utils import setup_preset_cli
 
 # ── argparse + AppLauncher args BEFORE any sim/torch import ──────────────────
-parser = argparse.ArgumentParser(description="Profile LIBERO single-suite scene construction (harvest+selector).")
+parser = argparse.ArgumentParser(description="Profile LIBERO scene construction (DGPO harvest+OSC).")
 parser.add_argument(
-    "--suite", type=str, default="object", choices=("spatial", "goal", "object", "long"), help="LIBERO suite."
+    "--suite",
+    type=str,
+    default="object",
+    choices=("spatial", "goal", "object", "long", "all"),
+    help="LIBERO suite (use 'all' for the 40-task DGPO env).",
 )
 parser.add_argument(
     "--impl",
     type=str,
     default="harvest",
-    choices=("harvest",),
-    help="Scene-construction implementation to benchmark (only ``harvest`` remains).",
+    choices=("harvest", "compat_osc"),
+    help="Alias for the DGPO harvest+OSC path (both choices build the same env).",
 )
 parser.add_argument("--num_envs", type=int, default=64, help="Number of environments (must be >= suite task count).")
 parser.add_argument("--num_steps", type=int, default=300, help="Measured steps per repeat.")
@@ -80,27 +78,28 @@ from isaaclab_tasks.utils import resolve_task_config  # noqa: E402
 from isaaclab_tasks.utils.hydra import resolve_presets  # noqa: E402
 
 
-def _build_env_cfg_cls(suite: str, impl: str, num_envs: int):
-    """Return a harvest env cfg class for ``suite`` at the requested env count.
+def _build_env_cfg_cls(suite: str, num_envs: int):
+    """Return a DGPO OSC env cfg class for the selected suite."""
+    from isaaclab_contrib.tasks.manipulation.libero.dgpo_layout import DGPO_ABC_HARVEST_SUITES
+    from isaaclab_contrib.tasks.manipulation.libero.envs.dgpo_env_cfg import make_libero_dgpo_env_cfg
 
-    Uses the shared Franka robot, actions, penalties, and ``goal`` reward mode;
-    ``env_spacing`` is sized per suite by the factory (3.0 m for ``long`` to fit
-    ``study_table``, else 2.5 m).
-    """
-    from isaaclab_contrib.tasks.manipulation.libero.config.franka.libero_all_env_cfg import (
-        make_libero_combined_env_cfg,
-    )
-
-    return make_libero_combined_env_cfg(suites=(suite,), num_envs=num_envs)
+    if suite == "all":
+        return make_libero_dgpo_env_cfg(suites=DGPO_ABC_HARVEST_SUITES, num_envs=num_envs)
+    by_short = {prefix: (suite_name, prefix) for suite_name, prefix in DGPO_ABC_HARVEST_SUITES}
+    selected = by_short.get(suite)
+    if selected is None:
+        raise ValueError(f"Unknown suite {suite!r} (use long|object|spatial|goal|all).")
+    return make_libero_dgpo_env_cfg(suites=(selected,), num_envs=num_envs)
 
 
 # Register the selected implementation as a temporary gym id so it resolves
 # through the same hydra/preset pipeline as the shipped envs.
 _TASK_ID = f"Isaac-Libero-Profile-{args_cli.suite.title()}-{args_cli.impl}-v0"
-_ENV_CFG_CLS = _build_env_cfg_cls(args_cli.suite, args_cli.impl, args_cli.num_envs)
+_ENV_CFG_CLS = _build_env_cfg_cls(args_cli.suite, args_cli.num_envs)
+_ENTRY = "isaaclab_contrib.tasks.manipulation.libero.envs.dgpo_env:DgpoManagerBasedRLEnv"
 gym.register(
     id=_TASK_ID,
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=_ENTRY,
     disable_env_checker=True,
     kwargs={"env_cfg_entry_point": _ENV_CFG_CLS},
 )

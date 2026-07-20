@@ -2,8 +2,11 @@
 
 > **Note:** Based on the results below, the `per_task_group` implementation was
 > subsequently **removed** — only `harvest` remains in the codebase (all LIBERO
-> gym ids now resolve to the harvest+selector factory). This document is retained
+> gym ids now resolve to the DGPO harvest+OSC factory). This document is retained
 > as the historical record of the comparison that motivated that decision.
+> The original `harvest` rows below were measured with the since-removed Diff-IK
+> factory; re-runs should use ``--impl harvest`` / ``compat_osc`` (both map to
+> :func:`~...envs.dgpo_env_cfg.make_libero_dgpo_env_cfg`).
 
 ## What was compared
 
@@ -15,15 +18,15 @@ per single suite with [`profile_libero_scene.py`](./profile_libero_scene.py):
   de-duplicated into a single shared
   [`AssetView`](../../source/isaaclab_contrib/isaaclab_contrib/tasks/manipulation/libero/tasks/harvest/prototypes.py);
   all task-dependent MDP is gathered per env by task id
-  (`make_libero_combined_env_cfg`).
+  (`make_libero_dgpo_env_cfg`; historical Diff-IK factory removed).
 - **`per_task_group`** — the earlier approach: every task is its own clone
   group with its own (un-shared) fixture + object `AssetView`s
   (`tasks.per_task_group.data_driven.build_*_tasks`).
 
-Both configurations share the same Franka robot, differential-IK + gripper
-actions, robot observations, penalty curriculum, and the `goal` reward mode;
-they differ **only** in scene construction and where the task-dependent MDP is
-scoped. `env_spacing` is matched per suite (3.0 m for `long` to fit
+Both configurations originally shared the same Franka robot, differential-IK +
+gripper actions, robot observations, penalty curriculum, and the `goal` reward
+mode; they differed **only** in scene construction and where the task-dependent
+MDP is scoped. `env_spacing` is matched per suite (3.0 m for `long` to fit
 `study_table`, else 2.5 m) so the comparison is fair.
 
 ## Environment
@@ -158,4 +161,59 @@ over the three seeds per (suite, impl).
 {"suite": "long", "impl": "per_task_group", "num_envs": 800, "num_steps": 300, "repeat": 0, "seed": 0, "action_dim": 7, "build_time_s": 4.9553, "step_time_mean_ms": 75.8077, "step_time_median_ms": 67.9056, "step_time_std_ms": 20.0129, "throughput_env_steps_per_s": 10553.01, "peak_gpu_mem_mb": 21.24, "articulations": 5, "rigid_objects": 42, "total_asset_views": 47}
 {"suite": "long", "impl": "per_task_group", "num_envs": 800, "num_steps": 300, "repeat": 0, "seed": 1, "action_dim": 7, "build_time_s": 5.0003, "step_time_mean_ms": 77.539, "step_time_median_ms": 69.0999, "step_time_std_ms": 20.7698, "throughput_env_steps_per_s": 10317.38, "peak_gpu_mem_mb": 21.23, "articulations": 5, "rigid_objects": 42, "total_asset_views": 47}
 {"suite": "long", "impl": "per_task_group", "num_envs": 800, "num_steps": 300, "repeat": 0, "seed": 2, "action_dim": 7, "build_time_s": 4.9923, "step_time_mean_ms": 78.388, "step_time_median_ms": 69.7668, "step_time_std_ms": 22.0641, "throughput_env_steps_per_s": 10205.65, "peak_gpu_mem_mb": 21.2, "articulations": 5, "rigid_objects": 42, "total_asset_views": 47}
+```
+
+## Follow-up: DGPO harvest OSC (measured)
+
+The DGPO gym ids (`Isaac-Libero-All-Dgpo-Osc-*` and suite-subset `*-Play-v0`)
+reuse the same **harvest** scene with OSC actions and DGPO-shaped obs.
+Entity-count evidence vs PerEnvMixin: ~193 → 35 prototypes / **32**
+articulation+rigid AssetViews counted at runtime.
+
+### Commands
+
+Without demos (scene + MDP gather only)::
+
+```bash
+LIBERO_ASSETS_DATA_DIR=<usd> LIBERO_CONFIG_DIR=<config> \
+LIBERO_ASSEMBLED_DATASET_DIR=/tmp/missing \
+./isaaclab.sh -p scripts/benchmarks/profile_libero_scene.py \
+    --suite all --impl compat_osc --num_envs 40 \
+    --num_steps 50 --warmup_steps 10 --repeats 1 --seed 0 \
+    --headless presets=physx
+```
+
+With demos (HDF5 load + demo `initial_state` reset)::
+
+```bash
+LIBERO_ASSETS_DATA_DIR=<usd> LIBERO_CONFIG_DIR=<config> \
+LIBERO_ASSEMBLED_DATASET_DIR=<sim2sim_dataset> LIBERO_EVALUATION=1 \
+./isaaclab.sh -p scripts/benchmarks/profile_libero_scene.py \
+    --suite all --impl compat_osc --num_envs 40 \
+    --num_steps 30 --warmup_steps 5 --repeats 1 --seed 0 \
+    --headless presets=physx
+```
+
+### Results (RTX 5880 Ada, PhysX, 2026-07-13)
+
+| mode | num_envs | AssetViews | build [s] | step [ms] | throughput [env-steps/s] | GPU [MB] |
+|---|---:|---:|---:|---:|---:|---:|
+| compat_osc (no demos) | 40 | 32 | 3.80 | 221.0 | 181 | 13.0 |
+| compat_osc (+2000 demos) | 40 | 32 | 105.05† | 261.3 | 153 | 354.3 |
+
+† Build time previously dominated by (1) loading 2000 HDF5 trajectories into the
+command bank and (2) a naive per-timestep Python loop in
+``ObjectTargetPoseDiff._build_traj_pose_buffer_cache`` over full-length
+``initial_state`` (T≈70–500, ΣT≈3.4e5). Scene spawn alone is ~4 s. After
+vectorizing the pose-cache fill, expect build ≈ scene + HDF5 (~15 s) unless
+``LIBERO_COMPAT_MAX_DEMOS_PER_TASK`` further truncates demos. Step time
+includes OSC + ObjectTargetPoseBuffer gather + privileged diffs.
+
+Historical harvest vs `per_task_group` table above remains the cross-impl
+step-time evidence for the cloner/selector API (up to **6.37×** on `goal` @
+800 envs).
+
+```json
+{"suite": "all", "impl": "compat_osc", "num_envs": 40, "num_steps": 50, "repeat": 0, "seed": 0, "action_dim": 7, "build_time_s": 3.8031, "step_time_mean_ms": 221.0111, "step_time_median_ms": 217.5549, "step_time_std_ms": 9.7497, "throughput_env_steps_per_s": 180.99, "peak_gpu_mem_mb": 13.01, "articulations": 5, "rigid_objects": 27, "total_asset_views": 32}
+{"suite": "all", "impl": "compat_osc", "num_envs": 40, "num_steps": 30, "repeat": 0, "seed": 0, "action_dim": 7, "build_time_s": 105.0472, "step_time_mean_ms": 261.3233, "step_time_median_ms": 260.0938, "step_time_std_ms": 9.7661, "throughput_env_steps_per_s": 153.07, "peak_gpu_mem_mb": 354.25, "articulations": 5, "rigid_objects": 27, "total_asset_views": 32}
 ```
