@@ -1153,6 +1153,20 @@ class NewtonManager(PhysicsManager):
         NewtonManager._builder = builder
 
     @classmethod
+    def get_builder(cls) -> ModelBuilder:
+        """Get the active Newton model builder before model finalization.
+
+        This accessor is intended for :attr:`~isaaclab.physics.PhysicsEvent.MODEL_INIT` callbacks
+        that need to adjust imported Newton data before the builder is finalized.
+
+        Raises:
+            RuntimeError: If the stage has not been imported into a Newton builder yet.
+        """
+        if cls._builder is None:
+            raise RuntimeError("The Newton model builder is unavailable before stage import.")
+        return cls._builder
+
+    @classmethod
     def create_builder(cls, up_axis: str | None = None, **kwargs) -> ModelBuilder:
         """Create a :class:`ModelBuilder` configured with default settings.
 

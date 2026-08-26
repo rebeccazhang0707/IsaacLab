@@ -211,6 +211,22 @@ def test_solver_kwargs_include_newton_deterministic_mode(monkeypatch: pytest.Mon
     assert kwargs["deterministic"] == wp.DeterministicMode.GPU_TO_GPU
 
 
+def test_get_builder_returns_active_newton_builder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The public accessor should expose the imported builder to model-init callbacks."""
+    builder = object()
+    monkeypatch.setattr(NewtonManager, "_builder", builder)
+
+    assert NewtonManager.get_builder() is builder
+
+
+def test_get_builder_rejects_access_before_stage_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The public accessor should fail clearly before a Newton builder exists."""
+    monkeypatch.setattr(NewtonManager, "_builder", None)
+
+    with pytest.raises(RuntimeError, match="before stage import"):
+        NewtonManager.get_builder()
+
+
 def test_vbd_solver_kwargs_include_rigid_avbd_alpha() -> None:
     """VBD construction should receive the configured rigid-body AVBD alpha."""
     kwargs = NewtonManager._filter_solver_kwargs(SolverVBD, VBDSolverCfg(rigid_avbd_alpha=0.0))
