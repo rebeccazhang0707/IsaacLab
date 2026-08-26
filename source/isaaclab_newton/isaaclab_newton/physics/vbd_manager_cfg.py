@@ -61,6 +61,9 @@ class VBDSolverCfg(NewtonSolverCfg):
     rigid_contact_k_start: float = 1.0e2
     """Initial stiffness seed for rigid-body contacts [N/m]."""
 
+    rigid_avbd_alpha: float = 0.95
+    """Rigid-body AVBD constraint compliance blending factor."""
+
     rigid_body_particle_contact_buffer_size: int = 256
     """Per-body capacity of the particle, edge, and face soft-contact list.
 
