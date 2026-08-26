@@ -9,7 +9,7 @@ import math
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from pxr import Usd, UsdGeom
+from pxr import Gf, Usd, UsdGeom
 
 from isaaclab.sim import schemas
 from isaaclab.sim.spawners.materials.physics_materials import spawn_physics_material
@@ -266,6 +266,16 @@ def spawn_cable(
         raise ValueError(
             "CableCfg consecutive positions must be separated by more than 1e-8 m in the cable-local frame."
         )
+    if cfg.normals is not None:
+        if len(cfg.normals) != len(cfg.positions):
+            raise ValueError(
+                f"CableCfg normals must contain one vector per position, got {len(cfg.normals)} normals for "
+                f"{len(cfg.positions)} positions."
+            )
+        if any(len(normal) != 3 for normal in cfg.normals):
+            raise ValueError("CableCfg normals must contain exactly three coordinates.")
+        if any(not math.isfinite(coordinate) for normal in cfg.normals for coordinate in normal):
+            raise ValueError("CableCfg normals must contain only finite coordinates.")
     cfg.physics_material.validate()
 
     stage = get_current_stage()
@@ -287,7 +297,11 @@ def spawn_cable(
         geometry_schema_func=schemas.define_deformable_curve_properties,
     )
     curve_prim = stage.GetPrimAtPath(f"{prim_path}/geometry/mesh")
-    UsdGeom.BasisCurves(curve_prim).SetWidthsInterpolation(UsdGeom.Tokens.constant)
+    curves = UsdGeom.BasisCurves(curve_prim)
+    curves.SetWidthsInterpolation(UsdGeom.Tokens.constant)
+    if cfg.normals is not None:
+        curves.CreateNormalsAttr([Gf.Vec3f(*normal) for normal in cfg.normals])
+        curves.SetNormalsInterpolation(UsdGeom.Tokens.vertex)
     return stage.GetPrimAtPath(prim_path)
 
 

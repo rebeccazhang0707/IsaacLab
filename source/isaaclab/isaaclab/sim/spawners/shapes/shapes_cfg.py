@@ -151,6 +151,14 @@ class CableCfg(SpawnerCfg):
     Requires at least three finite points with consecutive points separated by more than 1e-8 m.
     """
 
+    normals: Sequence[tuple[float, float, float]] | None = None
+    """Optional cross-section normal at each control point in the cable-local frame.
+
+    When provided, the normals must contain one finite three-dimensional vector per position. Newton uses them
+    to preserve the authored cable roll and twist instead of generating an independent roll-free frame for each
+    segment.
+    """
+
     physics_material_path: str = "physics_material"
     """Path to the physics material, relative to the cable geometry prim."""
 

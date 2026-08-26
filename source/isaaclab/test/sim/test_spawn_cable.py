@@ -86,6 +86,19 @@ def test_spawn_cable_authors_optional_shear_and_twist_stiffness(stage):
     assert material_prim.GetAttribute("physics:twistStiffness").Get() == pytest.approx(0.0)
 
 
+def test_spawn_cable_authors_optional_per_point_normals(stage):
+    points = ((0.0, 0.0, 0.0), (0.1, 0.0, 0.0), (0.2, 0.1, 0.0))
+    normals = ((0.0, 1.0, 0.0), (0.0, 0.8, 0.2), (0.0, 0.6, 0.4))
+    cfg = CableCfg(positions=points, normals=normals, physics_material=CableMaterialCfg())
+
+    cfg.func("/World/Cable", cfg)
+    curves = UsdGeom.BasisCurves(stage.GetPrimAtPath("/World/Cable/geometry/mesh"))
+
+    for normal, expected in zip(curves.GetNormalsAttr().Get(), normals, strict=True):
+        assert tuple(normal) == pytest.approx(expected)
+    assert curves.GetNormalsInterpolation() == UsdGeom.Tokens.vertex
+
+
 def test_spawn_cable_authors_optional_collision_properties(stage):
     cfg = CableCfg(
         positions=((0.0, 0.0, 0.0), (0.1, 0.0, 0.0), (0.2, 0.0, 0.0)),
@@ -111,6 +124,27 @@ def test_spawn_cable_authors_optional_collision_properties(stage):
 )
 def test_spawn_cable_rejects_invalid_positions_without_authoring(stage, positions, message):
     cfg = CableCfg(positions=positions, physics_material=CableMaterialCfg())
+
+    with pytest.raises(ValueError, match=message):
+        cfg.func("/World/Cable", cfg)
+
+    assert not stage.GetPrimAtPath("/World/Cable").IsValid()
+
+
+@pytest.mark.parametrize(
+    ("normals", "message"),
+    [
+        (((0.0, 1.0, 0.0), (0.0, 1.0, 0.0)), "one vector per position"),
+        (((0.0, 1.0), (0.0, 1.0, 0.0), (0.0, 1.0, 0.0)), "exactly three coordinates"),
+        (((0.0, 1.0, 0.0), (float("inf"), 1.0, 0.0), (0.0, 1.0, 0.0)), "finite coordinates"),
+    ],
+)
+def test_spawn_cable_rejects_invalid_normals_without_authoring(stage, normals, message):
+    cfg = CableCfg(
+        positions=((0.0, 0.0, 0.0), (0.1, 0.0, 0.0), (0.2, 0.0, 0.0)),
+        normals=normals,
+        physics_material=CableMaterialCfg(),
+    )
 
     with pytest.raises(ValueError, match=message):
         cfg.func("/World/Cable", cfg)

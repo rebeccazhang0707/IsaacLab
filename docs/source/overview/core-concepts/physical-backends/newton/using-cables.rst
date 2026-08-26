@@ -69,6 +69,10 @@ bodies and ``N-2`` cable joints; the root segment is free-floating.
     * - ``positions``
       - Control points in the cable-local frame [m]. Requires at least **three**
         finite points, with consecutive points separated by more than ``1e-8`` m.
+    * - ``normals``
+      - Optional cross-section normal at each control point. Author one finite
+        three-dimensional vector per position to preserve cable roll and twist;
+        otherwise Newton generates a roll-free frame for each segment.
     * - ``physics_material``
       - Required :class:`~isaaclab.sim.spawners.materials.CableMaterialCfg`; see
         `Cable Material Parameters`_ below. Thickness is also written to the
