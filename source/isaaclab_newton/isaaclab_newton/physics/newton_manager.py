@@ -2585,6 +2585,30 @@ class NewtonManager(PhysicsManager):
         return cls._contacts
 
     @classmethod
+    def refresh_contacts(cls) -> Contacts:
+        """Recompute contacts for the current Newton state.
+
+        This is useful after directly restoring body state and before the next physics step, especially when
+        contact matching or solver contact history should start from the restored configuration.
+
+        Returns:
+            The refreshed Newton contact buffer.
+
+        Raises:
+            RuntimeError: If the active solver has no initialized external collision pipeline, contact buffer, or
+                current state.
+        """
+        pipeline = NewtonManager._collision_pipeline
+        contacts = NewtonManager._contacts
+        state = NewtonManager._state_0
+        if pipeline is None or contacts is None or state is None:
+            raise RuntimeError(
+                "Refreshing contacts requires an initialized Newton collision pipeline, contact buffer, and state."
+            )
+        pipeline.collide(state, contacts)
+        return contacts
+
+    @classmethod
     def _register_sensor_task(cls, name: str, update_fn: Callable[[], None]) -> None:
         """Register a graph-capturable scene-query task.
 

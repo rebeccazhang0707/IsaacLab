@@ -137,6 +137,35 @@ SOLVER_MATRIX = [
     ),
 ]
 
+
+def test_refresh_contacts_uses_current_state_and_buffer(monkeypatch):
+    """The public refresh helper recomputes the manager-owned contact buffer in place."""
+    calls = []
+    state = object()
+    contacts = object()
+    pipeline = SimpleNamespace(
+        collide=lambda actual_state, actual_contacts: calls.append((actual_state, actual_contacts))
+    )
+    monkeypatch.setattr(NewtonManager, "_state_0", state)
+    monkeypatch.setattr(NewtonManager, "_contacts", contacts)
+    monkeypatch.setattr(NewtonManager, "_collision_pipeline", pipeline)
+
+    assert NewtonManager.refresh_contacts() is contacts
+    assert calls == [(state, contacts)]
+
+
+@pytest.mark.parametrize("missing", ["_state_0", "_contacts", "_collision_pipeline"])
+def test_refresh_contacts_requires_initialized_pipeline_state(monkeypatch, missing):
+    """The refresh helper reports incomplete external-collision initialization."""
+    monkeypatch.setattr(NewtonManager, "_state_0", object())
+    monkeypatch.setattr(NewtonManager, "_contacts", object())
+    monkeypatch.setattr(NewtonManager, "_collision_pipeline", SimpleNamespace(collide=lambda *_: None))
+    monkeypatch.setattr(NewtonManager, missing, None)
+
+    with pytest.raises(RuntimeError, match="initialized Newton collision pipeline"):
+        NewtonManager.refresh_contacts()
+
+
 RIGID_BODY_FORCE_INPUT_SUPPORT = {
     NewtonMJWarpManager: True,
     NewtonVBDManager: True,
