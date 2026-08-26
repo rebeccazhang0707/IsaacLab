@@ -219,6 +219,29 @@ def test_vbd_solver_force_input_capability(monkeypatch, external_rigid_solver):
     assert NewtonManager._supports_rigid_body_force_input is not external_rigid_solver
 
 
+@pytest.mark.parametrize("contact_history", [False, True])
+def test_vbd_initializes_contact_history_before_solver(monkeypatch, contact_history):
+    """VBD should allocate the collision pipeline first when contact history is enabled."""
+    physics = importlib.import_module("isaaclab_newton.physics")
+    events = []
+
+    def initialize_contacts(cls):
+        events.append("contacts")
+
+    def create_solver(model, solver_cfg):
+        del model, solver_cfg
+        events.append("solver")
+        return object()
+
+    monkeypatch.setattr(physics.NewtonVBDManager, "_initialize_contacts", classmethod(initialize_contacts))
+    monkeypatch.setattr(physics.NewtonVBDManager, "_create_solver", create_solver)
+    monkeypatch.setattr(NewtonManager, "_solver", None)
+
+    physics.NewtonVBDManager._build_solver(object(), physics.VBDSolverCfg(rigid_contact_history=contact_history))
+
+    assert events == (["contacts", "solver"] if contact_history else ["solver"])
+
+
 def test_vbd_rebuilds_particle_bvh_before_physics_step(monkeypatch):
     """VBD rebuilds its particle BVH before the base physics step."""
     physics = importlib.import_module("isaaclab_newton.physics")

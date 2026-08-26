@@ -73,10 +73,12 @@ class NewtonVBDManager(NewtonManager):
     @classmethod
     def _build_solver(cls, model: Model, solver_cfg: VBDSolverCfg) -> None:
         """Construct VBD and configure its base-manager state."""
-        NewtonManager._solver = cls._create_solver(model, solver_cfg)
         NewtonManager._use_single_state = False
         NewtonManager._needs_collision_pipeline = True
         NewtonManager._supports_rigid_body_force_input = not solver_cfg.integrate_with_external_rigid_solver
+        if solver_cfg.rigid_contact_history:
+            cls._initialize_contacts()
+        NewtonManager._solver = cls._create_solver(model, solver_cfg)
 
     @classmethod
     def _solver_specific_clear(cls) -> None:
