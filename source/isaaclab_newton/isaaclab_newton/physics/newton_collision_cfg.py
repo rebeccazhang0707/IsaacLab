@@ -169,6 +169,13 @@ class NewtonCollisionPipelineCfg:
     Defaults to ``None`` (same as Newton's default).
     """
 
+    contact_matching: Literal["disabled", "latest", "sticky"] = "disabled"
+    """Contact matching mode used to preserve rigid contacts between collision passes.
+
+    ``"latest"`` matches against the previous collision pass, while ``"sticky"`` retains the
+    original match until it is lost. Defaults to ``"disabled"`` (same as Newton's default).
+    """
+
     sdf_hydroelastic_config: HydroelasticSDFCfg | None = None
     """Configuration for SDF-based hydroelastic collision handling.
 

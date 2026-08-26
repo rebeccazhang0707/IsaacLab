@@ -239,6 +239,13 @@ def test_vbd_solver_kwargs_include_rigid_body_contact_buffer_size() -> None:
     assert kwargs["rigid_body_contact_buffer_size"] == 256
 
 
+def test_collision_pipeline_args_include_contact_matching() -> None:
+    """Collision-pipeline construction should receive the configured contact-matching mode."""
+    args = NewtonCollisionPipelineCfg(contact_matching="latest").to_pipeline_args()
+
+    assert args["contact_matching"] == "latest"
+
+
 @pytest.mark.parametrize(
     "solver_cfg",
     [
