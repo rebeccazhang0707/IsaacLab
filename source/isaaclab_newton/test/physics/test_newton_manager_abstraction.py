@@ -626,6 +626,19 @@ def test_mpm_register_builder_attributes_is_idempotent():
     assert builder.has_custom_attribute("mpm:young_modulus")
 
 
+def test_vbd_register_builder_attributes_is_idempotent() -> None:
+    """The VBD builder hook should register Dahl attributes exactly once."""
+    builder = ModelBuilder()
+    assert not builder.has_custom_attribute("vbd:dahl_eps_max")
+
+    NewtonVBDManager._register_builder_attributes(builder)
+    assert builder.has_custom_attribute("vbd:dahl_eps_max")
+    assert builder.has_custom_attribute("vbd:dahl_tau")
+
+    NewtonVBDManager._register_builder_attributes(builder)
+    assert builder.has_custom_attribute("vbd:dahl_eps_max")
+
+
 @pytest.mark.parametrize(
     ("manager", "active", "inactive"),
     [

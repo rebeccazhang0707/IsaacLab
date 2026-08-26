@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 class NewtonVBDManager(NewtonManager):
     """Newton manager specialization for the VBD solver."""
 
+    _builder_attribute_solvers = (SolverVBD,)
+
     @classmethod
     def initialize(cls, sim_context: SimulationContext) -> None:
         """Initialize VBD deformable integration when contrib is available."""
