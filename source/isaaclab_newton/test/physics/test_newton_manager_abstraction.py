@@ -218,6 +218,13 @@ def test_vbd_solver_kwargs_include_rigid_avbd_alpha() -> None:
     assert kwargs["rigid_avbd_alpha"] == 0.0
 
 
+def test_vbd_solver_kwargs_include_rigid_contact_hard() -> None:
+    """VBD construction should receive the configured rigid hard-contact mode."""
+    kwargs = NewtonManager._filter_solver_kwargs(SolverVBD, VBDSolverCfg(rigid_contact_hard=False))
+
+    assert kwargs["rigid_contact_hard"] is False
+
+
 @pytest.mark.parametrize(
     "solver_cfg",
     [

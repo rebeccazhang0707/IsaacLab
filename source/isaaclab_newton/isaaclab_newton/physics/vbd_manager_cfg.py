@@ -64,6 +64,9 @@ class VBDSolverCfg(NewtonSolverCfg):
     rigid_avbd_alpha: float = 0.95
     """Rigid-body AVBD constraint compliance blending factor."""
 
+    rigid_contact_hard: bool = True
+    """Whether to enforce rigid contacts with VBD's hard-contact formulation."""
+
     rigid_body_particle_contact_buffer_size: int = 256
     """Per-body capacity of the particle, edge, and face soft-contact list.
 
