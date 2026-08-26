@@ -225,6 +225,13 @@ def test_vbd_solver_kwargs_include_rigid_contact_hard() -> None:
     assert kwargs["rigid_contact_hard"] is False
 
 
+def test_vbd_solver_kwargs_include_rigid_contact_history() -> None:
+    """VBD construction should receive the configured rigid-contact history mode."""
+    kwargs = NewtonManager._filter_solver_kwargs(SolverVBD, VBDSolverCfg(rigid_contact_history=True))
+
+    assert kwargs["rigid_contact_history"] is True
+
+
 @pytest.mark.parametrize(
     "solver_cfg",
     [
