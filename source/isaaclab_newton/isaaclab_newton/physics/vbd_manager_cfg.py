@@ -70,6 +70,9 @@ class VBDSolverCfg(NewtonSolverCfg):
     rigid_contact_history: bool = False
     """Whether to retain rigid-contact history between collision passes."""
 
+    rigid_body_contact_buffer_size: int = 64
+    """Per-body capacity of the rigid-contact list."""
+
     rigid_body_particle_contact_buffer_size: int = 256
     """Per-body capacity of the particle, edge, and face soft-contact list.
 

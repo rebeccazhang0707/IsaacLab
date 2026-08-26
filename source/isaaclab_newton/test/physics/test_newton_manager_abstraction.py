@@ -232,6 +232,13 @@ def test_vbd_solver_kwargs_include_rigid_contact_history() -> None:
     assert kwargs["rigid_contact_history"] is True
 
 
+def test_vbd_solver_kwargs_include_rigid_body_contact_buffer_size() -> None:
+    """VBD construction should receive the configured per-body rigid-contact capacity."""
+    kwargs = NewtonManager._filter_solver_kwargs(SolverVBD, VBDSolverCfg(rigid_body_contact_buffer_size=256))
+
+    assert kwargs["rigid_body_contact_buffer_size"] == 256
+
+
 @pytest.mark.parametrize(
     "solver_cfg",
     [
