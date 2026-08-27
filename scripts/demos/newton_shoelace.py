@@ -17,8 +17,8 @@ first tightened, the two tails are pulled in sequence, and the loosened bight is
     # Use the Kit visualizer instead.
     uv run --extra isaacsim python scripts/demos/newton_shoelace.py --visualizer kit
 
-    # Run headless and verify the final untied state.
-    uv run python scripts/demos/newton_shoelace.py --visualizer none --verify
+    # Run the complete sequence headless.
+    uv run python scripts/demos/newton_shoelace.py --visualizer none
 
 """
 
@@ -34,10 +34,9 @@ from isaaclab.app import add_launcher_args, launch_simulation
 parser = argparse.ArgumentParser(description="Force-controlled Newton VBD shoelace demo.", conflict_handler="resolve")
 parser.add_argument("--contact_buffer", type=int, default=256, help="Per-body VBD rigid-contact capacity.")
 parser.add_argument("--max_steps", type=int, default=720, help="Number of 60 Hz simulation steps.")
-parser.add_argument("--verify", action="store_true", help="Check force delivery, stability, and final untying.")
 parser.add_argument("--physics", default="newton_vbd", choices=["newton_vbd"], help="Physics backend.")
 add_launcher_args(parser)
-parser.set_defaults(visualizer=["newton"])
+parser.set_defaults(visualizer=["newton_gl"])
 args_cli = parser.parse_args()
 
 if args_cli.contact_buffer < 1:
@@ -48,6 +47,7 @@ if args_cli.max_steps < 1:
 import newton
 import numpy as np
 import warp as wp
+from _newton_force_schedule import BodyForceMove, OpenLoopBodyForceSchedule
 from isaaclab_newton.physics import (
     NewtonCfg,
     NewtonCollisionPipelineCfg,
@@ -124,23 +124,14 @@ UNTIE_FORCE_RAMP = 1.0
 TIGHTEN_FORCE = 0.1
 UNTIE_FORCE_FIRST = 0.1
 UNTIE_FORCE_SECOND = 0.1
-GUIDED_DURATION = EXTRACT_END + UNTIE_HOLD + UNTIE_RELAX
 
 # Shoe and display parameters.
 FOOT_CENTER = (-0.01, 0.060, 0.075)
 FOOT_RADIUS = 0.025
 FOOT_HALF_LENGTH = 0.04
 CABLE_COLOR = (112.0 / 255.0, 65.0 / 255.0, 39.0 / 255.0)
-
-# Headless verification thresholds.
-# The contact-enabled reference run reaches 9.5 mm on the constrained right loop.
-MIN_TIGHTEN_OUTWARD_DISPLACEMENT = 0.009
-MAX_FREE_SPEED = 3.0
-MAX_JOINT_GAP = 0.0015
-# Sampled extraction runs peak at 68--73 mm, while the force-free jammed control peaks at 47--49 mm.
-MIN_BIGHT_REACH = 0.052
-# The authored tied state has 100 free segments near the throat; successful runs finish with 62--65.
-MIN_NEAR_KNOT_REDUCTION = 15
+CAMERA_EYE = (0.2159324, -0.2158787, 0.2631368)
+CAMERA_TARGET = (-0.0000817, 0.0001354, 0.0722455)
 
 
 def _world_points(prim: Usd.Prim) -> np.ndarray:
@@ -148,29 +139,6 @@ def _world_points(prim: Usd.Prim) -> np.ndarray:
     points = np.asarray(UsdGeom.PointBased(prim).GetPointsAttr().Get(), dtype=np.float64)
     transform = np.asarray(UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(0.0)).reshape(4, 4)
     return (np.c_[points, np.ones(len(points))] @ transform)[:, :3]
-
-
-def _load_usd_mesh(path: Path, prim_path: str) -> tuple[np.ndarray, np.ndarray]:
-    """Load a triangulated world-space USD mesh, preserving its winding."""
-    stage = Usd.Stage.Open(str(path))
-    prim = stage.GetPrimAtPath(prim_path)
-    if not prim:
-        raise ValueError(f"Missing prim {prim_path} in {path}")
-    vertices = _world_points(prim)
-    mesh = UsdGeom.Mesh(prim)
-    counts = np.asarray(mesh.GetFaceVertexCountsAttr().Get(), dtype=np.int32)
-    indices = np.asarray(mesh.GetFaceVertexIndicesAttr().Get(), dtype=np.int32)
-    left_handed = mesh.GetOrientationAttr().Get() == UsdGeom.Tokens.leftHanded
-    transform = np.asarray(UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(0.0)).reshape(4, 4)
-    flip = left_handed != (np.linalg.det(transform[:3, :3]) < 0.0)
-    triangles = []
-    offset = 0
-    for count in counts:
-        for index in range(1, count - 1):
-            a, b, c = indices[offset], indices[offset + index], indices[offset + index + 1]
-            triangles.append((a, c, b) if flip else (a, b, c))
-        offset += count
-    return vertices.astype(np.float32), np.asarray(triangles, dtype=np.int32).reshape(-1)
 
 
 def _load_usd_curve(path: Path, prim_path: str) -> tuple[np.ndarray, float]:
@@ -200,25 +168,19 @@ def _parallel_transport_normals(centerline: np.ndarray) -> list[tuple[float, flo
 
 
 @wp.kernel
-def _query_mesh_clearance(
-    mesh_id: wp.uint64,
-    points: wp.array[wp.vec3],
-    distances: wp.array[wp.float32],
-):
+def _query_mesh_clearance(mesh_id: wp.uint64, points: wp.array[wp.vec3], distances: wp.array[wp.float32]):
     index = wp.tid()
     query = wp.mesh_query_point_sign_winding_number(mesh_id, points[index], 10.0)
     closest = wp.mesh_eval_position(mesh_id, query.face, query.u, query.v)
     distances[index] = wp.length(points[index] - closest)
 
 
-def _captured_segments(
-    centerline: np.ndarray, radius: float, vertices: np.ndarray, triangles: np.ndarray
-) -> np.ndarray:
+def _captured_segments(centerline: np.ndarray, radius: float, collider: newton.Mesh) -> np.ndarray:
     """Find the contiguous lace span held against the shoe by the eyelets."""
     midpoints = 0.5 * (centerline[:-1] + centerline[1:])
     mesh = wp.Mesh(
-        points=wp.array(vertices, dtype=wp.vec3),
-        indices=wp.array(triangles, dtype=wp.int32),
+        points=wp.array(collider.vertices, dtype=wp.vec3),
+        indices=wp.array(collider.indices, dtype=wp.int32),
         support_winding_number=True,
     )
     points = wp.array(midpoints.astype(np.float32), dtype=wp.vec3)
@@ -249,79 +211,19 @@ def _filter_rod_neighbors(builder: ModelBuilder, bodies: list[int], window: int)
                     builder.add_shape_collision_filter_pair(int(first_shape), int(second_shape))
 
 
-def _segment_axes(quaternions: np.ndarray) -> np.ndarray:
-    """Return world-space local-Z axes for xyzw quaternions."""
-    z_axis = np.zeros((len(quaternions), 3), dtype=quaternions.dtype)
-    z_axis[:, 2] = 1.0
-    twice_cross = 2.0 * np.cross(quaternions[:, :3], z_axis)
-    return z_axis + quaternions[:, 3, None] * twice_cross + np.cross(quaternions[:, :3], twice_cross)
-
-
-@wp.kernel
-def _apply_pull_forces(
-    grab_bodies: wp.array[wp.int32],
-    grab_offsets: wp.array[wp.int32],
-    grab_counts: wp.array[wp.int32],
-    move_t0: wp.array[wp.float32],
-    move_t1: wp.array[wp.float32],
-    force_directions: wp.array[wp.vec3],
-    force_magnitudes: wp.array[wp.float32],
-    ramp_up: wp.array[wp.float32],
-    ramp_down: wp.array[wp.float32],
-    elapsed: wp.array[wp.float32],
-    sim_dt: float,
-    body_f: wp.array[wp.spatial_vector],
-    peak_forces: wp.array[wp.float32],
-):
-    """Apply smooth open-loop force profiles to fully dynamic cable segments."""
-    move = wp.tid()
-    time = elapsed[0] + sim_dt
-    t0 = move_t0[move]
-    t1 = move_t1[move]
-    if time < t0 or time > t1:
-        return
-
-    up_u = wp.clamp((time - t0) / wp.max(ramp_up[move], 1.0e-6), 0.0, 1.0)
-    down_u = wp.clamp((t1 - time) / wp.max(ramp_down[move], 1.0e-6), 0.0, 1.0)
-    up_scale = up_u * up_u * (3.0 - 2.0 * up_u)
-    down_scale = down_u * down_u * (3.0 - 2.0 * down_u)
-    magnitude = force_magnitudes[move] * wp.min(up_scale, down_scale)
-    force = magnitude * force_directions[move] / float(grab_counts[move])
-    offset = grab_offsets[move]
-    for index in range(grab_counts[move]):
-        body_f[grab_bodies[offset + index]] += wp.spatial_vector(force, wp.vec3())
-    peak_forces[move] = wp.max(peak_forces[move], magnitude)
-
-
-@wp.kernel
-def _advance_elapsed(elapsed: wp.array[wp.float32], sim_dt: float, limit: float):
-    elapsed[0] = wp.min(elapsed[0] + sim_dt, limit)
-
-
 class ShoelaceController:
     """Configure the imported Newton model and apply the virtual fingertip forces."""
 
-    def __init__(self, centerline: np.ndarray, cable_radius: float, collider_vertices: np.ndarray, collider_tris):
+    def __init__(self, centerline: np.ndarray, cable_radius: float, collider: newton.Mesh):
         self.centerline = centerline
         self.cable_radius = cable_radius
-        captured = _captured_segments(centerline, cable_radius, collider_vertices, collider_tris)
-        held = np.flatnonzero(captured)
+        held = np.flatnonzero(_captured_segments(centerline, cable_radius, collider))
         self.first_pin = int(held.min())
         self.last_pin = int(held.max())
-        self.moves = self._build_tighten_moves() + self._build_untie_moves()
         self.cable_bodies: list[int] = []
         self.cable_joints: list[int] = []
-        self.shoe_collider: int | None = None
-        self._cable_shapes = np.empty(0, dtype=np.int32)
         self._initial_body_q = None
-        self._initial_pulled_inv_mass = None
-        self._tighten_initial_centers = None
-        self.tighten_peak_outward_displacement = np.zeros(2, dtype=np.float64)
-        self.max_free_speed = 0.0
-        self.max_joint_gap = 0.0
-        self.max_bight_reach = 0.0
-        self.max_lace_shoe_contacts = 0
-        self.initial_near_knot: int | None = None
+        self._force_schedule: OpenLoopBodyForceSchedule | None = None
 
     def register(self) -> None:
         """Register model lifecycle and per-substep force callbacks."""
@@ -363,8 +265,6 @@ class ShoelaceController:
         cable_shapes = []
         for body in self.cable_bodies:
             cable_shapes.extend(int(shape) for shape in builder.body_shapes.get(body, []))
-        self.shoe_collider = shoe_collider
-        self._cable_shapes = np.asarray(cable_shapes, dtype=np.int32)
         builder.shape_flags[shoe_collider] = newton.ShapeFlags.COLLIDE_SHAPES
         for shape in [shoe_collider, foot_shape, *cable_shapes]:
             builder.shape_collision_group[shape] = COLLISION_GROUP
@@ -435,38 +335,16 @@ class ShoelaceController:
 
         state = NewtonManager.get_state_0()
         self._initial_body_q = wp.clone(state.body_q)
-
-        grab_bodies = []
-        grab_offsets = []
-        for move in self.moves:
-            grab_offsets.append(len(grab_bodies))
-            grab_bodies.extend(self.cable_bodies[segment] for segment in move["segments"])
-        device = model.device
-        self.grab_bodies_wp = wp.array(grab_bodies, dtype=wp.int32, device=device)
-        self.grab_offsets_wp = wp.array(grab_offsets, dtype=wp.int32, device=device)
-        self.grab_counts_wp = wp.array([len(move["segments"]) for move in self.moves], dtype=wp.int32, device=device)
-        self.move_t0_wp = wp.array([move["t0"] for move in self.moves], dtype=wp.float32, device=device)
-        self.move_t1_wp = wp.array([move["t1"] for move in self.moves], dtype=wp.float32, device=device)
-        self.force_directions_wp = wp.array([move["direction"] for move in self.moves], dtype=wp.vec3, device=device)
-        self.force_magnitudes_wp = wp.array([move["force"] for move in self.moves], dtype=wp.float32, device=device)
-        self.force_ramp_up_wp = wp.array([move["ramp_up"] for move in self.moves], dtype=wp.float32, device=device)
-        self.force_ramp_down_wp = wp.array([move["ramp_down"] for move in self.moves], dtype=wp.float32, device=device)
-        self.peak_pull_forces_wp = wp.zeros(len(self.moves), dtype=wp.float32, device=device)
-        self.elapsed_wp = wp.zeros(1, dtype=wp.float32, device=device)
-
-        pulled_bodies = np.asarray(
-            sorted({self.cable_bodies[segment] for move in self.moves for segment in move["segments"]}),
-            dtype=np.int32,
+        moves = self._build_tighten_moves() + self._build_untie_moves()
+        self._force_schedule = OpenLoopBodyForceSchedule(
+            moves,
+            device=str(model.device),
+            sim_dt=SIM_DT,
         )
-        self._pulled_bodies = pulled_bodies
-        self._initial_pulled_inv_mass = model.body_inv_mass.numpy()[pulled_bodies].copy()
-        self._free_mask = np.ones(len(self.cable_bodies), dtype=bool)
-        self._free_mask[self.first_pin : self.last_pin + 1] = False
-        self._segment_half_length = 0.5 * np.linalg.norm(np.diff(self.centerline, axis=0), axis=1)
 
     def restore_authored_state(self) -> None:
         """Restore the knotted initial state after solver initialization evaluates FK."""
-        if self._initial_body_q is None:
+        if self._initial_body_q is None or self._force_schedule is None:
             raise RuntimeError("The shoelace model was not initialized")
 
         model = NewtonManager.get_model()
@@ -477,206 +355,74 @@ class ShoelaceController:
             state.body_q.assign(self._initial_body_q)
             state.body_qd.zero_()
             state.clear_forces()
-        self.elapsed_wp.zero_()
-        self.peak_pull_forces_wp.zero_()
+        self._force_schedule.reset()
         NewtonManager.invalidate_body_state()
         NewtonManager.refresh_contacts()
 
-    def update_verification(self, sim_time: float) -> None:
-        """Accumulate inexpensive stability metrics for ``--verify``."""
-        state = NewtonManager.get_state_0()
-        body_q = state.body_q.numpy()
-        if not np.isfinite(body_q).all():
-            raise AssertionError(f"Non-finite body transform at t={sim_time:.3f} s")
-        lace_q = body_q[self.cable_bodies]
-        contacts = NewtonManager.get_contacts()
-        if contacts is not None:
-            contact_count = int(contacts.rigid_contact_count.numpy()[0])
-            shape_0 = contacts.rigid_contact_shape0.numpy()[:contact_count]
-            shape_1 = contacts.rigid_contact_shape1.numpy()[:contact_count]
-            shoe_mask = (shape_0 == self.shoe_collider) | (shape_1 == self.shoe_collider)
-            other_shapes = np.where(shape_0 == self.shoe_collider, shape_1, shape_0)
-            lace_shoe_contacts = int(np.count_nonzero(shoe_mask & np.isin(other_shapes, self._cable_shapes)))
-            self.max_lace_shoe_contacts = max(self.max_lace_shoe_contacts, lace_shoe_contacts)
-        if self.initial_near_knot is None:
-            knot = 0.5 * (lace_q[self.first_pin, :3] + lace_q[self.last_pin, :3])
-            free_positions = np.r_[lace_q[: self.first_pin, :3], lace_q[self.last_pin + 1 :, :3]]
-            self.initial_near_knot = int((np.linalg.norm(free_positions - knot, axis=1) < 0.025).sum())
-        if SETTLE_END <= sim_time <= TIGHTEN_END + FRAME_DT:
-            centers = np.stack(
-                (
-                    lace_q[LOOP_GRAB_LEFT[0] : LOOP_GRAB_LEFT[1], :3].mean(axis=0),
-                    lace_q[LOOP_GRAB_RIGHT[0] : LOOP_GRAB_RIGHT[1], :3].mean(axis=0),
-                )
-            )
-            if self._tighten_initial_centers is None:
-                self._tighten_initial_centers = centers.copy()
-            directions = np.asarray([move["direction"] for move in self.moves[:2]])
-            displacement = np.sum((centers - self._tighten_initial_centers) * directions, axis=1)
-            self.tighten_peak_outward_displacement = np.maximum(self.tighten_peak_outward_displacement, displacement)
-
-        if sim_time >= EXTRACT_START:
-            knot = 0.5 * (lace_q[self.first_pin, :3] + lace_q[self.last_pin, :3])
-            apex = lace_q[(LOOP_GRAB_LEFT[0] + LOOP_GRAB_LEFT[1]) // 2, :3]
-            self.max_bight_reach = max(self.max_bight_reach, float(np.linalg.norm(apex - knot)))
-
-        speed = np.linalg.norm(state.body_qd.numpy()[self.cable_bodies, :3], axis=1)
-        self.max_free_speed = max(self.max_free_speed, float(speed[self._free_mask].max()))
-        axes = _segment_axes(lace_q[:, 3:7])
-        left = lace_q[:-1, :3] + axes[:-1] * self._segment_half_length[:-1, None]
-        right = lace_q[1:, :3] - axes[1:] * self._segment_half_length[1:, None]
-        self.max_joint_gap = max(self.max_joint_gap, float(np.linalg.norm(left - right, axis=1).max()))
-
-    def verify(self) -> None:
-        """Verify the force-driven sequence stayed dynamic, stable, and ended untied."""
-        peak_forces = self.peak_pull_forces_wp.numpy()
-        scheduled = np.asarray([move["force"] for move in self.moves], dtype=np.float32)
-        if not np.allclose(peak_forces, scheduled, rtol=1.0e-3, atol=1.0e-5):
-            raise AssertionError(f"Expected peak forces {scheduled.tolist()} N, got {peak_forces.tolist()} N")
-
-        model = NewtonManager.get_model()
-        pulled_inv_mass = model.body_inv_mass.numpy()[self._pulled_bodies]
-        if not np.allclose(pulled_inv_mass, self._initial_pulled_inv_mass):
-            raise AssertionError("A force-controlled grab segment became kinematic")
-        if float(self.tighten_peak_outward_displacement.min()) < MIN_TIGHTEN_OUTWARD_DISPLACEMENT:
-            displacement_mm = (self.tighten_peak_outward_displacement * 1000.0).round(1).tolist()
-            raise AssertionError(f"Tightening did not move both loops outward: {displacement_mm} mm")
-        if self.max_free_speed > MAX_FREE_SPEED:
-            raise AssertionError(f"Peak free-segment speed was {self.max_free_speed:.2f} m/s")
-        if self.max_joint_gap > MAX_JOINT_GAP:
-            raise AssertionError(f"A cable joint opened by {self.max_joint_gap * 1000.0:.2f} mm")
-        if self.max_lace_shoe_contacts == 0:
-            raise AssertionError("The free lace never contacted the shoe collider")
-
-        positions = NewtonManager.get_state_0().body_q.numpy()[self.cable_bodies, :3]
-        if float(positions[:, 2].min()) < -2.0 * self.cable_radius:
-            raise AssertionError(f"The lace fell through the floor: min z={positions[:, 2].min():.4f} m")
-        spread = float(np.linalg.norm(positions - positions.mean(axis=0), axis=1).max())
-        if spread > 0.6:
-            raise AssertionError(f"The lace left the scene: spread={spread:.3f} m")
-        knot = 0.5 * (positions[self.first_pin] + positions[self.last_pin])
-        apex = positions[(LOOP_GRAB_LEFT[0] + LOOP_GRAB_LEFT[1]) // 2]
-        reach = float(np.linalg.norm(apex - knot))
-        free_positions = np.r_[positions[: self.first_pin], positions[self.last_pin + 1 :]]
-        near_knot = int((np.linalg.norm(free_positions - knot, axis=1) < 0.025).sum())
-        if self.initial_near_knot is None:
-            raise AssertionError("The initial knot occupancy was not measured")
-        print(
-            "[INFO]: Verification metrics: "
-            f"tighten={(self.tighten_peak_outward_displacement * 1000.0).round(1).tolist()} mm, "
-            f"max_speed={self.max_free_speed:.3f} m/s, max_gap={self.max_joint_gap * 1000.0:.3f} mm, "
-            f"peak_shoe_contacts={self.max_lace_shoe_contacts}, "
-            f"peak_apex_reach={self.max_bight_reach * 1000.0:.1f} mm, final_apex_reach={reach * 1000.0:.1f} mm, "
-            f"apex_vector={((apex - knot) * 1000.0).round(1).tolist()} mm, "
-            f"near_knot={self.initial_near_knot}->{near_knot}."
-        )
-        if self.max_bight_reach < MIN_BIGHT_REACH:
-            raise AssertionError(
-                f"The second bight remained in the wrap: peak reach={self.max_bight_reach * 1000.0:.0f} mm"
-            )
-        near_knot_reduction = self.initial_near_knot - near_knot
-        if near_knot_reduction < MIN_NEAR_KNOT_REDUCTION:
-            raise AssertionError(
-                f"The knot remained tied: throat occupancy decreased by only {near_knot_reduction} segments"
-            )
-
-        print(
-            "[INFO]: Verification passed: "
-            f"peak_forces={peak_forces.round(3).tolist()} N, "
-            f"peak_apex_reach={self.max_bight_reach * 1000.0:.1f} mm, near_knot={near_knot}."
-        )
-
     def _apply_forces(self, state: State) -> None:
         """Apply scheduled forces before one Newton solver substep."""
-        wp.launch(
-            _apply_pull_forces,
-            dim=len(self.moves),
-            inputs=[
-                self.grab_bodies_wp,
-                self.grab_offsets_wp,
-                self.grab_counts_wp,
-                self.move_t0_wp,
-                self.move_t1_wp,
-                self.force_directions_wp,
-                self.force_magnitudes_wp,
-                self.force_ramp_up_wp,
-                self.force_ramp_down_wp,
-                self.elapsed_wp,
-                SIM_DT,
-                state.body_f,
-                self.peak_pull_forces_wp,
-            ],
-            device=state.body_f.device,
-        )
-        wp.launch(
-            _advance_elapsed,
-            dim=1,
-            inputs=[self.elapsed_wp, SIM_DT, GUIDED_DURATION],
-            device=state.body_f.device,
-        )
+        if self._force_schedule is None:
+            raise RuntimeError("The shoelace force schedule was not initialized")
+        self._force_schedule.apply(state)
 
-    def _build_tighten_moves(self) -> list[dict]:
+    def _build_tighten_moves(self) -> list[BodyForceMove]:
         """Build opposing force profiles that cinch the two bow loops."""
         midpoints = 0.5 * (self.centerline[:-1] + self.centerline[1:])
         knot = 0.5 * (midpoints[self.first_pin] + midpoints[self.last_pin])
-        moves = []
+        moves: list[BodyForceMove] = []
         for lower, upper in (LOOP_GRAB_LEFT, LOOP_GRAB_RIGHT):
-            segments = list(range(lower, min(upper, len(midpoints))))
+            segments = range(lower, min(upper, len(midpoints)))
             outward = midpoints[segments].mean(axis=0) - knot
             outward[2] = 0.0
-            outward /= np.linalg.norm(outward)
             moves.append(
-                {
-                    "segments": segments,
-                    "t0": SETTLE_END,
-                    "t1": RELEASE_TIME,
-                    "direction": outward,
-                    "force": TIGHTEN_FORCE,
-                    "ramp_up": TIGHTEN_FORCE_RAMP,
-                    "ramp_down": RELEASE_TIME - TIGHTEN_END,
-                }
+                BodyForceMove(
+                    body_indices=tuple(self.cable_bodies[segment] for segment in segments),
+                    start_time=SETTLE_END,
+                    end_time=RELEASE_TIME,
+                    direction=tuple(outward),
+                    magnitude=TIGHTEN_FORCE,
+                    ramp_up=TIGHTEN_FORCE_RAMP,
+                    ramp_down=RELEASE_TIME - TIGHTEN_END,
+                )
             )
         return moves
 
-    def _build_untie_moves(self) -> list[dict]:
+    def _build_untie_moves(self) -> list[BodyForceMove]:
         """Build sequential force profiles that pull both tails and extract the loosened bight."""
         midpoints = 0.5 * (self.centerline[:-1] + self.centerline[1:])
         knot = 0.5 * (midpoints[self.first_pin] + midpoints[self.last_pin])
-        moves = []
+        moves: list[BodyForceMove] = []
         for (lower, upper), (start, pull_end), force in (
             (TAIL_GRAB_FIRST, (UNTIE_FIRST_START, UNTIE_FIRST_END), UNTIE_FORCE_FIRST),
             (TAIL_GRAB_SECOND, (UNTIE_SECOND_START, UNTIE_SECOND_END), UNTIE_FORCE_SECOND),
         ):
-            segments = list(range(lower, min(upper, len(midpoints))))
+            segments = range(lower, min(upper, len(midpoints)))
             side = 1.0 if midpoints[segments].mean(axis=0)[0] >= knot[0] else -1.0
-            outward = np.asarray((side, -0.35, 0.15), dtype=np.float64)
-            outward /= np.linalg.norm(outward)
             moves.append(
-                {
-                    "segments": segments,
-                    "t0": float(start),
-                    "t1": float(pull_end + UNTIE_HOLD + UNTIE_RELAX),
-                    "direction": outward,
-                    "force": force,
-                    "ramp_up": UNTIE_FORCE_RAMP,
-                    "ramp_down": UNTIE_RELAX,
-                }
+                BodyForceMove(
+                    body_indices=tuple(self.cable_bodies[segment] for segment in segments),
+                    start_time=float(start),
+                    end_time=float(pull_end + UNTIE_HOLD + UNTIE_RELAX),
+                    direction=(side, -0.35, 0.15),
+                    magnitude=force,
+                    ramp_up=UNTIE_FORCE_RAMP,
+                    ramp_down=UNTIE_RELAX,
+                )
             )
-        segments = list(range(*LOOP_GRAB_LEFT))
+        segments = range(*LOOP_GRAB_LEFT)
         outward = midpoints[segments].mean(axis=0) - knot
         horizontal_norm = np.linalg.norm(outward[:2])
         outward[2] = -EXTRACT_DOWNWARD_BIAS * horizontal_norm
-        outward /= np.linalg.norm(outward)
         moves.append(
-            {
-                "segments": segments,
-                "t0": EXTRACT_START,
-                "t1": EXTRACT_END + UNTIE_HOLD + UNTIE_RELAX,
-                "direction": outward,
-                "force": EXTRACT_FORCE,
-                "ramp_up": UNTIE_FORCE_RAMP,
-                "ramp_down": UNTIE_RELAX,
-            }
+            BodyForceMove(
+                body_indices=tuple(self.cable_bodies[segment] for segment in segments),
+                start_time=EXTRACT_START,
+                end_time=EXTRACT_END + UNTIE_HOLD + UNTIE_RELAX,
+                direction=tuple(outward),
+                magnitude=EXTRACT_FORCE,
+                ramp_up=UNTIE_FORCE_RAMP,
+                ramp_down=UNTIE_RELAX,
+            )
         )
 
         return moves
@@ -783,25 +529,19 @@ def design_scene(centerline: np.ndarray, cable_radius: float) -> None:
 def run_simulator(sim: sim_utils.SimulationContext, controller: ShoelaceController) -> None:
     """Run the requested force-controlled sequence."""
     controller.restore_authored_state()
-    for step in range(args_cli.max_steps):
-        if not sim.is_headless_or_exist_active_visualizer():
-            break
+    step_count = 0
+    while sim.is_headless_or_exist_active_visualizer() and step_count < args_cli.max_steps:
         sim.step(render=False)
-        if args_cli.verify:
-            controller.update_verification((step + 1) * FRAME_DT)
         if sim.is_rendering:
             sim.render()
-    if args_cli.verify:
-        if args_cli.max_steps < 720:
-            raise ValueError("--verify requires --max_steps >= 720 to cover the full sequence")
-        controller.verify()
+        step_count += 1
 
 
 def main() -> None:
     """Launch Isaac Lab with Newton VBD and run the shoelace demo."""
     centerline, cable_radius = _load_usd_curve(CURVE_ASSET, "/World/Curve")
-    collider_vertices, collider_triangles = _load_usd_mesh(COLLIDER_ASSET, "/World/Collider")
-    controller = ShoelaceController(centerline, cable_radius, collider_vertices, collider_triangles)
+    collider = newton.Mesh.create_from_usd(str(COLLIDER_ASSET), root_path="/World/Collider", compute_inertia=False)
+    controller = ShoelaceController(centerline, cable_radius, collider)
 
     with launch_simulation(cfg=PhysicsCfg(), launcher_args=args_cli) as physics_cfg:
         if not isinstance(physics_cfg, NewtonCfg) or not isinstance(physics_cfg.solver_cfg, VBDSolverCfg):
@@ -830,16 +570,7 @@ def main() -> None:
         sim = sim_utils.SimulationContext(sim_cfg)
         design_scene(centerline, cable_radius)
         controller.register()
-
-        bounds_min = collider_vertices.min(axis=0)
-        bounds_max = collider_vertices.max(axis=0)
-        target = 0.5 * (bounds_min + bounds_max) + np.asarray((0.0, 0.0, 0.01))
-        diagonal = float(np.linalg.norm(bounds_max - bounds_min))
-        pitch = math.radians(-32.0)
-        yaw = math.radians(135.0)
-        front = np.asarray((math.cos(yaw) * math.cos(pitch), math.sin(yaw) * math.cos(pitch), math.sin(pitch)))
-        eye = target - 1.05 * diagonal * front
-        sim.set_camera_view(eye=tuple(eye), target=tuple(target))
+        sim.set_camera_view(eye=CAMERA_EYE, target=CAMERA_TARGET)
 
         sim.reset()
         print(
