@@ -11,8 +11,11 @@ first tightened, the two tails are pulled in sequence, and the loosened bight is
 
 .. code-block:: bash
 
-    # Run the complete 12 second sequence with the Kit visualizer.
-    uv run --extra isaacsim python scripts/demos/newton_shoelace.py
+    # Run the complete 12 second sequence with the Newton visualizer.
+    uv run python scripts/demos/newton_shoelace.py
+
+    # Use the Kit visualizer instead.
+    uv run --extra isaacsim python scripts/demos/newton_shoelace.py --visualizer kit
 
     # Run headless and verify the final untied state.
     uv run python scripts/demos/newton_shoelace.py --visualizer none --verify
@@ -34,7 +37,7 @@ parser.add_argument("--max_steps", type=int, default=720, help="Number of 60 Hz 
 parser.add_argument("--verify", action="store_true", help="Check force delivery, stability, and final untying.")
 parser.add_argument("--physics", default="newton_vbd", choices=["newton_vbd"], help="Physics backend.")
 add_launcher_args(parser)
-parser.set_defaults(visualizer=["kit"])
+parser.set_defaults(visualizer=["newton"])
 args_cli = parser.parse_args()
 
 if args_cli.contact_buffer < 1:
@@ -64,9 +67,10 @@ if TYPE_CHECKING:
     from newton import ModelBuilder, State
 
 
-ASSET_DIR = Path(__file__).resolve().parent / "assets" / "shoelace"
+ASSET_DIR = Path(__file__).resolve().parents[2] / ".newton" / "newton" / "examples" / "assets" / "shoelace"
 COLLIDER_ASSET = ASSET_DIR / "collider.usd"
 CURVE_ASSET = ASSET_DIR / "curve.usd"
+MODEL_ASSET = ASSET_DIR / "model.usd"
 
 # Simulation cadence.
 FPS = 60
@@ -111,7 +115,7 @@ UNTIE_RELAX = 0.6
 # extraction gives the standalone demo a reproducible untied terminal state without adding a pose target.
 EXTRACT_START = 7.4
 EXTRACT_END = 9.6
-EXTRACT_FORCE = 0.2
+EXTRACT_FORCE = 0.1
 EXTRACT_DOWNWARD_BIAS = 1.0
 TAIL_GRAB_FIRST = (446, 450)
 TAIL_GRAB_SECOND = (0, 4)
@@ -127,10 +131,10 @@ FOOT_CENTER = (-0.01, 0.060, 0.075)
 FOOT_RADIUS = 0.025
 FOOT_HALF_LENGTH = 0.04
 CABLE_COLOR = (112.0 / 255.0, 65.0 / 255.0, 39.0 / 255.0)
-SHOE_COLOR = (0.62, 0.55, 0.50)
 
 # Headless verification thresholds.
-MIN_TIGHTEN_OUTWARD_DISPLACEMENT = 0.012
+# The contact-enabled reference run reaches 9.5 mm on the constrained right loop.
+MIN_TIGHTEN_OUTWARD_DISPLACEMENT = 0.009
 MAX_FREE_SPEED = 3.0
 MAX_JOINT_GAP = 0.0015
 # Sampled extraction runs peak at 68--73 mm, while the force-free jammed control peaks at 47--49 mm.
@@ -307,6 +311,8 @@ class ShoelaceController:
         self.moves = self._build_tighten_moves() + self._build_untie_moves()
         self.cable_bodies: list[int] = []
         self.cable_joints: list[int] = []
+        self.shoe_collider: int | None = None
+        self._cable_shapes = np.empty(0, dtype=np.int32)
         self._initial_body_q = None
         self._initial_pulled_inv_mass = None
         self._tighten_initial_centers = None
@@ -314,6 +320,7 @@ class ShoelaceController:
         self.max_free_speed = 0.0
         self.max_joint_gap = 0.0
         self.max_bight_reach = 0.0
+        self.max_lace_shoe_contacts = 0
         self.initial_near_knot: int | None = None
 
     def register(self) -> None:
@@ -356,6 +363,9 @@ class ShoelaceController:
         cable_shapes = []
         for body in self.cable_bodies:
             cable_shapes.extend(int(shape) for shape in builder.body_shapes.get(body, []))
+        self.shoe_collider = shoe_collider
+        self._cable_shapes = np.asarray(cable_shapes, dtype=np.int32)
+        builder.shape_flags[shoe_collider] = newton.ShapeFlags.COLLIDE_SHAPES
         for shape in [shoe_collider, foot_shape, *cable_shapes]:
             builder.shape_collision_group[shape] = COLLISION_GROUP
         ground_shapes = [index for index, label in enumerate(builder.shape_label) if label.startswith("/World/Ground/")]
@@ -479,6 +489,15 @@ class ShoelaceController:
         if not np.isfinite(body_q).all():
             raise AssertionError(f"Non-finite body transform at t={sim_time:.3f} s")
         lace_q = body_q[self.cable_bodies]
+        contacts = NewtonManager.get_contacts()
+        if contacts is not None:
+            contact_count = int(contacts.rigid_contact_count.numpy()[0])
+            shape_0 = contacts.rigid_contact_shape0.numpy()[:contact_count]
+            shape_1 = contacts.rigid_contact_shape1.numpy()[:contact_count]
+            shoe_mask = (shape_0 == self.shoe_collider) | (shape_1 == self.shoe_collider)
+            other_shapes = np.where(shape_0 == self.shoe_collider, shape_1, shape_0)
+            lace_shoe_contacts = int(np.count_nonzero(shoe_mask & np.isin(other_shapes, self._cable_shapes)))
+            self.max_lace_shoe_contacts = max(self.max_lace_shoe_contacts, lace_shoe_contacts)
         if self.initial_near_knot is None:
             knot = 0.5 * (lace_q[self.first_pin, :3] + lace_q[self.last_pin, :3])
             free_positions = np.r_[lace_q[: self.first_pin, :3], lace_q[self.last_pin + 1 :, :3]]
@@ -526,6 +545,8 @@ class ShoelaceController:
             raise AssertionError(f"Peak free-segment speed was {self.max_free_speed:.2f} m/s")
         if self.max_joint_gap > MAX_JOINT_GAP:
             raise AssertionError(f"A cable joint opened by {self.max_joint_gap * 1000.0:.2f} mm")
+        if self.max_lace_shoe_contacts == 0:
+            raise AssertionError("The free lace never contacted the shoe collider")
 
         positions = NewtonManager.get_state_0().body_q.numpy()[self.cable_bodies, :3]
         if float(positions[:, 2].min()) < -2.0 * self.cable_radius:
@@ -544,6 +565,7 @@ class ShoelaceController:
             "[INFO]: Verification metrics: "
             f"tighten={(self.tighten_peak_outward_displacement * 1000.0).round(1).tolist()} mm, "
             f"max_speed={self.max_free_speed:.3f} m/s, max_gap={self.max_joint_gap * 1000.0:.3f} mm, "
+            f"peak_shoe_contacts={self.max_lace_shoe_contacts}, "
             f"peak_apex_reach={self.max_bight_reach * 1000.0:.1f} mm, final_apex_reach={reach * 1000.0:.1f} mm, "
             f"apex_vector={((apex - knot) * 1000.0).round(1).tolist()} mm, "
             f"near_knot={self.initial_near_knot}->{near_knot}."
@@ -695,15 +717,25 @@ def _rigid_material(friction: float, damping: float) -> list:
 
 
 def design_scene(centerline: np.ndarray, cable_radius: float) -> None:
-    """Author the shoe collider, cable, ground, and lighting into the USD stage."""
+    """Author the shoe visual, collider, cable, ground, and lighting into the USD stage."""
     shoe_cfg = sim_utils.UsdFileCfg(
         usd_path=str(COLLIDER_ASSET),
         rigid_props=[sim_utils.UsdPhysicsRigidBodyCfg(kinematic_enabled=True)],
-        collision_props=[sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)],
-        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=SHOE_COLOR, roughness=0.65),
-        physics_material=_rigid_material(SHOE_MU, CONTACT_KD),
     )
     shoe_cfg.func("/World/Shoe", shoe_cfg)
+    sim_utils.apply_collision_properties(
+        "/World/Shoe/Collider", [sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)]
+    )
+
+    stage = sim_utils.get_current_stage()
+    sim_utils.set_prim_visibility(stage.GetPrimAtPath("/World/Shoe/Collider"), False)
+    material_scope = UsdGeom.Scope.Define(stage, "/World/Shoe/Materials").GetPrim()
+    material_scope.GetReferences().AddReference(str(MODEL_ASSET), "/mat")
+    shoe_visual_cfg = sim_utils.UsdFileCfg(
+        usd_path=str(MODEL_ASSET),
+        visual_material_bindings={"Model": "/World/Shoe/Materials/shoes"},
+    )
+    shoe_visual_cfg.func("/World/Shoe/Visual", shoe_visual_cfg)
 
     foot_cfg = sim_utils.CapsuleCfg(
         radius=FOOT_RADIUS,
