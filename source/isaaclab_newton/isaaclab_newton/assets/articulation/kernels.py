@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import warp as wp
+from newton._src.sim.articulation import jcalc_motion_subspace, velocity_at_point
 
 from isaaclab.assets.articulation.ordering_kernels import resolve_backend_index
 from isaaclab.utils.warp.index_kernel import IndexKernelDispatcher
@@ -47,6 +48,76 @@ def compute_soft_joint_pos_limits_func(
 """
 Articulation-specific warp kernels.
 """
+
+
+@wp.kernel
+def eval_view_jacobians(
+    articulation_ids: wp.array(dtype=wp.int32),
+    articulation_start: wp.array(dtype=wp.int32),
+    articulation_end: wp.array(dtype=wp.int32),
+    joint_type: wp.array(dtype=wp.int32),
+    joint_parent: wp.array(dtype=wp.int32),
+    joint_child: wp.array(dtype=wp.int32),
+    joint_ancestor: wp.array(dtype=wp.int32),
+    joint_q_start: wp.array(dtype=wp.int32),
+    joint_qd_start: wp.array(dtype=wp.int32),
+    joint_x_p: wp.array(dtype=wp.transformf),
+    joint_axis: wp.array(dtype=wp.vec3f),
+    joint_q: wp.array(dtype=wp.float32),
+    joint_dof_dim: wp.array2d(dtype=wp.int32),
+    body_q: wp.array(dtype=wp.transformf),
+    body_com: wp.array(dtype=wp.vec3f),
+    jacobian: wp.array4d(dtype=wp.float32),
+    joint_s_s: wp.array(dtype=wp.spatial_vectorf),
+) -> None:
+    """Compute compact Jacobians for only the articulations selected by a view."""
+    view_index = wp.tid()
+    articulation_index = articulation_ids[view_index]
+    joint_start = articulation_start[articulation_index]
+    joint_end = articulation_end[articulation_index]
+    joint_count = joint_end - joint_start
+    articulation_dof_start = joint_qd_start[joint_start]
+
+    for local_joint_index in range(joint_count):
+        joint_index = joint_start + local_joint_index
+        parent_index = joint_parent[joint_index]
+        parent_anchor_pose = joint_x_p[joint_index]
+        if parent_index >= 0:
+            parent_anchor_pose = body_q[parent_index] * parent_anchor_pose
+        jcalc_motion_subspace(
+            joint_type[joint_index],
+            joint_axis,
+            joint_q,
+            joint_dof_dim[joint_index, 0],
+            joint_dof_dim[joint_index, 1],
+            parent_anchor_pose,
+            body_q[joint_child[joint_index]],
+            body_com[joint_child[joint_index]],
+            joint_q_start[joint_index],
+            joint_qd_start[joint_index],
+            joint_s_s,
+        )
+
+    for local_joint_index in range(joint_count):
+        joint_index = joint_start + local_joint_index
+        child_index = joint_child[joint_index]
+        child_com_world = wp.transform_point(body_q[child_index], body_com[child_index])
+        ancestor_index = joint_index
+        while ancestor_index != -1:
+            dof_start = joint_qd_start[ancestor_index]
+            dof_end = joint_qd_start[ancestor_index + 1]
+            for dof_index in range(dof_end - dof_start):
+                local_dof_index = dof_start - articulation_dof_start + dof_index
+                motion = joint_s_s[dof_start + dof_index]
+                motion_at_com = wp.spatial_vector(
+                    velocity_at_point(motion, child_com_world),
+                    wp.spatial_bottom(motion),
+                )
+                for spatial_index in range(6):
+                    jacobian[view_index, local_joint_index, spatial_index, local_dof_index] = motion_at_com[
+                        spatial_index
+                    ]
+            ancestor_index = joint_ancestor[ancestor_index]
 
 
 @wp.kernel
