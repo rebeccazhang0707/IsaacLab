@@ -51,19 +51,6 @@ add_launcher_args(parser)
 parser.set_defaults(visualizer=["newton_gl"])
 args_cli = parser.parse_args()
 
-if args_cli.contact_buffer < 1:
-    parser.error("--contact_buffer must be at least 1.")
-if args_cli.contacts_per_env < 1:
-    parser.error("--contacts_per_env must be at least 1.")
-if not math.isfinite(args_cli.env_spacing) or args_cli.env_spacing <= 0.0:
-    parser.error("--env_spacing must be finite and positive.")
-if args_cli.max_steps < 1:
-    parser.error("--max_steps must be at least 1.")
-if args_cli.num_envs < 1:
-    parser.error("--num_envs must be at least 1.")
-if args_cli.triangle_pairs_per_env < 1:
-    parser.error("--triangle_pairs_per_env must be at least 1.")
-
 import newton
 import numpy as np
 import warp as wp
@@ -149,10 +136,11 @@ TIGHTEN_FORCE = 0.1
 UNTIE_FORCE_FIRST = 0.1
 UNTIE_FORCE_SECOND = 0.1
 
-# Shoe and display parameters.
-FOOT_CENTER = (-0.01, 0.060, 0.075)
-FOOT_RADIUS = 0.025
-FOOT_HALF_LENGTH = 0.04
+# Shoe and display parameters. A hidden panel follows the visual tongue below the moving lacing.
+TONGUE_UPPER_CENTER = (-0.005, 0.008, 0.102)
+TONGUE_UPPER_SIZE = (0.056, 0.055, 0.006)
+TONGUE_UPPER_PITCH = math.radians(28.0)
+TONGUE_UPPER_Y_ROTATION = math.radians(5.0)
 CABLE_COLOR = (112.0 / 255.0, 65.0 / 255.0, 39.0 / 255.0)
 CAMERA_EYE = (0.2159324, -0.2158787, 0.2631368)
 CAMERA_TARGET = (-0.0000817, 0.0001354, 0.0722455)
@@ -296,12 +284,12 @@ class ShoelaceController:
         shape_by_label = self._index_unique_labels(builder.shape_label)
         shoe_bodies: list[int] = []
         shoe_colliders: list[int] = []
-        foot_shapes: list[int] = []
+        tongue_colliders: list[int] = []
         for world in range(self.num_envs):
             root = f"/World/envs/env_{world}/Shoe"
             shoe_bodies.append(self._label_index(body_by_label, root))
             shoe_colliders.append(self._label_index(shape_by_label, f"{root}/Collider"))
-            foot_shapes.append(self._label_index(shape_by_label, f"{root}/Foot/geometry/mesh"))
+            tongue_colliders.append(self._label_index(shape_by_label, f"{root}/TongueUpper/geometry/mesh"))
         for shoe_body in shoe_bodies:
             builder.body_mass[shoe_body] = 0.0
             builder.body_inv_mass[shoe_body] = 0.0
@@ -312,12 +300,13 @@ class ShoelaceController:
         for bodies in self.cable_bodies:
             for body in bodies:
                 cable_shapes.extend(int(shape) for shape in builder.body_shapes.get(body, []))
-        for shoe_collider in shoe_colliders:
-            builder.shape_flags[shoe_collider] = newton.ShapeFlags.COLLIDE_SHAPES
-        for shape in [*shoe_colliders, *foot_shapes, *cable_shapes]:
+        shoe_contact_shapes = [*shoe_colliders, *tongue_colliders]
+        for shape in shoe_contact_shapes:
+            builder.shape_flags[shape] = newton.ShapeFlags.COLLIDE_SHAPES
+        for shape in [*shoe_contact_shapes, *cable_shapes]:
             builder.shape_collision_group[shape] = COLLISION_GROUP
         ground_shapes = [index for index, label in enumerate(builder.shape_label) if label.startswith("/World/Ground/")]
-        for shape in (*shoe_colliders, *foot_shapes):
+        for shape in shoe_contact_shapes:
             builder.shape_material_ke[shape] = CONTACT_KE
             builder.shape_material_kd[shape] = CONTACT_KD
             builder.shape_material_mu[shape] = SHOE_MU
@@ -332,7 +321,9 @@ class ShoelaceController:
         # a cylindrical curve element. The source demo was tuned against ModelBuilder.add_rod's
         # capsule mass, so restore that local mass/inertia convention for migration parity.
         neighbor_window = _neighbor_filter_window(self.centerline, self.cable_radius)
-        for bodies, joints, shoe_collider in zip(self.cable_bodies, self.cable_joints, shoe_colliders, strict=True):
+        for bodies, joints, shoe_collider, tongue_collider in zip(
+            self.cable_bodies, self.cable_joints, shoe_colliders, tongue_colliders, strict=True
+        ):
             for body in bodies:
                 shape = int(builder.body_shapes[body][0])
                 radius = float(builder.shape_scale[shape][0])
@@ -350,7 +341,8 @@ class ShoelaceController:
                 builder.body_inertia[body] = wp.mat33()
                 builder.body_inv_inertia[body] = wp.mat33()
                 for shape in builder.body_shapes.get(body, []):
-                    builder.add_shape_collision_filter_pair(int(shape), shoe_collider)
+                    for shoe_shape in (shoe_collider, tongue_collider):
+                        builder.add_shape_collision_filter_pair(int(shape), shoe_shape)
 
             _filter_rod_neighbors(builder, bodies, neighbor_window)
 
@@ -551,7 +543,6 @@ def create_scene_cfg(centerline: np.ndarray, cable_radius: float) -> Interactive
     mean_segment_length = float(np.linalg.norm(np.diff(centerline, axis=0), axis=1).mean())
     cross_section_area = math.pi * cable_radius**2
     second_moment = 0.25 * math.pi * cable_radius**4
-    half_angle = -0.25 * math.pi
     grid_side = math.ceil(math.sqrt(args_cli.num_envs))
     ground_size = max(2.0, args_cli.env_spacing * (grid_side + 1))
 
@@ -577,18 +568,22 @@ def create_scene_cfg(centerline: np.ndarray, cable_radius: float) -> Interactive
                 visual_material_bindings={"Model": "/World/ShoeMaterials/shoes"},
             ),
         )
-        foot = AssetBaseCfg(
-            prim_path="{ENV_REGEX_NS}/Shoe/Foot",
-            spawn=sim_utils.CapsuleCfg(
-                radius=FOOT_RADIUS,
-                height=2.0 * FOOT_HALF_LENGTH,
+        tongue_upper = AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/Shoe/TongueUpper",
+            spawn=sim_utils.CuboidCfg(
+                size=TONGUE_UPPER_SIZE,
                 visible=False,
                 collision_props=[sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)],
                 physics_material=_rigid_material(SHOE_MU, CONTACT_KD),
             ),
             init_state=AssetBaseCfg.InitialStateCfg(
-                pos=FOOT_CENTER,
-                rot=(math.sin(half_angle), 0.0, 0.0, math.cos(half_angle)),
+                pos=TONGUE_UPPER_CENTER,
+                rot=(
+                    math.cos(0.5 * TONGUE_UPPER_Y_ROTATION) * math.sin(0.5 * TONGUE_UPPER_PITCH),
+                    math.sin(0.5 * TONGUE_UPPER_Y_ROTATION) * math.cos(0.5 * TONGUE_UPPER_PITCH),
+                    -math.sin(0.5 * TONGUE_UPPER_Y_ROTATION) * math.sin(0.5 * TONGUE_UPPER_PITCH),
+                    math.cos(0.5 * TONGUE_UPPER_Y_ROTATION) * math.cos(0.5 * TONGUE_UPPER_PITCH),
+                ),
             ),
         )
         shoelace = AssetBaseCfg(
