@@ -114,6 +114,9 @@ DETERMINISTIC_TRIANGLE_PAIR_LIMIT = 1 << 20
 SETTLE_END = 0.6
 TIGHTEN_END = 1.6
 RELEASE_TIME = 2.1
+# Asset-specific inclusive span held against the shoe by the eyelets.
+PINNED_FIRST = 91
+PINNED_LAST = 359
 LOOP_GRAB_LEFT = (53, 58)
 LOOP_GRAB_RIGHT = (392, 397)
 UNTIE_FIRST_START = 3.0
@@ -146,20 +149,15 @@ CAMERA_EYE = (0.2159324, -0.2158787, 0.2631368)
 CAMERA_TARGET = (-0.0000817, 0.0001354, 0.0722455)
 
 
-def _world_points(prim: Usd.Prim) -> np.ndarray:
-    """Return point-based geometry positions in world coordinates."""
-    points = np.asarray(UsdGeom.PointBased(prim).GetPointsAttr().Get(), dtype=np.float64)
-    transform = np.asarray(UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(0.0)).reshape(4, 4)
-    return (np.c_[points, np.ones(len(points))] @ transform)[:, :3]
-
-
 def _load_usd_curve(path: Path, prim_path: str) -> tuple[np.ndarray, float]:
     """Load one world-space cable centerline and its radius."""
     stage = Usd.Stage.Open(str(path))
     prim = stage.GetPrimAtPath(prim_path)
     if not prim:
         raise ValueError(f"Missing prim {prim_path} in {path}")
-    centerline = _world_points(prim)
+    points = np.asarray(UsdGeom.PointBased(prim).GetPointsAttr().Get(), dtype=np.float64)
+    transform = np.asarray(UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(0.0)).reshape(4, 4)
+    centerline = (np.c_[points, np.ones(len(points))] @ transform)[:, :3]
     curves = UsdGeom.BasisCurves(prim)
     counts = list(curves.GetCurveVertexCountsAttr().Get())
     if counts != [len(centerline)]:
@@ -179,34 +177,6 @@ def _parallel_transport_normals(centerline: np.ndarray) -> list[tuple[float, flo
     return [(float(normal[0]), float(normal[1]), float(normal[2])) for normal in normals]
 
 
-@wp.kernel
-def _query_mesh_clearance(mesh_id: wp.uint64, points: wp.array[wp.vec3], distances: wp.array[wp.float32]):
-    index = wp.tid()
-    query = wp.mesh_query_point_sign_winding_number(mesh_id, points[index], 10.0)
-    closest = wp.mesh_eval_position(mesh_id, query.face, query.u, query.v)
-    distances[index] = wp.length(points[index] - closest)
-
-
-def _captured_segments(centerline: np.ndarray, radius: float, collider: newton.Mesh) -> np.ndarray:
-    """Find the contiguous lace span held against the shoe by the eyelets."""
-    midpoints = 0.5 * (centerline[:-1] + centerline[1:])
-    mesh = wp.Mesh(
-        points=wp.array(collider.vertices, dtype=wp.vec3),
-        indices=wp.array(collider.indices, dtype=wp.int32),
-        support_winding_number=True,
-    )
-    points = wp.array(midpoints.astype(np.float32), dtype=wp.vec3)
-    distances = wp.zeros(len(midpoints), dtype=wp.float32)
-    wp.launch(_query_mesh_clearance, dim=len(midpoints), inputs=[mesh.id, points, distances])
-    near = np.where(distances.numpy() < 2.0 * radius)[0]
-    near = near[(near > LOOP_GRAB_LEFT[1]) & (near < LOOP_GRAB_RIGHT[0])]
-    if len(near) < 2:
-        raise ValueError("The authored lace does not appear to pass through the shoe")
-    captured = np.zeros(len(midpoints), dtype=bool)
-    captured[near.min() : near.max() + 1] = True
-    return captured
-
-
 def _neighbor_filter_window(points: np.ndarray, radius: float) -> int:
     """Return the number of adjacent rod capsules that overlap by construction."""
     minimum_length = float(np.linalg.norm(np.diff(points, axis=0), axis=1).min())
@@ -214,25 +184,20 @@ def _neighbor_filter_window(points: np.ndarray, radius: float) -> int:
     return max(1, int(np.floor(contact_reach / minimum_length + 1.0e-9)) + 1)
 
 
-def _filter_rod_neighbors(builder: ModelBuilder, bodies: list[int], window: int) -> None:
+def _filter_rod_neighbors(builder: ModelBuilder, shapes: list[int], window: int) -> None:
     """Disable collisions between geometrically overlapping neighbor segments."""
-    for first, first_body in enumerate(bodies):
-        for second_body in bodies[first + 1 : min(first + 1 + window, len(bodies))]:
-            for first_shape in builder.body_shapes.get(first_body, []):
-                for second_shape in builder.body_shapes.get(second_body, []):
-                    builder.add_shape_collision_filter_pair(int(first_shape), int(second_shape))
+    for first, first_shape in enumerate(shapes):
+        for second_shape in shapes[first + 1 : first + 1 + window]:
+            builder.add_shape_collision_filter_pair(first_shape, second_shape)
 
 
 class ShoelaceController:
     """Configure replicated Newton shoelaces and apply the virtual fingertip forces."""
 
-    def __init__(self, centerline: np.ndarray, cable_radius: float, collider: newton.Mesh, num_envs: int):
+    def __init__(self, centerline: np.ndarray, cable_radius: float, num_envs: int):
         self.centerline = centerline
         self.cable_radius = cable_radius
         self.num_envs = num_envs
-        held = np.flatnonzero(_captured_segments(centerline, cable_radius, collider))
-        self.first_pin = int(held.min())
-        self.last_pin = int(held.max())
         self.cable_bodies: list[list[int]] = []
         self.cable_joints: list[list[int]] = []
         self._initial_body_q = None
@@ -270,62 +235,51 @@ class ShoelaceController:
                 f"{len(self.cable_joints[world])} joints"
             )
 
-        # USD normals preserve the authored frame semantically, but reconstructing a quaternion from a
-        # normal introduces a small round trip. Restore the exact source-demo frames before finalization.
-        exact_quaternions = newton.utils.create_parallel_transport_cable_quaternions(
-            [wp.vec3(*point) for point in self.centerline]
-        )
-        for bodies in self.cable_bodies:
-            for body, quaternion in zip(bodies, exact_quaternions, strict=True):
-                transform = builder.body_q[body]
-                builder.body_q[body] = wp.transform(wp.vec3(transform[0], transform[1], transform[2]), quaternion)
-
         body_by_label = self._index_unique_labels(builder.body_label)
         shape_by_label = self._index_unique_labels(builder.shape_label)
-        shoe_bodies: list[int] = []
         shoe_colliders: list[int] = []
         tongue_colliders: list[int] = []
         for world in range(self.num_envs):
             root = f"/World/envs/env_{world}/Shoe"
-            shoe_bodies.append(self._label_index(body_by_label, root))
-            shoe_colliders.append(self._label_index(shape_by_label, f"{root}/Collider"))
-            tongue_colliders.append(self._label_index(shape_by_label, f"{root}/TongueUpper/geometry/mesh"))
-        for shoe_body in shoe_bodies:
+            shoe_body = self._label_index(body_by_label, root)
+            shoe_collider = self._label_index(shape_by_label, f"{root}/Collider")
+            tongue_collider = self._label_index(shape_by_label, f"{root}/TongueUpper/geometry/mesh")
+            shoe_colliders.append(shoe_collider)
+            tongue_colliders.append(tongue_collider)
             builder.body_mass[shoe_body] = 0.0
             builder.body_inv_mass[shoe_body] = 0.0
             builder.body_inertia[shoe_body] = wp.mat33()
             builder.body_inv_inertia[shoe_body] = wp.mat33()
+            for shape in (shoe_collider, tongue_collider):
+                builder.shape_flags[shape] = newton.ShapeFlags.COLLIDE_SHAPES
+                builder.shape_collision_group[shape] = COLLISION_GROUP
+                builder.shape_material_ke[shape] = CONTACT_KE
+                builder.shape_material_kd[shape] = CONTACT_KD
+                builder.shape_material_mu[shape] = SHOE_MU
+                builder.shape_gap[shape] = CONTACT_GAP
 
-        cable_shapes = []
-        for bodies in self.cable_bodies:
-            for body in bodies:
-                cable_shapes.extend(int(shape) for shape in builder.body_shapes.get(body, []))
-        shoe_contact_shapes = [*shoe_colliders, *tongue_colliders]
-        for shape in shoe_contact_shapes:
-            builder.shape_flags[shape] = newton.ShapeFlags.COLLIDE_SHAPES
-        for shape in [*shoe_contact_shapes, *cable_shapes]:
-            builder.shape_collision_group[shape] = COLLISION_GROUP
         ground_shapes = [index for index, label in enumerate(builder.shape_label) if label.startswith("/World/Ground/")]
-        for shape in shoe_contact_shapes:
-            builder.shape_material_ke[shape] = CONTACT_KE
-            builder.shape_material_kd[shape] = CONTACT_KD
-            builder.shape_material_mu[shape] = SHOE_MU
-            builder.shape_gap[shape] = CONTACT_GAP
         for shape in ground_shapes:
             builder.shape_material_ke[shape] = CONTACT_KE
             builder.shape_material_kd[shape] = GROUND_CONTACT_KD
             builder.shape_material_mu[shape] = GROUND_MU
             builder.shape_gap[shape] = CONTACT_GAP
 
-        # AOUSD cable import intentionally removes capsule-cap mass so material density describes
-        # a cylindrical curve element. The source demo was tuned against ModelBuilder.add_rod's
-        # capsule mass, so restore that local mass/inertia convention for migration parity.
+        # Restore exact source-demo frames and capsule mass/inertia while visiting each cable body once.
+        exact_quaternions = newton.utils.create_parallel_transport_cable_quaternions(
+            [wp.vec3(*point) for point in self.centerline]
+        )
         neighbor_window = _neighbor_filter_window(self.centerline, self.cable_radius)
         for bodies, joints, shoe_collider, tongue_collider in zip(
             self.cable_bodies, self.cable_joints, shoe_colliders, tongue_colliders, strict=True
         ):
-            for body in bodies:
+            shapes: list[int] = []
+            for body, quaternion in zip(bodies, exact_quaternions, strict=True):
+                transform = builder.body_q[body]
+                builder.body_q[body] = wp.transform(wp.vec3(transform[0], transform[1], transform[2]), quaternion)
                 shape = int(builder.body_shapes[body][0])
+                shapes.append(shape)
+                builder.shape_collision_group[shape] = COLLISION_GROUP
                 radius = float(builder.shape_scale[shape][0])
                 segment_length = 2.0 * float(builder.shape_scale[shape][1])
                 capsule_mass_scale = 1.0 + 4.0 * radius / (3.0 * segment_length)
@@ -334,32 +288,34 @@ class ShoelaceController:
                 builder.body_inv_mass[body] = 1.0 / builder.body_mass[body]
                 builder.body_inv_inertia[body] = wp.inverse(builder.body_inertia[body])
 
-            for segment in range(self.first_pin, self.last_pin + 1):
-                body = bodies[segment]
+            pinned_bodies = bodies[PINNED_FIRST : PINNED_LAST + 1]
+            pinned_shapes = shapes[PINNED_FIRST : PINNED_LAST + 1]
+            for body, shape in zip(pinned_bodies, pinned_shapes, strict=True):
                 builder.body_mass[body] = 0.0
                 builder.body_inv_mass[body] = 0.0
                 builder.body_inertia[body] = wp.mat33()
                 builder.body_inv_inertia[body] = wp.mat33()
-                for shape in builder.body_shapes.get(body, []):
-                    for shoe_shape in (shoe_collider, tongue_collider):
-                        builder.add_shape_collision_filter_pair(int(shape), shoe_shape)
+                for shoe_shape in (shoe_collider, tongue_collider):
+                    builder.add_shape_collision_filter_pair(shape, shoe_shape)
 
-            _filter_rod_neighbors(builder, bodies, neighbor_window)
+            _filter_rod_neighbors(builder, shapes, neighbor_window)
 
-            for joint in joints:
-                dof = int(builder.joint_qd_start[joint])
-                builder.joint_target_ke[dof : dof + 4] = [
-                    STRETCH_STIFFNESS,
-                    STRETCH_STIFFNESS,
-                    BEND_STIFFNESS,
-                    BEND_STIFFNESS,
-                ]
-                builder.joint_target_kd[dof : dof + 4] = [
-                    STRETCH_DAMPING,
-                    STRETCH_DAMPING,
-                    BEND_DAMPING,
-                    BEND_DAMPING,
-                ]
+            dof_start = int(builder.joint_qd_start[joints[0]])
+            dof_end = int(builder.joint_qd_start[joints[-1]]) + 4
+            if dof_end - dof_start != 4 * len(joints):
+                raise RuntimeError("Cable joint DOFs must be contiguous")
+            builder.joint_target_ke[dof_start:dof_end] = (
+                STRETCH_STIFFNESS,
+                STRETCH_STIFFNESS,
+                BEND_STIFFNESS,
+                BEND_STIFFNESS,
+            ) * len(joints)
+            builder.joint_target_kd[dof_start:dof_end] = (
+                STRETCH_DAMPING,
+                STRETCH_DAMPING,
+                BEND_DAMPING,
+                BEND_DAMPING,
+            ) * len(joints)
 
     def _configure_model(self, _: object) -> None:
         """Configure Dahl hysteresis and force buffers before solver construction."""
@@ -408,7 +364,7 @@ class ShoelaceController:
     def _build_tighten_moves(self) -> list[BodyForceMove]:
         """Build opposing force profiles that cinch the two bow loops."""
         midpoints = 0.5 * (self.centerline[:-1] + self.centerline[1:])
-        knot = 0.5 * (midpoints[self.first_pin] + midpoints[self.last_pin])
+        knot = 0.5 * (midpoints[PINNED_FIRST] + midpoints[PINNED_LAST])
         moves: list[BodyForceMove] = []
         for bodies in self.cable_bodies:
             for lower, upper in (LOOP_GRAB_LEFT, LOOP_GRAB_RIGHT):
@@ -431,7 +387,7 @@ class ShoelaceController:
     def _build_untie_moves(self) -> list[BodyForceMove]:
         """Build sequential force profiles that pull both tails and extract the loosened bight."""
         midpoints = 0.5 * (self.centerline[:-1] + self.centerline[1:])
-        knot = 0.5 * (midpoints[self.first_pin] + midpoints[self.last_pin])
+        knot = 0.5 * (midpoints[PINNED_FIRST] + midpoints[PINNED_LAST])
         moves: list[BodyForceMove] = []
         for bodies in self.cable_bodies:
             for (lower, upper), (start, pull_end), force in (
@@ -622,14 +578,6 @@ def create_scene_cfg(centerline: np.ndarray, cable_radius: float) -> Interactive
     )
 
 
-def _camera_view() -> tuple[tuple[float, float, float], tuple[float, float, float]]:
-    """Return a close single-world or grid overview camera pose."""
-    if args_cli.num_envs == 1:
-        return CAMERA_EYE, CAMERA_TARGET
-    extent = args_cli.env_spacing * math.ceil(math.sqrt(args_cli.num_envs))
-    return (0.8 * extent, -0.8 * extent, 0.7 * extent), (0.0, 0.0, CAMERA_TARGET[2])
-
-
 def run_simulator(sim: sim_utils.SimulationContext, controller: ShoelaceController) -> None:
     """Run the requested force-controlled sequence."""
     controller.restore_authored_state()
@@ -644,8 +592,7 @@ def run_simulator(sim: sim_utils.SimulationContext, controller: ShoelaceControll
 def main() -> None:
     """Launch Isaac Lab with Newton VBD and run the shoelace demo."""
     centerline, cable_radius = _load_usd_curve(CURVE_ASSET, "/World/Curve")
-    collider = newton.Mesh.create_from_usd(str(COLLIDER_ASSET), root_path="/World/Collider", compute_inertia=False)
-    controller = ShoelaceController(centerline, cable_radius, collider, args_cli.num_envs)
+    controller = ShoelaceController(centerline, cable_radius, args_cli.num_envs)
 
     with launch_simulation(cfg=PhysicsCfg(), launcher_args=args_cli) as physics_cfg:
         if not isinstance(physics_cfg, NewtonCfg) or not isinstance(physics_cfg.solver_cfg, VBDSolverCfg):
@@ -691,14 +638,18 @@ def main() -> None:
         material_scope = UsdGeom.Scope.Define(stage, "/World/ShoeMaterials").GetPrim()
         material_scope.GetReferences().AddReference(str(MODEL_ASSET), "/mat")
         _scene = InteractiveScene(create_scene_cfg(centerline, cable_radius))
-        camera_eye, camera_target = _camera_view()
+        camera_eye, camera_target = CAMERA_EYE, CAMERA_TARGET
+        if args_cli.num_envs > 1:
+            extent = args_cli.env_spacing * math.ceil(math.sqrt(args_cli.num_envs))
+            camera_eye = (0.8 * extent, -0.8 * extent, 0.7 * extent)
+            camera_target = (0.0, 0.0, CAMERA_TARGET[2])
         sim.set_camera_view(eye=camera_eye, target=camera_target)
 
         sim.reset()
         print(
             f"[INFO]: Shoelace ready: {args_cli.num_envs} worlds, "
             f"{len(centerline) - 1} segments/world, "
-            f"pinned span [{controller.first_pin}, {controller.last_pin}]."
+            f"pinned span [{PINNED_FIRST}, {PINNED_LAST}]."
         )
         run_simulator(sim, controller)
 
