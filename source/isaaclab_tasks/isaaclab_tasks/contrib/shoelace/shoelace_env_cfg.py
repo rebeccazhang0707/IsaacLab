@@ -392,16 +392,6 @@ class RewardsCfg:
             "pull_weight": 0.25,
         },
     )
-    premature_close = RewTerm(
-        func=mdp.closing_away_from_tails,
-        weight=-2.0,
-        params={
-            **_ROBOT_TERM_PARAMS,
-            "acquisition_distance": _GRASP_ACQUISITION_DISTANCE,
-            "open_position": _GRIPPER_OPEN_POSITION,
-            "closed_position": _GRIPPER_CLOSED_POSITION,
-        },
-    )
     success = RewTerm(
         func=mdp.termination_event_reward,
         weight=60.0,
@@ -494,7 +484,7 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
                             rigid_contact_hard=True,
                             rigid_avbd_alpha=0.0,
                             rigid_contact_history=False,
-                            rigid_body_contact_buffer_size=256,
+                            rigid_body_contact_buffer_size=128,
                         ),
                         bodies=[r"/World/envs/env_[^/]+/(Shoelace(Left|Right)|Shoe)"],
                         include_static_shapes=True,
@@ -536,7 +526,7 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
     terminations: TerminationsCfg = TerminationsCfg()
 
     contacts_per_env = 512
-    triangle_pairs_per_env = 32768
+    triangle_pairs_per_env = 8192
     deterministic_triangle_pair_limit = 1 << 20
 
     def __post_init__(self) -> None:

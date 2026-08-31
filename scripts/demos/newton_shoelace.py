@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 from isaaclab.app import add_launcher_args, launch_simulation
 
 parser = argparse.ArgumentParser(description="Force-controlled Newton VBD shoelace demo.", conflict_handler="resolve")
-parser.add_argument("--contact_buffer", type=int, default=256, help="Per-body VBD rigid-contact capacity.")
+parser.add_argument("--contact_buffer", type=int, default=128, help="Per-body VBD rigid-contact capacity.")
 parser.add_argument("--contacts_per_env", type=int, default=512, help="Rigid-contact capacity per environment.")
 parser.add_argument("--env_spacing", type=float, default=0.5, help="Distance between environment origins [m].")
 parser.add_argument("--max_steps", type=int, default=720, help="Number of 60 Hz simulation steps.")
@@ -44,7 +44,7 @@ parser.add_argument("--physics", default="newton_vbd", choices=["newton_vbd"], h
 parser.add_argument(
     "--triangle_pairs_per_env",
     type=int,
-    default=32768,
+    default=8192,
     help="Shoe-mesh narrow-phase pair capacity per environment.",
 )
 add_launcher_args(parser)

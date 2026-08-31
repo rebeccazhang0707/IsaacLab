@@ -83,7 +83,9 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.sim.physics.num_substeps == 5
     assert cfg.sim.physics.collision_decimation == 2
     assert cfg.sim.physics.solver_cfg.entries[1].solver_cfg.iterations == 20
+    assert cfg.sim.physics.solver_cfg.entries[1].solver_cfg.rigid_body_contact_buffer_size == 128
     assert cfg.sim.physics.solver_cfg.proxies[0].collide_interval == 2
+    assert cfg.triangle_pairs_per_env == 8192
     assert SHOELACE_SEGMENT_COUNT == 360
     assert (PINNED_FIRST, PINNED_LAST) == (78, 281)
     assert (LEFT_CABLE_SEGMENT_COUNT, RIGHT_CABLE_SEGMENT_COUNT) == (79, 79)
@@ -107,7 +109,7 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert not hasattr(cfg.rewards, "approach_progress")
     assert not hasattr(cfg.rewards, "grasp_tails")
     assert not hasattr(cfg.rewards, "directional_pull")
-    assert cfg.rewards.premature_close.weight == pytest.approx(-2.0)
+    assert not hasattr(cfg.rewards, "premature_close")
     assert cfg.rewards.success.func is shoelace_rewards.termination_event_reward
     assert cfg.rewards.success.weight == pytest.approx(60.0)
     assert cfg.rewards.failure.func is shoelace_rewards.termination_event_reward
