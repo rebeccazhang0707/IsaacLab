@@ -15,7 +15,7 @@ import numpy as np
 import warp as wp
 from isaaclab_newton.physics import NewtonCfg, NewtonManager, VBDSolverCfg
 
-from pxr import Usd, UsdGeom, UsdPhysics
+from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
 import isaaclab.sim as sim_utils
 from isaaclab.envs import ManagerBasedRLEnv
@@ -24,7 +24,11 @@ from isaaclab.sim.spawners.from_files import spawn_from_usd
 
 from isaaclab_contrib.coupling import CouplerProxyCfg
 
-from .mdp.constants import PINNED_FIRST, PINNED_LAST
+from .mdp.constants import (
+    PINNED_FIRST,
+    PINNED_LAST,
+    SHOELACE_SEGMENT_COUNT,
+)
 
 if TYPE_CHECKING:
     from newton import ModelBuilder
@@ -51,6 +55,7 @@ LACE_MU = 0.7
 SHOE_MU = 0.2
 GROUND_MU = 0.8
 COLLISION_GROUP = 1
+PINNED_CONTACT_SEGMENTS = 36
 
 
 def _resolve_asset_dir() -> Path:
@@ -112,6 +117,94 @@ def _parallel_transport_normals(centerline: np.ndarray) -> list[tuple[float, flo
     return [(float(normal[0]), float(normal[1]), float(normal[2])) for normal in normals]
 
 
+def _resample_centerline(centerline: np.ndarray, num_segments: int) -> np.ndarray:
+    """Resample a polyline to uniformly spaced arc-length segments."""
+    segment_lengths = np.linalg.norm(np.diff(centerline, axis=0), axis=1)
+    if np.any(segment_lengths <= 0.0):
+        raise ValueError("Shoelace centerline must not contain coincident adjacent points")
+    arc_length = np.r_[0.0, np.cumsum(segment_lengths)]
+    sample_arc_length = np.linspace(0.0, arc_length[-1], num_segments + 1)
+    return np.column_stack(
+        [np.interp(sample_arc_length, arc_length, centerline[:, axis]) for axis in range(centerline.shape[1])]
+    )
+
+
+def _tube_mesh(centerline: np.ndarray, radius: float, sides: int = 8) -> newton.Mesh:
+    """Build a tube mesh around a fixed cable centerline."""
+    tangents = np.gradient(centerline, axis=0)
+    tangents /= np.linalg.norm(tangents, axis=1, keepdims=True)
+
+    normals = np.asarray(_parallel_transport_normals(centerline))
+    normals -= np.sum(normals * tangents, axis=1, keepdims=True) * tangents
+    normals /= np.linalg.norm(normals, axis=1, keepdims=True)
+    binormals = np.cross(tangents, normals)
+
+    angles = np.arange(sides) * (2.0 * math.pi / sides)
+    radial_directions = (
+        np.cos(angles)[None, :, None] * normals[:, None, :] + np.sin(angles)[None, :, None] * binormals[:, None, :]
+    )
+    vertices = (centerline[:, None, :] + radius * radial_directions).reshape(-1, 3)
+
+    first = np.arange((len(centerline) - 1) * sides).reshape(-1, sides)
+    next_side = np.roll(first, -1, axis=1)
+    next_ring = first + sides
+    next_ring_side = next_side + sides
+    indices = np.stack((first, next_ring_side, next_ring, first, next_side, next_ring_side), axis=-1).ravel()
+
+    return newton.Mesh(
+        vertices=vertices,
+        indices=indices,
+        normals=radial_directions.reshape(-1, 3),
+        compute_inertia=False,
+        is_solid=False,
+    )
+
+
+def _pinned_shoelace_spawner(centerline: np.ndarray, cable_radius: float) -> sim_utils.SpawnerCfg:
+    """Build a cloned spawner for the fixed pinned span and its local collision bands."""
+    pinned_centerline = centerline[PINNED_FIRST + 1 : PINNED_LAST + 1]
+    pinned_collision_centerlines = (
+        pinned_centerline[: PINNED_CONTACT_SEGMENTS + 1],
+        pinned_centerline[-PINNED_CONTACT_SEGMENTS - 1 :],
+    )
+
+    @sim_utils.clone
+    def spawn_pinned_shoelace(
+        prim_path: str,
+        _: sim_utils.SpawnerCfg,
+        translation: tuple[float, float, float] | None = None,
+        orientation: tuple[float, float, float, float] | None = None,
+        **kwargs,
+    ) -> Usd.Prim:
+        del kwargs
+        root = sim_utils.create_prim(prim_path, "Xform", translation=translation, orientation=orientation)
+        stage = sim_utils.get_current_stage()
+        curves = UsdGeom.BasisCurves.Define(stage, f"{prim_path}/geometry/mesh")
+        curves.CreatePointsAttr([Gf.Vec3f(*point) for point in pinned_centerline])
+        curves.CreateCurveVertexCountsAttr([len(pinned_centerline)])
+        curves.CreateTypeAttr(UsdGeom.Tokens.linear)
+        curves.CreateWrapAttr(UsdGeom.Tokens.nonperiodic)
+        curves.CreateWidthsAttr([2.0 * cable_radius])
+        curves.SetWidthsInterpolation(UsdGeom.Tokens.constant)
+        curves.CreateDisplayColorAttr([Gf.Vec3f(112.0 / 255.0, 65.0 / 255.0, 39.0 / 255.0)])
+        for side, points in zip(("left", "right"), pinned_collision_centerlines, strict=True):
+            tube = _tube_mesh(points, cable_radius)
+            mesh = UsdGeom.Mesh.Define(stage, f"{prim_path}/geometry/collision_{side}")
+            mesh.CreatePointsAttr([Gf.Vec3f(*map(float, point)) for point in tube.vertices])
+            mesh.CreateFaceVertexCountsAttr([3] * (len(tube.indices) // 3))
+            mesh.CreateFaceVertexIndicesAttr(tube.indices.tolist())
+            mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
+            collision_prim = mesh.GetPrim()
+            if not sim_utils.apply_collision_properties(
+                str(collision_prim.GetPath()), [sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)]
+            ):
+                raise RuntimeError(f"Failed to enable pinned collision mesh at {collision_prim.GetPath()}")
+            sim_utils.set_prim_visibility(collision_prim, False)
+        return root
+
+    return sim_utils.SpawnerCfg(func=spawn_pinned_shoelace)
+
+
 def _neighbor_filter_window(points: np.ndarray, radius: float) -> int:
     """Return the number of adjacent rod capsules that overlap by construction."""
     minimum_length = float(np.linalg.norm(np.diff(points, axis=0), axis=1).min())
@@ -129,10 +222,17 @@ def _filter_rod_neighbors(builder: ModelBuilder, shapes: list[int], window: int)
 class _ShoelacePhysics:
     """Configure shoelace parity before coupled MJWarp/VBD solver construction."""
 
-    def __init__(self, centerline: np.ndarray, cable_radius: float, num_envs: int):
+    def __init__(
+        self,
+        centerline: np.ndarray,
+        cable_radius: float,
+        num_envs: int,
+        joint_stiffness_scale: float,
+    ):
         self.centerline = centerline
         self.cable_radius = cable_radius
         self.num_envs = num_envs
+        self.joint_stiffness_scale = joint_stiffness_scale
         self.cable_bodies: list[list[int]] = []
         self.cable_joints: list[list[int]] = []
 
@@ -146,40 +246,57 @@ class _ShoelacePhysics:
         model = NewtonManager.get_model()
         rest = model.body_q.numpy()
         for bodies in self.cable_bodies:
-            rest[np.asarray(bodies), 3:7] = rest[bodies[0], 3:7]
+            for chain in (bodies[: PINNED_FIRST + 1], bodies[PINNED_FIRST + 1 :]):
+                rest[np.asarray(chain), 3:7] = rest[chain[0], 3:7]
         model.body_q.assign(rest)
 
     def _configure_builder(self, _: object) -> None:
         """Apply cable properties that must exist before model finalization."""
         builder = NewtonManager.get_builder()
-        self.cable_bodies = self._sorted_world_label_indices(
-            builder.body_label,
-            builder.body_world,
-            "/Shoelace/geometry/mesh_edge_body_",
-        )
-        self.cable_joints = self._sorted_world_label_indices(
-            builder.joint_label,
-            builder.joint_world,
-            "/Shoelace/geometry/mesh_cable_",
-        )
-        expected_segments = len(self.centerline) - 1
-        for world, (bodies, joints) in enumerate(zip(self.cable_bodies, self.cable_joints, strict=True)):
-            if len(bodies) != expected_segments or len(joints) != expected_segments - 1:
-                raise RuntimeError(
-                    f"Unexpected cable topology in world {world}: {len(bodies)} bodies and {len(joints)} joints"
-                )
+        gravcomp = builder.custom_attributes["mujoco:gravcomp"]
+        if gravcomp.values is None:
+            gravcomp.values = {}
+        for body, label in enumerate(builder.body_label):
+            if "/RobotLeft/" in label or "/RobotRight/" in label:
+                gravcomp.values[body] = 1.0
+
+        def find_chains(labels: list[str], worlds: list[int], suffix: str) -> list[tuple[list[int], list[int]]]:
+            sides = [
+                self._sorted_world_label_indices(labels, worlds, f"/Shoelace{side}/geometry/mesh_{suffix}_")
+                for side in ("Left", "Right")
+            ]
+            return list(zip(*sides, strict=True))
+
+        body_chains = find_chains(builder.body_label, builder.body_world, "edge_body")
+        joint_chains = find_chains(builder.joint_label, builder.joint_world, "cable")
+        expected_body_counts = (PINNED_FIRST + 1, len(self.centerline) - 1 - PINNED_LAST)
+        for world, (bodies, joints) in enumerate(zip(body_chains, joint_chains, strict=True)):
+            observed = tuple(
+                (len(chain_bodies), len(chain_joints))
+                for chain_bodies, chain_joints in zip(bodies, joints, strict=True)
+            )
+            expected = tuple((count, count - 1) for count in expected_body_counts)
+            if observed != expected:
+                raise RuntimeError(f"Unexpected cable topology in world {world}: {observed}, expected {expected}")
+
+        self.cable_bodies = [left + right for left, right in body_chains]
+        self.cable_joints = [left + right for left, right in joint_chains]
 
         body_by_label = self._index_unique_labels(builder.body_label)
         shape_by_label = self._index_unique_labels(builder.shape_label)
-        shoe_colliders: list[int] = []
-        tongue_colliders: list[int] = []
+        shoe_parts: list[tuple[int, int, int, int]] = []
         for world in range(self.num_envs):
             root = f"/World/envs/env_{world}/Shoe"
             shoe_body = self._label_index(body_by_label, root)
             shoe_collider = self._label_index(shape_by_label, f"{root}/Collider")
             tongue_collider = self._label_index(shape_by_label, f"{root}/TongueUpper/geometry/mesh")
-            shoe_colliders.append(shoe_collider)
-            tongue_colliders.append(tongue_collider)
+            pinned_root = f"/World/envs/env_{world}/ShoelacePinnedVisual/geometry"
+            pinned_colliders = tuple(
+                self._label_index(shape_by_label, f"{pinned_root}/collision_{side}") for side in ("left", "right")
+            )
+            if any(builder.shape_world[shape] != world for shape in pinned_colliders):
+                raise RuntimeError(f"Pinned collision meshes are not local to Newton world {world}")
+            shoe_parts.append((shoe_collider, tongue_collider, *pinned_colliders))
             builder.body_mass[shoe_body] = 0.0
             builder.body_inv_mass[shoe_body] = 0.0
             builder.body_inertia[shoe_body] = wp.mat33()
@@ -190,6 +307,13 @@ class _ShoelacePhysics:
                 builder.shape_material_ke[shape] = CONTACT_KE
                 builder.shape_material_kd[shape] = CONTACT_KD
                 builder.shape_material_mu[shape] = SHOE_MU
+                builder.shape_gap[shape] = CONTACT_GAP
+            for shape in pinned_colliders:
+                builder.shape_flags[shape] = newton.ShapeFlags.COLLIDE_SHAPES
+                builder.shape_collision_group[shape] = COLLISION_GROUP
+                builder.shape_material_ke[shape] = CONTACT_KE
+                builder.shape_material_kd[shape] = CONTACT_KD
+                builder.shape_material_mu[shape] = LACE_MU
                 builder.shape_gap[shape] = CONTACT_GAP
 
         ground_shapes = [index for index, label in enumerate(builder.shape_label) if label.startswith("/World/Ground/")]
@@ -203,33 +327,54 @@ class _ShoelacePhysics:
             [wp.vec3(*point) for point in self.centerline]
         )
         neighbor_window = _neighbor_filter_window(self.centerline, self.cable_radius)
-        for bodies, joints, shoe_collider, tongue_collider in zip(
-            self.cable_bodies, self.cable_joints, shoe_colliders, tongue_colliders, strict=True
+        segment_ranges = (range(0, PINNED_FIRST + 1), range(PINNED_LAST, len(self.centerline) - 1))
+        for world, (world_bodies, world_joints, shoe) in enumerate(
+            zip(body_chains, joint_chains, shoe_parts, strict=True)
         ):
-            shapes: list[int] = []
-            for body, quaternion in zip(bodies, exact_quaternions, strict=True):
-                transform = builder.body_q[body]
-                builder.body_q[body] = wp.transform(wp.vec3(transform[0], transform[1], transform[2]), quaternion)
-                shape = int(builder.body_shapes[body][0])
-                shapes.append(shape)
-                builder.shape_collision_group[shape] = COLLISION_GROUP
-                builder.shape_material_ke[shape] = CONTACT_KE
-                builder.shape_material_kd[shape] = CONTACT_KD
-                builder.shape_material_mu[shape] = LACE_MU
-                builder.shape_gap[shape] = CONTACT_GAP
-                radius = float(builder.shape_scale[shape][0])
-                segment_length = 2.0 * float(builder.shape_scale[shape][1])
-                capsule_mass_scale = 1.0 + 4.0 * radius / (3.0 * segment_length)
-                builder.body_mass[body] *= capsule_mass_scale
-                builder.body_inertia[body] *= capsule_mass_scale
-                builder.body_inv_mass[body] = 1.0 / builder.body_mass[body]
-                builder.body_inv_inertia[body] = wp.inverse(builder.body_inertia[body])
+            shoe_collider, tongue_collider, pinned_left, pinned_right = shoe
+            chain_shapes: list[list[int]] = []
+            for bodies, joints, segment_indices in zip(world_bodies, world_joints, segment_ranges, strict=True):
+                shapes: list[int] = []
+                for body, segment in zip(bodies, segment_indices, strict=True):
+                    quaternion = exact_quaternions[segment]
+                    transform = builder.body_q[body]
+                    builder.body_q[body] = wp.transform(wp.vec3(transform[0], transform[1], transform[2]), quaternion)
+                    shape = int(builder.body_shapes[body][0])
+                    shapes.append(shape)
+                    builder.shape_collision_group[shape] = COLLISION_GROUP
+                    builder.shape_material_ke[shape] = CONTACT_KE
+                    builder.shape_material_kd[shape] = CONTACT_KD
+                    builder.shape_material_mu[shape] = LACE_MU
+                    builder.shape_gap[shape] = CONTACT_GAP
+                    radius = float(builder.shape_scale[shape][0])
+                    segment_length = 2.0 * float(builder.shape_scale[shape][1])
+                    capsule_mass_scale = 1.0 + 4.0 * radius / (3.0 * segment_length)
+                    builder.body_mass[body] *= capsule_mass_scale
+                    builder.body_inertia[body] *= capsule_mass_scale
+                    builder.body_inv_mass[body] = 1.0 / builder.body_mass[body]
+                    builder.body_inv_inertia[body] = wp.inverse(builder.body_inertia[body])
 
-            for body, shape in zip(
-                bodies[PINNED_FIRST : PINNED_LAST + 1],
-                shapes[PINNED_FIRST : PINNED_LAST + 1],
-                strict=True,
-            ):
+                _filter_rod_neighbors(builder, shapes, neighbor_window)
+                chain_shapes.append(shapes)
+
+                dof_start = int(builder.joint_qd_start[joints[0]])
+                dof_end = int(builder.joint_qd_start[joints[-1]]) + 4
+                if dof_end - dof_start != 4 * len(joints):
+                    raise RuntimeError("Cable joint DOFs must be contiguous")
+                builder.joint_target_ke[dof_start:dof_end] = (
+                    STRETCH_STIFFNESS * self.joint_stiffness_scale,
+                    STRETCH_STIFFNESS * self.joint_stiffness_scale,
+                    BEND_STIFFNESS * self.joint_stiffness_scale,
+                    BEND_STIFFNESS * self.joint_stiffness_scale,
+                ) * len(joints)
+                builder.joint_target_kd[dof_start:dof_end] = (
+                    STRETCH_DAMPING * self.joint_stiffness_scale,
+                    STRETCH_DAMPING * self.joint_stiffness_scale,
+                    BEND_DAMPING * self.joint_stiffness_scale,
+                    BEND_DAMPING * self.joint_stiffness_scale,
+                ) * len(joints)
+
+            for body, shape in ((world_bodies[0][-1], chain_shapes[0][-1]), (world_bodies[1][0], chain_shapes[1][0])):
                 builder.body_mass[body] = 0.0
                 builder.body_inv_mass[body] = 0.0
                 builder.body_inertia[body] = wp.mat33()
@@ -237,24 +382,15 @@ class _ShoelacePhysics:
                 for shoe_shape in (shoe_collider, tongue_collider):
                     builder.add_shape_collision_filter_pair(shape, shoe_shape)
 
-            _filter_rod_neighbors(builder, shapes, neighbor_window)
+            for collision_shape in (pinned_left, pinned_right):
+                for static_shape in (shoe_collider, tongue_collider):
+                    builder.add_shape_collision_filter_pair(collision_shape, static_shape)
+            builder.add_shape_collision_filter_pair(pinned_left, pinned_right)
 
-            dof_start = int(builder.joint_qd_start[joints[0]])
-            dof_end = int(builder.joint_qd_start[joints[-1]]) + 4
-            if dof_end - dof_start != 4 * len(joints):
-                raise RuntimeError("Cable joint DOFs must be contiguous")
-            builder.joint_target_ke[dof_start:dof_end] = (
-                STRETCH_STIFFNESS,
-                STRETCH_STIFFNESS,
-                BEND_STIFFNESS,
-                BEND_STIFFNESS,
-            ) * len(joints)
-            builder.joint_target_kd[dof_start:dof_end] = (
-                STRETCH_DAMPING,
-                STRETCH_DAMPING,
-                BEND_DAMPING,
-                BEND_DAMPING,
-            ) * len(joints)
+            seam_shapes = (chain_shapes[0][-neighbor_window:], chain_shapes[1][:neighbor_window])
+            for collision_shape, neighbors in zip((pinned_left, pinned_right), seam_shapes, strict=True):
+                for shape in neighbors:
+                    builder.add_shape_collision_filter_pair(shape, collision_shape)
 
     def _configure_model(self, _: object) -> None:
         """Configure cable Dahl hysteresis before coupled solver construction."""
@@ -308,9 +444,20 @@ class ShoelaceEnv(ManagerBasedRLEnv):
         collider_asset = asset_dir / "collider.usd"
         curve_asset = asset_dir / "curve.usd"
         self._model_asset = asset_dir / "model.usd"
-        self._centerline, self._cable_radius = _load_usd_curve(curve_asset, "/World/Curve")
+        authored_centerline, self._cable_radius = _load_usd_curve(curve_asset, "/World/Curve")
+        authored_segment_lengths = np.linalg.norm(np.diff(authored_centerline, axis=0), axis=1)
+        if len(authored_segment_lengths) != 450:
+            raise ValueError(f"Expected 450 authored shoelace segments, got {len(authored_segment_lengths)}")
+        self._authored_mean_segment_length = float(authored_segment_lengths.mean())
+        self._centerline = _resample_centerline(authored_centerline, SHOELACE_SEGMENT_COUNT)
+        mean_segment_length = float(np.linalg.norm(np.diff(self._centerline, axis=0), axis=1).mean())
         self._configure_runtime_cfg(cfg, collider_asset)
-        self._physics = _ShoelacePhysics(self._centerline, self._cable_radius, cfg.scene.num_envs)
+        self._physics = _ShoelacePhysics(
+            self._centerline,
+            self._cable_radius,
+            cfg.scene.num_envs,
+            self._authored_mean_segment_length / mean_segment_length,
+        )
 
         super().__init__(cfg, render_mode, **kwargs)
         self._physics.set_straight_rest_state()
@@ -318,23 +465,37 @@ class ShoelaceEnv(ManagerBasedRLEnv):
     def _configure_runtime_cfg(self, cfg: ShoelaceEnvCfg, collider_asset: Path) -> None:
         """Fill asset- and world-count-dependent configuration before validation."""
         expected_segments = len(self._centerline) - 1
-        if expected_segments != 450:
-            raise ValueError(f"Expected 450 shoelace segments, got {expected_segments}")
+        if expected_segments != SHOELACE_SEGMENT_COUNT:
+            raise ValueError(f"Expected {SHOELACE_SEGMENT_COUNT} shoelace segments, got {expected_segments}")
 
         cfg.scene.shoe.spawn.usd_path = str(collider_asset)
         cfg.scene.shoe.spawn.func = _spawn_collision_mesh_usd
         cfg.scene.shoe.spawn.collision_props = None
         cfg.scene.shoe_visual.spawn.usd_path = str(self._model_asset)
-        cable_cfg = cfg.scene.shoelace.spawn
-        cable_cfg.positions = [tuple(point) for point in self._centerline]
-        cable_cfg.normals = _parallel_transport_normals(self._centerline)
-        mean_segment_length = float(np.linalg.norm(np.diff(self._centerline, axis=0), axis=1).mean())
+        cfg.scene.shoelace_pinned_visual.spawn = _pinned_shoelace_spawner(self._centerline, self._cable_radius)
+        cable_normals = _parallel_transport_normals(self._centerline)
+        cable_centerlines = (
+            self._centerline[: PINNED_FIRST + 2],
+            self._centerline[PINNED_LAST:],
+        )
+        cable_normal_chains = (
+            cable_normals[: PINNED_FIRST + 2],
+            cable_normals[PINNED_LAST:],
+        )
         cross_section_area = math.pi * self._cable_radius**2
         second_moment = 0.25 * math.pi * self._cable_radius**4
-        cable_cfg.physics_material.thickness = 2.0 * self._cable_radius
-        cable_cfg.physics_material.density = CABLE_DENSITY
-        cable_cfg.physics_material.stretch_stiffness = STRETCH_STIFFNESS * mean_segment_length / cross_section_area
-        cable_cfg.physics_material.bend_stiffness = BEND_STIFFNESS * mean_segment_length / second_moment
+        cable_cfgs = (cfg.scene.shoelace_left.spawn, cfg.scene.shoelace_right.spawn)
+        for cable_cfg, centerline, normals in zip(cable_cfgs, cable_centerlines, cable_normal_chains, strict=True):
+            cable_cfg.positions = [tuple(point) for point in centerline]
+            cable_cfg.normals = normals
+            cable_cfg.physics_material.thickness = 2.0 * self._cable_radius
+            cable_cfg.physics_material.density = CABLE_DENSITY
+            cable_cfg.physics_material.stretch_stiffness = (
+                STRETCH_STIFFNESS * self._authored_mean_segment_length / cross_section_area
+            )
+            cable_cfg.physics_material.bend_stiffness = (
+                BEND_STIFFNESS * self._authored_mean_segment_length / second_moment
+            )
 
         grid_side = math.ceil(math.sqrt(cfg.scene.num_envs))
         ground_size = max(2.0, cfg.scene.env_spacing * (grid_side + 1))

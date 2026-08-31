@@ -13,6 +13,7 @@ __all__ = [
     "reset_shoelace_state",
     "shoelace_success",
     "shoelace_unsafe",
+    "tail_approach_progress",
     "tail_grasping",
     "tail_reaching",
     "tail_separation",
@@ -34,6 +35,13 @@ from .observations import (
     tails_to_tcp,
     throat_density,
 )
-from .rewards import closing_away_from_tails, directional_tail_pull, tail_grasping, tail_reaching, untying_progress
+from .rewards import (
+    closing_away_from_tails,
+    directional_tail_pull,
+    tail_approach_progress,
+    tail_grasping,
+    tail_reaching,
+    untying_progress,
+)
 from .terminations import lost_grasp, shoelace_success, shoelace_unsafe
 from isaaclab.envs.mdp import *

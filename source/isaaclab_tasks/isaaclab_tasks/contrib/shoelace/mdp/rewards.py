@@ -40,12 +40,12 @@ class untying_progress(ManagerTermBase):
         tail_success_separation: float,
         maximum_grasp_distance: float,
         maximum_finger_position: float,
-        asset_cfg: SceneEntityCfg,
+        asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
         left_robot_cfg: SceneEntityCfg,
         right_robot_cfg: SceneEntityCfg,
     ) -> torch.Tensor:
         """Return untying-potential improvement while both tails are grasped."""
-        positions, _, knot, tail_positions, _ = task_state(env, asset_cfg)
+        positions, _, knot, tail_positions, _ = task_state(env, asset_cfgs)
         current = potential(
             positions,
             knot,
@@ -61,11 +61,47 @@ class untying_progress(ManagerTermBase):
             env,
             maximum_grasp_distance,
             maximum_finger_position,
-            asset_cfg,
+            asset_cfgs,
             left_robot_cfg,
             right_robot_cfg,
         ).all(dim=1)
         return progress * both_grasped
+
+
+class tail_approach_progress(ManagerTermBase):
+    """Reward stepwise reductions in open-gripper tail distance."""
+
+    def __init__(self, cfg, env) -> None:
+        super().__init__(cfg, env)
+        self._previous_distances = torch.full((env.num_envs, 2), torch.nan, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        selected = slice(None) if env_ids is None else env_ids
+        self._previous_distances[selected] = torch.nan
+
+    def __call__(
+        self,
+        env,
+        std: float,
+        open_position: float,
+        closed_position: float,
+        asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
+        left_robot_cfg: SceneEntityCfg,
+        right_robot_cfg: SceneEntityCfg,
+    ) -> torch.Tensor:
+        """Return normalized tail-distance improvement for open grippers."""
+        distances = grasp_distances(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
+        unseeded = torch.isnan(self._previous_distances)
+        progress = torch.where(unseeded, torch.zeros_like(distances), self._previous_distances - distances)
+        self._previous_distances.copy_(distances)
+        open_fraction = 1.0 - gripper_closed_fraction(
+            env,
+            open_position,
+            closed_position,
+            left_robot_cfg,
+            right_robot_cfg,
+        )
+        return (progress / std * open_fraction).mean(dim=1)
 
 
 def tail_reaching(
@@ -73,12 +109,12 @@ def tail_reaching(
     std: float,
     open_position: float,
     closed_position: float,
-    asset_cfg: SceneEntityCfg,
+    asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
     left_robot_cfg: SceneEntityCfg,
     right_robot_cfg: SceneEntityCfg,
 ) -> torch.Tensor:
     """Reward approaching each tail while its assigned gripper remains open."""
-    distances = grasp_distances(env, asset_cfg, left_robot_cfg, right_robot_cfg)
+    distances = grasp_distances(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
     open_fraction = 1.0 - gripper_closed_fraction(
         env,
         open_position,
@@ -91,25 +127,34 @@ def tail_reaching(
 
 def tail_grasping(
     env,
+    std: float,
     maximum_distance: float,
     maximum_finger_position: float,
-    asset_cfg: SceneEntityCfg,
+    open_position: float,
+    closed_position: float,
+    asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
     left_robot_cfg: SceneEntityCfg,
     right_robot_cfg: SceneEntityCfg,
 ) -> torch.Tensor:
-    """Reward current inferred grasps of the two free tails."""
-    return (
-        grasp_state(
-            env,
-            maximum_distance,
-            maximum_finger_position,
-            asset_cfg,
-            left_robot_cfg,
-            right_robot_cfg,
-        )
-        .float()
-        .mean(dim=1)
+    """Reward closing near each tail and bonus completed inferred grasps."""
+    distances = grasp_distances(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
+    closure = gripper_closed_fraction(
+        env,
+        open_position,
+        closed_position,
+        left_robot_cfg,
+        right_robot_cfg,
     )
+    proximity = torch.exp(-torch.square(distances / std))
+    grasped = grasp_state(
+        env,
+        maximum_distance,
+        maximum_finger_position,
+        asset_cfgs,
+        left_robot_cfg,
+        right_robot_cfg,
+    )
+    return (0.5 * proximity * closure + 0.5 * grasped.float()).mean(dim=1)
 
 
 def closing_away_from_tails(
@@ -117,12 +162,12 @@ def closing_away_from_tails(
     acquisition_distance: float,
     open_position: float,
     closed_position: float,
-    asset_cfg: SceneEntityCfg,
+    asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
     left_robot_cfg: SceneEntityCfg,
     right_robot_cfg: SceneEntityCfg,
 ) -> torch.Tensor:
     """Penalize closing a gripper before its TCP reaches the assigned tail."""
-    distances = grasp_distances(env, asset_cfg, left_robot_cfg, right_robot_cfg)
+    distances = grasp_distances(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
     closure = gripper_closed_fraction(
         env,
         open_position,
@@ -139,18 +184,18 @@ def directional_tail_pull(
     target_speed: float,
     maximum_grasp_distance: float,
     maximum_finger_position: float,
-    asset_cfg: SceneEntityCfg,
+    asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
     left_robot_cfg: SceneEntityCfg,
     right_robot_cfg: SceneEntityCfg,
 ) -> torch.Tensor:
     """Reward grasped-tail velocity projected along the demo force directions."""
-    _, _, _, _, tail_velocities = task_state(env, asset_cfg)
+    _, _, _, _, tail_velocities = task_state(env, asset_cfgs)
     projected_speed = torch.sum(tail_velocities * pull_directions(tail_velocities), dim=-1)
     grasped = grasp_state(
         env,
         maximum_grasp_distance,
         maximum_finger_position,
-        asset_cfg,
+        asset_cfgs,
         left_robot_cfg,
         right_robot_cfg,
     )

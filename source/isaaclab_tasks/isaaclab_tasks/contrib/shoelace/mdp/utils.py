@@ -11,7 +11,7 @@ import torch
 
 from isaaclab.utils import math as math_utils
 
-from .constants import PINNED_FIRST, PINNED_LAST, REFERENCE_PULL_DIRECTIONS, TAIL_REGIONS, TCP_OFFSET
+from .constants import LEFT_CABLE_SEGMENT_COUNT, PINNED_LAST, REFERENCE_PULL_DIRECTIONS, TAIL_REGIONS, TCP_OFFSET
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation, CableObject
@@ -21,27 +21,45 @@ if TYPE_CHECKING:
 
 def task_state(
     env: ManagerBasedEnv,
-    asset_cfg: SceneEntityCfg,
+    asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return local segment, knot, and free-tail state."""
-    cable: CableObject = env.scene[asset_cfg.name]
-    positions = cable.data.segment_pose_w.torch[..., :3] - env.scene.env_origins.unsqueeze(1)
-    velocities = cable.data.segment_velocity_w.torch[..., :3]
-    knot = 0.5 * (positions[:, PINNED_FIRST] + positions[:, PINNED_LAST])
+    """Return local dynamic-segment, seam, and free-tail state."""
+    cables: tuple[CableObject, CableObject] = (
+        env.scene[asset_cfgs[0].name],
+        env.scene[asset_cfgs[1].name],
+    )
+    position_chains = tuple(
+        cable.data.segment_pose_w.torch[..., :3] - env.scene.env_origins.unsqueeze(1) for cable in cables
+    )
+    velocity_chains = tuple(cable.data.segment_velocity_w.torch[..., :3] for cable in cables)
+    positions = torch.cat(position_chains, dim=1)
+    velocities = torch.cat(velocity_chains, dim=1)
+    knot = 0.5 * (position_chains[0][:, -1] + position_chains[1][:, 0])
+    right_tail_lower = TAIL_REGIONS[0][0] - PINNED_LAST
+    right_tail_upper = TAIL_REGIONS[0][1] - PINNED_LAST
+    left_tail_lower, left_tail_upper = TAIL_REGIONS[1]
     tail_positions = torch.stack(
-        [positions[:, lower:upper].mean(dim=1) for lower, upper in TAIL_REGIONS],
+        (
+            position_chains[1][:, right_tail_lower:right_tail_upper].mean(dim=1),
+            position_chains[0][:, left_tail_lower:left_tail_upper].mean(dim=1),
+        ),
         dim=1,
     )
     tail_velocities = torch.stack(
-        [velocities[:, lower:upper].mean(dim=1) for lower, upper in TAIL_REGIONS],
+        (
+            velocity_chains[1][:, right_tail_lower:right_tail_upper].mean(dim=1),
+            velocity_chains[0][:, left_tail_lower:left_tail_upper].mean(dim=1),
+        ),
         dim=1,
     )
     return positions, velocities, knot, tail_positions, tail_velocities
 
 
 def free_positions(positions: torch.Tensor) -> torch.Tensor:
-    """Return the two unpinned cable spans."""
-    return torch.cat((positions[:, :PINNED_FIRST], positions[:, PINNED_LAST + 1 :]), dim=1)
+    """Return both dynamic cable spans without their fixed seam anchors."""
+    return torch.cat(
+        (positions[:, : LEFT_CABLE_SEGMENT_COUNT - 1], positions[:, LEFT_CABLE_SEGMENT_COUNT + 1 :]), dim=1
+    )
 
 
 def robot_tcp_position(env: ManagerBasedEnv, robot_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -56,12 +74,12 @@ def robot_tcp_position(env: ManagerBasedEnv, robot_cfg: SceneEntityCfg) -> torch
 
 def tail_to_tcp_vectors(
     env: ManagerBasedEnv,
-    asset_cfg: SceneEntityCfg,
+    asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
     left_robot_cfg: SceneEntityCfg,
     right_robot_cfg: SceneEntityCfg,
 ) -> torch.Tensor:
     """Return each grasped tail position relative to its Franka TCP [m]."""
-    _, _, _, tail_positions, _ = task_state(env, asset_cfg)
+    _, _, _, tail_positions, _ = task_state(env, asset_cfgs)
     tcp_positions = torch.stack(
         [robot_tcp_position(env, left_robot_cfg), robot_tcp_position(env, right_robot_cfg)],
         dim=1,
@@ -71,13 +89,13 @@ def tail_to_tcp_vectors(
 
 def grasp_distances(
     env: ManagerBasedEnv,
-    asset_cfg: SceneEntityCfg,
+    asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
     left_robot_cfg: SceneEntityCfg,
     right_robot_cfg: SceneEntityCfg,
 ) -> torch.Tensor:
     """Return tail-to-TCP grasp distances [m], shape ``(num_envs, 2)``."""
     return torch.linalg.vector_norm(
-        tail_to_tcp_vectors(env, asset_cfg, left_robot_cfg, right_robot_cfg),
+        tail_to_tcp_vectors(env, asset_cfgs, left_robot_cfg, right_robot_cfg),
         dim=-1,
     )
 
@@ -115,12 +133,12 @@ def grasp_state(
     env: ManagerBasedEnv,
     maximum_distance: float,
     maximum_finger_position: float,
-    asset_cfg: SceneEntityCfg,
+    asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
     left_robot_cfg: SceneEntityCfg,
     right_robot_cfg: SceneEntityCfg,
 ) -> torch.Tensor:
     """Infer per-tail grasp state from proximity and driven-finger closure."""
-    distances = grasp_distances(env, asset_cfg, left_robot_cfg, right_robot_cfg)
+    distances = grasp_distances(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
     finger_positions = gripper_positions(env, left_robot_cfg, right_robot_cfg)
     return (distances <= maximum_distance) & (finger_positions <= maximum_finger_position)
 
@@ -161,7 +179,7 @@ def potential(
         tail_positions,
         throat_radius,
     )
-    free_segment_count = positions.shape[1] - (PINNED_LAST - PINNED_FIRST + 1)
+    free_segment_count = free_positions(positions).shape[1]
     throat_clearance = 1.0 - throat_count.float() / free_segment_count
     return (
         2.0 * throat_clearance

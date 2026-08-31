@@ -41,21 +41,30 @@ import isaaclab_tasks.contrib.shoelace.mdp as mdp
 from isaaclab_assets.robots.franka import FRANKA_PANDA_MENAGERIE_CFG
 
 _THROAT_RADIUS = 0.025
-_MAXIMUM_THROAT_SEGMENTS = 65
+_MAXIMUM_THROAT_SEGMENTS = 52
 _TAIL_SUCCESS_DISTANCE = 0.09
 _TAIL_SUCCESS_SEPARATION = 0.18
 _MAXIMUM_SUCCESS_GRASP_DISTANCE = 0.03
 _GRASP_ACQUISITION_DISTANCE = 0.02
 _MAXIMUM_GRASP_DISTANCE = 0.07
 _GRIPPER_OPEN_POSITION = 0.04
-_GRIPPER_CLOSED_POSITION = 0.0
+_GRIPPER_CLOSED_POSITION = 0.0015
 _GRIPPER_CLOSED_THRESHOLD = 0.02
 _TARGET_PULL_SPEED = 0.04
 _MINIMUM_LACE_HEIGHT = -0.003
 _MAXIMUM_LACE_SPREAD = 0.6
 
-_LEFT_ROBOT_POSITION = (-0.535227, -0.003855, -0.226542)
-_RIGHT_ROBOT_POSITION = (0.517942, 0.025304, -0.225158)
+_LEFT_ROBOT_POSITION = (-0.525248, 0.023338, -0.089901)
+_RIGHT_ROBOT_POSITION = (0.507963, -0.001890, -0.088518)
+_FRANKA_ARM_JOINT_POSITIONS = {
+    "panda_joint1": 0.0444,
+    "panda_joint2": -0.1894,
+    "panda_joint3": -0.1107,
+    "panda_joint4": -2.5148,
+    "panda_joint5": 0.0044,
+    "panda_joint6": 2.3775,
+    "panda_joint7": 0.6952,
+}
 
 
 def _rigid_material(friction: float, damping: float) -> list:
@@ -79,6 +88,7 @@ def _franka_cfg(
     robot = FRANKA_PANDA_MENAGERIE_CFG.replace(prim_path=prim_path)
     robot.init_state.pos = position
     robot.init_state.rot = rotation
+    robot.init_state.joint_pos.update(_FRANKA_ARM_JOINT_POSITIONS)
     robot.init_state.joint_pos["panda_finger_joint.*"] = _GRIPPER_OPEN_POSITION
     robot.spawn.rigid_props.disable_gravity = True
     robot.actuators = {
@@ -107,7 +117,7 @@ def _franka_cfg(
         "panda_hand": ImplicitActuatorCfg(
             joint_names_expr=["panda_finger_joint1"],
             joint_effort_limit=500.0,
-            actuator_velocity_limit=0.2,
+            actuator_velocity_limit=0.04,
             joint_velocity_limit=2.0,
             stiffness=1000.0,
             damping=100.0,
@@ -138,8 +148,29 @@ def _arm_action(asset_name: str) -> DifferentialInverseKinematicsActionCfg:
             ik_method="dls",
             ik_params={"lambda_val": 0.01},
         ),
-        scale=(0.02, 0.02, 0.02, 0.15, 0.15, 0.15),
+        scale=(0.005, 0.005, 0.005, 0.01, 0.01, 0.01),
         body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=(0.0, 0.0, 0.107)),
+    )
+
+
+def _shoelace_cable_cfg(prim_path: str) -> CableObjectCfg:
+    """Build one runtime-configured dynamic shoelace chain."""
+    return CableObjectCfg(
+        prim_path=prim_path,
+        spawn=sim_utils.CableCfg(
+            positions=[(0.0, 0.0, 0.0), (0.0, 0.0, 0.01)],
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(112.0 / 255.0, 65.0 / 255.0, 39.0 / 255.0),
+                roughness=0.8,
+            ),
+            physics_material=sim_utils.CableMaterialCfg(
+                thickness=0.003,
+                density=1150.0,
+                stretch_stiffness=1.0e9,
+                bend_stiffness=1.0e8,
+            ),
+            collision_props=[sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)],
+        ),
     )
 
 
@@ -191,23 +222,9 @@ class ShoelaceSceneCfg(InteractiveSceneCfg):
             ),
         ),
     )
-    shoelace = CableObjectCfg(
-        prim_path="{ENV_REGEX_NS}/Shoelace",
-        spawn=sim_utils.CableCfg(
-            positions=[(0.0, 0.0, 0.0), (0.0, 0.0, 0.01)],
-            visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(112.0 / 255.0, 65.0 / 255.0, 39.0 / 255.0),
-                roughness=0.8,
-            ),
-            physics_material=sim_utils.CableMaterialCfg(
-                thickness=0.003,
-                density=1150.0,
-                stretch_stiffness=1.0e9,
-                bend_stiffness=1.0e8,
-            ),
-            collision_props=[sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)],
-        ),
-    )
+    shoelace_left = _shoelace_cable_cfg("{ENV_REGEX_NS}/ShoelaceLeft")
+    shoelace_pinned_visual = AssetBaseCfg(prim_path="{ENV_REGEX_NS}/ShoelacePinnedVisual")
+    shoelace_right = _shoelace_cable_cfg("{ENV_REGEX_NS}/ShoelaceRight")
     ground = AssetBaseCfg(
         prim_path="/World/Ground",
         spawn=sim_utils.GroundPlaneCfg(
@@ -243,8 +260,10 @@ class ActionsCfg:
     )
 
 
+_SHOELACE_ASSET_CFGS = (SceneEntityCfg("shoelace_left"), SceneEntityCfg("shoelace_right"))
+
 _ROBOT_TERM_PARAMS = {
-    "asset_cfg": SceneEntityCfg("shoelace"),
+    "asset_cfgs": _SHOELACE_ASSET_CFGS,
     "left_robot_cfg": SceneEntityCfg("robot_left", body_names=["panda_hand"], joint_names=["panda_finger_joint1"]),
     "right_robot_cfg": SceneEntityCfg("robot_right", body_names=["panda_hand"], joint_names=["panda_finger_joint1"]),
 }
@@ -287,33 +306,37 @@ class ObservationsCfg:
         tails_to_tcp = ObsTerm(
             func=mdp.tails_to_tcp,
             params={
-                "asset_cfg": SceneEntityCfg("shoelace"),
+                "asset_cfgs": _SHOELACE_ASSET_CFGS,
                 "left_robot_cfg": SceneEntityCfg("robot_left", body_names=["panda_hand"]),
                 "right_robot_cfg": SceneEntityCfg("robot_right", body_names=["panda_hand"]),
             },
             scale=10.0,
         )
-        tails_to_knot = ObsTerm(func=mdp.tails_to_knot, scale=10.0)
-        tail_velocities = ObsTerm(func=mdp.tail_velocities)
-        reference_pull_directions = ObsTerm(func=mdp.reference_pull_directions)
-        inferred_grasp_state = ObsTerm(
-            func=mdp.inferred_grasp_state,
-            params={
-                **_ROBOT_TERM_PARAMS,
-                "maximum_distance": _GRASP_ACQUISITION_DISTANCE,
-                "maximum_finger_position": _GRIPPER_CLOSED_THRESHOLD,
-            },
+        tails_to_knot = ObsTerm(
+            func=mdp.tails_to_knot,
+            params={"asset_cfgs": _SHOELACE_ASSET_CFGS},
+            scale=10.0,
         )
-        throat_density = ObsTerm(func=mdp.throat_density, params={"throat_radius": _THROAT_RADIUS})
-        tail_separation = ObsTerm(func=mdp.tail_separation, scale=10.0)
-        episode_phase = ObsTerm(func=mdp.episode_phase)
+        tail_velocities = ObsTerm(func=mdp.tail_velocities, params={"asset_cfgs": _SHOELACE_ASSET_CFGS})
         last_action = ObsTerm(func=mdp.last_action)
 
         def __post_init__(self) -> None:
             self.enable_corruption = False
             self.concatenate_terms = True
 
+    @configclass
+    class PrivilegedCfg(ObsGroup):
+        throat_density = ObsTerm(
+            func=mdp.throat_density,
+            params={"throat_radius": _THROAT_RADIUS, "asset_cfgs": _SHOELACE_ASSET_CFGS},
+        )
+
+        def __post_init__(self) -> None:
+            self.enable_corruption = False
+            self.concatenate_terms = True
+
     policy: PolicyCfg = PolicyCfg()
+    privileged: PrivilegedCfg = PrivilegedCfg()
 
 
 @configclass
@@ -341,7 +364,7 @@ class EventCfg:
     reset_shoelace = EventTerm(
         func=mdp.reset_shoelace_state,
         mode="reset",
-        params={"asset_cfg": SceneEntityCfg("shoelace")},
+        params={"asset_cfgs": _SHOELACE_ASSET_CFGS},
     )
 
 
@@ -363,7 +386,7 @@ class RewardsCfg:
     )
     reach_tails = RewTerm(
         func=mdp.tail_reaching,
-        weight=1.0,
+        weight=2.0,
         params={
             **_ROBOT_TERM_PARAMS,
             "std": 0.05,
@@ -371,18 +394,31 @@ class RewardsCfg:
             "closed_position": _GRIPPER_CLOSED_POSITION,
         },
     )
-    grasp_tails = RewTerm(
-        func=mdp.tail_grasping,
-        weight=2.0,
+    approach_progress = RewTerm(
+        func=mdp.tail_approach_progress,
+        weight=10.0,
         params={
             **_ROBOT_TERM_PARAMS,
+            "std": _GRASP_ACQUISITION_DISTANCE,
+            "open_position": _GRIPPER_OPEN_POSITION,
+            "closed_position": _GRIPPER_CLOSED_POSITION,
+        },
+    )
+    grasp_tails = RewTerm(
+        func=mdp.tail_grasping,
+        weight=4.0,
+        params={
+            **_ROBOT_TERM_PARAMS,
+            "std": _GRASP_ACQUISITION_DISTANCE,
             "maximum_distance": _GRASP_ACQUISITION_DISTANCE,
             "maximum_finger_position": _GRIPPER_CLOSED_THRESHOLD,
+            "open_position": _GRIPPER_OPEN_POSITION,
+            "closed_position": _GRIPPER_CLOSED_POSITION,
         },
     )
     directional_pull = RewTerm(
         func=mdp.directional_tail_pull,
-        weight=2.0,
+        weight=5.0,
         params={
             **_ROBOT_TERM_PARAMS,
             "target_speed": _TARGET_PULL_SPEED,
@@ -392,7 +428,7 @@ class RewardsCfg:
     )
     premature_close = RewTerm(
         func=mdp.closing_away_from_tails,
-        weight=-1.0,
+        weight=-2.0,
         params={
             **_ROBOT_TERM_PARAMS,
             "acquisition_distance": _GRASP_ACQUISITION_DISTANCE,
@@ -444,7 +480,7 @@ class TerminationsCfg:
     unsafe = DoneTerm(
         func=mdp.shoelace_unsafe,
         params={
-            "asset_cfg": SceneEntityCfg("shoelace"),
+            "asset_cfgs": _SHOELACE_ASSET_CFGS,
             "minimum_lace_height": _MINIMUM_LACE_HEIGHT,
             "maximum_lace_spread": _MAXIMUM_LACE_SPREAD,
         },
@@ -488,13 +524,13 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
                     CouplerEntryCfg(
                         name="shoelace",
                         solver_cfg=VBDSolverCfg(
-                            iterations=24,
+                            iterations=16,
                             rigid_contact_hard=True,
                             rigid_avbd_alpha=0.0,
                             rigid_contact_history=False,
                             rigid_body_contact_buffer_size=256,
                         ),
-                        bodies=[r"/World/envs/env_[^/]+/(Shoelace|Shoe)"],
+                        bodies=[r"/World/envs/env_[^/]+/(Shoelace(Left|Right)|Shoe)"],
                         include_static_shapes=True,
                     ),
                 ],
@@ -518,7 +554,7 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
             ),
             collision_decimation=1,
             default_shape_cfg=NewtonShapeCfg(gap=1.0e-4, ke=2.5e4, kd=100.0, mu=10.0),
-            num_substeps=10,
+            num_substeps=4,
             use_cuda_graph=True,
         ),
     )
