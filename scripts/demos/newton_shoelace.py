@@ -85,7 +85,7 @@ MODEL_ASSET = ASSET_DIR / "model.usd"
 # Simulation cadence.
 FPS = 60
 SIM_SUBSTEPS = 10
-SIM_ITERATIONS = 24
+SIM_ITERATIONS = 20
 FRAME_DT = 1.0 / FPS
 SIM_DT = FRAME_DT / SIM_SUBSTEPS
 
@@ -115,10 +115,11 @@ SETTLE_END = 0.6
 TIGHTEN_END = 1.6
 RELEASE_TIME = 2.1
 # Asset-specific inclusive span held against the shoe by the eyelets.
-PINNED_FIRST = 95
-PINNED_LAST = 355
-# Static collision is retained only near the two dynamic cable boundaries.
-PINNED_CONTACT_SEGMENTS = 36
+PINNED_FIRST = 98
+PINNED_LAST = 352
+# Only seam-local segments 24-34 of the former contact band retain collision.
+PINNED_CONTACT_FIRST = 24
+PINNED_CONTACT_LAST = 34
 LOOP_GRAB_LEFT = (53, 58)
 LOOP_GRAB_RIGHT = (392, 397)
 UNTIE_FIRST_START = 3.0
@@ -142,7 +143,7 @@ UNTIE_FORCE_FIRST = 0.1
 UNTIE_FORCE_SECOND = 0.1
 
 # Shoe and display parameters. A hidden panel follows the visual tongue below the moving lacing.
-TONGUE_UPPER_CENTER = (-0.008, 0.008, 0.102)
+TONGUE_UPPER_CENTER = (-0.008, 0.02, 0.10)
 TONGUE_UPPER_SIZE = (0.05, 0.055, 0.006)
 TONGUE_UPPER_PITCH = math.radians(28.0)
 TONGUE_UPPER_Y_ROTATION = math.radians(5.0)
@@ -277,16 +278,20 @@ class ShoelaceController:
             shoe_collider = self._label_index(shape_by_label, f"{root}/Collider")
             tongue_collider = self._label_index(shape_by_label, f"{root}/TongueUpper/geometry/mesh")
             pinned_root = f"/World/envs/env_{world}/ShoelacePinnedVisual/geometry"
+            pinned_visual = shape_by_label.get(f"{pinned_root}/mesh")
             pinned_colliders = tuple(
                 self._label_index(shape_by_label, f"{pinned_root}/collision_{side}") for side in ("left", "right")
             )
-            if any(builder.shape_world[shape] != world for shape in pinned_colliders):
-                raise RuntimeError(f"Pinned collision meshes are not local to Newton world {world}")
+            pinned_shapes = pinned_colliders if pinned_visual is None else (pinned_visual, *pinned_colliders)
+            if any(builder.shape_world[shape] != world for shape in pinned_shapes):
+                raise RuntimeError(f"Pinned meshes are not local to Newton world {world}")
             shoe_parts.append((shoe_collider, tongue_collider, *pinned_colliders))
             builder.body_mass[shoe_body] = 0.0
             builder.body_inv_mass[shoe_body] = 0.0
             builder.body_inertia[shoe_body] = wp.mat33()
             builder.body_inv_inertia[shoe_body] = wp.mat33()
+            if pinned_visual is not None:
+                builder.shape_flags[pinned_visual] = newton.ShapeFlags.VISIBLE
             for shape in (shoe_collider, tongue_collider):
                 builder.shape_flags[shape] = newton.ShapeFlags.COLLIDE_SHAPES
                 builder.shape_collision_group[shape] = COLLISION_GROUP
@@ -571,8 +576,8 @@ def create_scene_cfg(centerline: np.ndarray, cable_radius: float) -> Interactive
     right_centerline = centerline[PINNED_LAST:]
     pinned_centerline = centerline[PINNED_FIRST + 1 : PINNED_LAST + 1]
     pinned_collision_centerlines = (
-        pinned_centerline[: PINNED_CONTACT_SEGMENTS + 1],
-        pinned_centerline[-PINNED_CONTACT_SEGMENTS - 1 :],
+        pinned_centerline[PINNED_CONTACT_FIRST - 1 : PINNED_CONTACT_LAST + 1],
+        pinned_centerline[-PINNED_CONTACT_LAST - 1 : -PINNED_CONTACT_FIRST + 1],
     )
 
     @sim_utils.clone
@@ -587,21 +592,22 @@ def create_scene_cfg(centerline: np.ndarray, cable_radius: float) -> Interactive
         del kwargs
         root = sim_utils.create_prim(prim_path, "Xform", translation=translation, orientation=orientation)
         stage = sim_utils.get_current_stage()
-        curves = UsdGeom.BasisCurves.Define(stage, f"{prim_path}/geometry/mesh")
-        curves.CreatePointsAttr([Gf.Vec3f(*point) for point in pinned_centerline])
-        curves.CreateCurveVertexCountsAttr([len(pinned_centerline)])
-        curves.CreateTypeAttr(UsdGeom.Tokens.linear)
-        curves.CreateWrapAttr(UsdGeom.Tokens.nonperiodic)
-        curves.CreateWidthsAttr([2.0 * cable_radius])
-        curves.SetWidthsInterpolation(UsdGeom.Tokens.constant)
-        curves.CreateDisplayColorAttr([Gf.Vec3f(*CABLE_COLOR)])
-        for side, points in zip(("left", "right"), pinned_collision_centerlines, strict=True):
+
+        def define_tube(path: str, points: np.ndarray) -> UsdGeom.Mesh:
             tube = _tube_mesh(points, cable_radius)
-            mesh = UsdGeom.Mesh.Define(stage, f"{prim_path}/geometry/collision_{side}")
+            mesh = UsdGeom.Mesh.Define(stage, path)
             mesh.CreatePointsAttr([Gf.Vec3f(*map(float, point)) for point in tube.vertices])
             mesh.CreateFaceVertexCountsAttr([3] * (len(tube.indices) // 3))
             mesh.CreateFaceVertexIndicesAttr(tube.indices.tolist())
+            mesh.CreateNormalsAttr([Gf.Vec3f(*map(float, normal)) for normal in tube.normals])
+            mesh.SetNormalsInterpolation(UsdGeom.Tokens.vertex)
             mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
+            return mesh
+
+        visual_mesh = define_tube(f"{prim_path}/geometry/mesh", pinned_centerline)
+        visual_mesh.CreateDisplayColorAttr([Gf.Vec3f(*CABLE_COLOR)])
+        for side, points in zip(("left", "right"), pinned_collision_centerlines, strict=True):
+            mesh = define_tube(f"{prim_path}/geometry/collision_{side}", points)
             collision_prim = mesh.GetPrim()
             if not sim_utils.apply_collision_properties(
                 str(collision_prim.GetPath()), [sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)]
@@ -719,7 +725,7 @@ def main() -> None:
         if not isinstance(physics_cfg, NewtonCfg) or not isinstance(physics_cfg.solver_cfg, VBDSolverCfg):
             raise TypeError("This demo requires the newton_vbd physics preset")
         physics_cfg.num_substeps = SIM_SUBSTEPS
-        physics_cfg.collision_decimation = 1
+        physics_cfg.collision_decimation = 2
         physics_cfg.default_shape_cfg = NewtonShapeCfg(
             gap=CONTACT_GAP,
             ke=CONTACT_KE,
