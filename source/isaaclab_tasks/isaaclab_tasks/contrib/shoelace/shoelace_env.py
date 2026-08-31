@@ -13,7 +13,7 @@ import newton
 import newton.examples
 import numpy as np
 import warp as wp
-from isaaclab_newton.physics import NewtonCfg, NewtonManager, VBDSolverCfg
+from isaaclab_newton.physics import NewtonCfg, NewtonCollisionPipelineCfg, NewtonManager, VBDSolverCfg
 
 from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
@@ -510,7 +510,11 @@ class ShoelaceEnv(ManagerBasedRLEnv):
         vbd_entries = [entry for entry in physics_cfg.solver_cfg.entries if entry.name == "shoelace"]
         if len(vbd_entries) != 1 or not isinstance(vbd_entries[0].solver_cfg, VBDSolverCfg):
             raise TypeError("The shoelace coupler entry requires one VBD solver")
+        proxy_pipelines = [proxy.collision_pipeline for proxy in physics_cfg.solver_cfg.proxies]
+        if len(proxy_pipelines) != 1 or not isinstance(proxy_pipelines[0], NewtonCollisionPipelineCfg):
+            raise TypeError("The shoelace coupler proxy requires one configured Newton collision pipeline")
         vbd_cfg = vbd_entries[0].solver_cfg
+        proxy_collision_cfg = proxy_pipelines[0]
         triangle_pair_capacity = max(1_000_000, cfg.triangle_pairs_per_env * cfg.scene.num_envs)
         # VBD history allocates persistent warm-start storage on its first step, which the proxy coupler cannot do
         # safely inside CUDA graph capture.
@@ -520,6 +524,7 @@ class ShoelaceEnv(ManagerBasedRLEnv):
         physics_cfg.collision_cfg.rigid_contact_max = cfg.contacts_per_env * cfg.scene.num_envs
         physics_cfg.collision_cfg.max_triangle_pairs = triangle_pair_capacity
         physics_cfg.collision_cfg.contact_matching = "latest" if contact_history else "disabled"
+        proxy_collision_cfg.max_triangle_pairs = triangle_pair_capacity
         vbd_cfg.rigid_contact_history = contact_history
 
     def _init_sim(self) -> None:

@@ -119,6 +119,26 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.rewards.right_joint_velocity.weight == pytest.approx(-1.0e-4)
 
 
+def test_shoelace_runtime_scales_outer_and_proxy_triangle_pair_capacities():
+    """Both collision pipelines must scale triangle-pair capacity with the environment count."""
+    cfg = ShoelaceEnvCfg()
+    cfg.scene.num_envs = 4096
+    env = ShoelaceEnv.__new__(ShoelaceEnv)
+    env._is_closed = True
+    x_coordinates = np.linspace(0.0, 0.36, SHOELACE_SEGMENT_COUNT + 1)
+    env._centerline = np.column_stack((x_coordinates, np.zeros_like(x_coordinates), np.zeros_like(x_coordinates)))
+    env._cable_radius = 0.001
+    env._authored_mean_segment_length = 0.001
+    env._model_asset = Path("model.usd")
+
+    env._configure_runtime_cfg(cfg, Path("collider.usd"))
+
+    expected_capacity = cfg.triangle_pairs_per_env * cfg.scene.num_envs
+    proxy_pipeline = cfg.sim.physics.solver_cfg.proxies[0].collision_pipeline
+    assert cfg.sim.physics.collision_cfg.max_triangle_pairs == expected_capacity
+    assert proxy_pipeline.max_triangle_pairs == expected_capacity
+
+
 def test_shoelace_agent_uses_asymmetric_observations():
     """The actor excludes simulator-only state while the critic receives it."""
     assert ShoelacePPORunnerCfg().obs_groups == {
