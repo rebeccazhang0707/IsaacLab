@@ -80,13 +80,17 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.rewards.failure.params["term_keys"] == ["unsafe", "lost_grasp"]
     assert cfg.decimation == 4
     assert cfg.episode_length_s == pytest.approx(10.0)
-    assert cfg.sim.physics.num_substeps == 4
-    assert cfg.sim.physics.solver_cfg.entries[1].solver_cfg.iterations == 16
+    assert cfg.sim.physics.num_substeps == 5
+    assert cfg.sim.physics.collision_decimation == 2
+    assert cfg.sim.physics.solver_cfg.entries[1].solver_cfg.iterations == 20
+    assert cfg.sim.physics.solver_cfg.proxies[0].collide_interval == 2
     assert SHOELACE_SEGMENT_COUNT == 360
-    assert (PINNED_FIRST, PINNED_LAST) == (76, 284)
-    assert (LEFT_CABLE_SEGMENT_COUNT, RIGHT_CABLE_SEGMENT_COUNT) == (77, 76)
-    assert DYNAMIC_SEGMENT_COUNT == 153
+    assert (PINNED_FIRST, PINNED_LAST) == (78, 281)
+    assert (LEFT_CABLE_SEGMENT_COUNT, RIGHT_CABLE_SEGMENT_COUNT) == (79, 79)
+    assert DYNAMIC_SEGMENT_COUNT == 158
     assert TAIL_REGIONS == ((357, 360), (0, 3))
+    assert cfg.scene.tongue_upper.spawn.size == pytest.approx((0.05, 0.055, 0.006))
+    assert cfg.scene.tongue_upper.init_state.pos == pytest.approx((-0.008, 0.02, 0.10))
     assert hasattr(cfg.scene, "shoelace_left")
     assert hasattr(cfg.scene, "shoelace_pinned_visual")
     assert hasattr(cfg.scene, "shoelace_right")
@@ -97,6 +101,20 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert not hasattr(cfg.observations.policy, "inferred_grasp_state")
     assert not hasattr(cfg.observations.policy, "throat_density")
     assert hasattr(cfg.observations.privileged, "throat_density")
+    assert cfg.rewards.dense_task.weight == pytest.approx(10.0)
+    assert not hasattr(cfg.rewards, "progress")
+    assert not hasattr(cfg.rewards, "reach_tails")
+    assert not hasattr(cfg.rewards, "approach_progress")
+    assert not hasattr(cfg.rewards, "grasp_tails")
+    assert not hasattr(cfg.rewards, "directional_pull")
+    assert cfg.rewards.premature_close.weight == pytest.approx(-2.0)
+    assert cfg.rewards.success.func is shoelace_rewards.termination_event_reward
+    assert cfg.rewards.success.weight == pytest.approx(60.0)
+    assert cfg.rewards.failure.func is shoelace_rewards.termination_event_reward
+    assert cfg.rewards.failure.weight == pytest.approx(-2.0)
+    assert cfg.rewards.action_rate.weight == pytest.approx(-0.01)
+    assert cfg.rewards.left_joint_velocity.weight == pytest.approx(-1.0e-4)
+    assert cfg.rewards.right_joint_velocity.weight == pytest.approx(-1.0e-4)
 
 
 def test_shoelace_agent_uses_asymmetric_observations():
@@ -158,8 +176,8 @@ def test_task_state_concatenates_dual_cables_and_preserves_tail_order():
     )
 
     assert positions.shape == (1, DYNAMIC_SEGMENT_COUNT, 3)
-    torch.testing.assert_close(knot, torch.tensor([[88.0, 0.0, 0.0]]))
-    torch.testing.assert_close(tail_positions[0, :, 0], torch.tensor([174.0, 1.0]))
+    torch.testing.assert_close(knot, torch.tensor([[89.0, 0.0, 0.0]]))
+    torch.testing.assert_close(tail_positions[0, :, 0], torch.tensor([177.0, 1.0]))
 
 
 def test_phase_rewards_gate_approach_and_directional_pull(monkeypatch):
@@ -186,6 +204,83 @@ def test_phase_rewards_gate_approach_and_directional_pull(monkeypatch):
     expected_grasping = 0.25 * (1.0 + torch.exp(torch.tensor(-6.25)))
     torch.testing.assert_close(grasping, expected_grasping.unsqueeze(0))
     torch.testing.assert_close(directional_pull, torch.tensor([0.5 * torch.tanh(torch.tensor(1.0))]))
+
+
+def test_dense_reward_orders_approach_acquisition_and_untying(monkeypatch):
+    """Bounded shaping must rank task progress above open-gripper hovering."""
+    closure = torch.zeros((1, 2))
+    positions = torch.zeros((1, DYNAMIC_SEGMENT_COUNT, 3))
+    knot = torch.zeros((1, 3))
+    tail_positions = torch.zeros((1, 2, 3))
+    tail_velocities = torch.zeros((1, 2, 3))
+
+    monkeypatch.setattr(
+        shoelace_rewards,
+        "robot_tcp_position",
+        lambda _, robot_cfg: tail_positions[:, 0 if robot_cfg == "left" else 1],
+    )
+    monkeypatch.setattr(shoelace_rewards, "gripper_closed_fraction", lambda *args: closure)
+    monkeypatch.setattr(
+        shoelace_rewards,
+        "task_state",
+        lambda *args: (positions, None, knot, tail_positions, tail_velocities),
+    )
+
+    def compute_reward() -> torch.Tensor:
+        return shoelace_rewards.shoelace_dense_reward(
+            None,
+            reach_std=0.05,
+            grasp_std=0.02,
+            throat_radius=0.025,
+            maximum_throat_segments=52,
+            tail_success_distance=0.09,
+            tail_success_separation=0.18,
+            target_speed=0.04,
+            open_position=0.04,
+            closed_position=0.0015,
+            approach_weight=0.1,
+            acquisition_weight=0.25,
+            task_weight=1.0,
+            pull_weight=0.25,
+            asset_cfgs=None,
+            left_robot_cfg="left",
+            right_robot_cfg="right",
+        )
+
+    hovering = compute_reward()
+    closure.fill_(1.0)
+    acquired = compute_reward()
+    positions.fill_(0.1)
+    tail_positions.copy_(torch.tensor([[[0.1, 0.0, 0.0], [-0.1, 0.0, 0.0]]]))
+    tail_velocities.copy_(0.04 * pull_directions(tail_velocities).unsqueeze(0))
+    untied = compute_reward()
+
+    torch.testing.assert_close(hovering, torch.tensor([0.1]))
+    torch.testing.assert_close(acquired, torch.tensor([0.35]), rtol=1.0e-5, atol=1.0e-5)
+    expected_untied = 1.35 + 0.25 * torch.tanh(torch.tensor(1.0))
+    torch.testing.assert_close(untied, expected_untied.unsqueeze(0), rtol=1.0e-5, atol=1.0e-5)
+
+
+def test_termination_event_reward_cancels_reward_manager_time_scaling():
+    """Configured event weights must equal their one-step reward contribution."""
+
+    class TerminationManager:
+        time_outs = torch.tensor([False, False, True])
+
+        def get_term(self, name: str) -> torch.Tensor:
+            terms = {
+                "unsafe": torch.tensor([True, False, True]),
+                "lost_grasp": torch.tensor([True, True, False]),
+            }
+            return terms[name]
+
+    env = SimpleNamespace(num_envs=3, device="cpu", step_dt=0.2, termination_manager=TerminationManager())
+    term = shoelace_rewards.termination_event_reward.__new__(shoelace_rewards.termination_event_reward)
+    term._term_names = ["unsafe", "lost_grasp"]
+
+    event_rate = term(env, ["unsafe", "lost_grasp"])
+
+    torch.testing.assert_close(event_rate * env.step_dt, torch.tensor([2.0, 1.0, 0.0]))
 
 
 def test_runtime_contact_history_is_disabled_during_cuda_graph_capture():

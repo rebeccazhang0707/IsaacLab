@@ -11,6 +11,7 @@ __all__ = [
     "lost_grasp",
     "reference_pull_directions",
     "reset_shoelace_state",
+    "shoelace_dense_reward",
     "shoelace_success",
     "shoelace_unsafe",
     "tail_approach_progress",
@@ -20,6 +21,7 @@ __all__ = [
     "tail_velocities",
     "tails_to_knot",
     "tails_to_tcp",
+    "termination_event_reward",
     "throat_density",
     "untying_progress",
 ]
@@ -38,9 +40,11 @@ from .observations import (
 from .rewards import (
     closing_away_from_tails,
     directional_tail_pull,
+    shoelace_dense_reward,
     tail_approach_progress,
     tail_grasping,
     tail_reaching,
+    termination_event_reward,
     untying_progress,
 )
 from .terminations import lost_grasp, shoelace_success, shoelace_unsafe

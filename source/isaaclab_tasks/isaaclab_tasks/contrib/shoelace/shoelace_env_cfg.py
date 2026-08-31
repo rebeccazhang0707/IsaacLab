@@ -207,13 +207,13 @@ class ShoelaceSceneCfg(InteractiveSceneCfg):
     tongue_upper = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Shoe/TongueUpper",
         spawn=sim_utils.CuboidCfg(
-            size=(0.056, 0.055, 0.006),
+            size=(0.05, 0.055, 0.006),
             visible=False,
             collision_props=[sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)],
             physics_material=_rigid_material(0.2, 0.0),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(-0.005, 0.008, 0.102),
+            pos=(-0.008, 0.02, 0.10),
             rot=(
                 math.cos(0.5 * math.radians(5.0)) * math.sin(0.5 * math.radians(28.0)),
                 math.sin(0.5 * math.radians(5.0)) * math.cos(0.5 * math.radians(28.0)),
@@ -370,60 +370,26 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    """Phase-aware approach, grasp, directional pull, and completion rewards."""
+    """Meta-World-style dense task reward with completion and safety terms."""
 
-    progress = RewTerm(
-        func=mdp.untying_progress,
-        weight=30.0,
-        params={
-            **_ROBOT_TERM_PARAMS,
-            "throat_radius": _THROAT_RADIUS,
-            "tail_success_distance": _TAIL_SUCCESS_DISTANCE,
-            "tail_success_separation": _TAIL_SUCCESS_SEPARATION,
-            "maximum_grasp_distance": _GRASP_ACQUISITION_DISTANCE,
-            "maximum_finger_position": _GRIPPER_CLOSED_THRESHOLD,
-        },
-    )
-    reach_tails = RewTerm(
-        func=mdp.tail_reaching,
-        weight=2.0,
-        params={
-            **_ROBOT_TERM_PARAMS,
-            "std": 0.05,
-            "open_position": _GRIPPER_OPEN_POSITION,
-            "closed_position": _GRIPPER_CLOSED_POSITION,
-        },
-    )
-    approach_progress = RewTerm(
-        func=mdp.tail_approach_progress,
+    dense_task = RewTerm(
+        func=mdp.shoelace_dense_reward,
         weight=10.0,
         params={
             **_ROBOT_TERM_PARAMS,
-            "std": _GRASP_ACQUISITION_DISTANCE,
-            "open_position": _GRIPPER_OPEN_POSITION,
-            "closed_position": _GRIPPER_CLOSED_POSITION,
-        },
-    )
-    grasp_tails = RewTerm(
-        func=mdp.tail_grasping,
-        weight=4.0,
-        params={
-            **_ROBOT_TERM_PARAMS,
-            "std": _GRASP_ACQUISITION_DISTANCE,
-            "maximum_distance": _GRASP_ACQUISITION_DISTANCE,
-            "maximum_finger_position": _GRIPPER_CLOSED_THRESHOLD,
-            "open_position": _GRIPPER_OPEN_POSITION,
-            "closed_position": _GRIPPER_CLOSED_POSITION,
-        },
-    )
-    directional_pull = RewTerm(
-        func=mdp.directional_tail_pull,
-        weight=5.0,
-        params={
-            **_ROBOT_TERM_PARAMS,
+            "reach_std": 0.05,
+            "grasp_std": _GRASP_ACQUISITION_DISTANCE,
+            "throat_radius": _THROAT_RADIUS,
+            "maximum_throat_segments": _MAXIMUM_THROAT_SEGMENTS,
+            "tail_success_distance": _TAIL_SUCCESS_DISTANCE,
+            "tail_success_separation": _TAIL_SUCCESS_SEPARATION,
             "target_speed": _TARGET_PULL_SPEED,
-            "maximum_grasp_distance": _GRASP_ACQUISITION_DISTANCE,
-            "maximum_finger_position": _GRIPPER_CLOSED_THRESHOLD,
+            "open_position": _GRIPPER_OPEN_POSITION,
+            "closed_position": _GRIPPER_CLOSED_POSITION,
+            "approach_weight": 0.1,
+            "acquisition_weight": 0.25,
+            "task_weight": 1.0,
+            "pull_weight": 0.25,
         },
     )
     premature_close = RewTerm(
@@ -437,13 +403,13 @@ class RewardsCfg:
         },
     )
     success = RewTerm(
-        func=mdp.is_terminated_term,
-        weight=300.0,
+        func=mdp.termination_event_reward,
+        weight=60.0,
         params={"term_keys": ["success"]},
     )
     failure = RewTerm(
-        func=mdp.is_terminated_term,
-        weight=-150.0,
+        func=mdp.termination_event_reward,
+        weight=-2.0,
         params={"term_keys": ["unsafe", "lost_grasp"]},
     )
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
@@ -524,7 +490,7 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
                     CouplerEntryCfg(
                         name="shoelace",
                         solver_cfg=VBDSolverCfg(
-                            iterations=16,
+                            iterations=20,
                             rigid_contact_hard=True,
                             rigid_avbd_alpha=0.0,
                             rigid_contact_history=False,
@@ -542,7 +508,7 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
                             r"/World/envs/env_[^/]+/Robot(Left|Right)/Geometry/.*panda_hand",
                             r"/World/envs/env_[^/]+/Robot(Left|Right)/Geometry/.*panda_(left|right)finger",
                         ],
-                        collide_interval=1,
+                        collide_interval=2,
                     )
                 ],
                 iterations=1,
@@ -552,9 +518,9 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
                 rigid_contact_max=512 * 32,
                 max_triangle_pairs=32768 * 32,
             ),
-            collision_decimation=1,
+            collision_decimation=2,
             default_shape_cfg=NewtonShapeCfg(gap=1.0e-4, ke=2.5e4, kd=100.0, mu=10.0),
-            num_substeps=4,
+            num_substeps=5,
             use_cuda_graph=True,
         ),
     )
