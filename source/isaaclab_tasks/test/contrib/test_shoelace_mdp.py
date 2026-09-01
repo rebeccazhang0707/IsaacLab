@@ -41,6 +41,16 @@ from isaaclab_tasks.contrib.shoelace.shoelace_env import ShoelaceEnv
 from isaaclab_tasks.contrib.shoelace.shoelace_env_cfg import ShoelaceEnvCfg
 
 
+def test_shoelace_task_uses_simplified_shoe_collider():
+    """The task must share the demo's reduced collision-only shoe mesh."""
+    collider_asset = shoelace_env_module.SHOELACE_COLLIDER_ASSET
+    stage = Usd.Stage.Open(str(collider_asset))
+    collider_mesh = UsdGeom.Mesh(stage.GetPrimAtPath("/World/Collider"))
+
+    assert collider_asset.name == "collider_simplified.usd"
+    assert len(collider_mesh.GetFaceVertexCountsAttr().Get()) == 8000
+
+
 def test_shoe_collider_spawner_authors_collision_on_mesh(monkeypatch):
     """The collider mesh must remain physics geometry without visual-shape import."""
     stage = Usd.Stage.CreateInMemory()

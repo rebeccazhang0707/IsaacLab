@@ -74,14 +74,14 @@ if TYPE_CHECKING:
 
 
 ASSET_DIR = Path(__file__).resolve().parents[2] / ".newton" / "newton" / "examples" / "assets" / "shoelace"
-COLLIDER_ASSET = ASSET_DIR / "collider.usd"
+COLLIDER_ASSET = Path(__file__).resolve().parent / "assets" / "shoelace" / "collider_simplified.usd"
 CURVE_ASSET = ASSET_DIR / "curve.usd"
 MODEL_ASSET = ASSET_DIR / "model.usd"
 
 # Simulation cadence.
 FPS = 60
 SIM_SUBSTEPS = 10
-SIM_ITERATIONS = 20
+SIM_ITERATIONS = 20  # VBD solve iterations per substep after contacts are generated.
 FRAME_DT = 1.0 / FPS
 SIM_DT = FRAME_DT / SIM_SUBSTEPS
 ENV_SPACING = 0.5
@@ -107,9 +107,9 @@ LACE_MU = 0.7
 SHOE_MU = 0.2
 GROUND_MU = 0.8
 COLLISION_GROUP = 1
-CONTACT_BUFFER = 128
-CONTACTS_PER_ENV = 512
-TRIANGLE_PAIRS_PER_ENV = 8192
+CONTACT_BUFFER = 128  # Per-body VBD contact-list capacity after narrow phase.
+CONTACTS_PER_ENV = 512  # Per-world narrow-phase rigid-contact output capacity.
+TRIANGLE_PAIRS_PER_ENV = 8192  # Per-world mid-phase mesh triangle-pair capacity.
 
 # Tightening and untying force schedule [s].
 SETTLE_END = 0.6
@@ -789,6 +789,7 @@ def main() -> None:
             kd=CONTACT_KD,
             mu=LACE_MU,
         )
+        # The default explicit broad phase consumes the precomputed model.shape_contact_pairs.
         physics_cfg.collision_cfg = NewtonCollisionPipelineCfg(
             rigid_contact_max=CONTACTS_PER_ENV * args_cli.num_envs,
             max_triangle_pairs=max(1_000_000, TRIANGLE_PAIRS_PER_ENV * args_cli.num_envs),
@@ -805,7 +806,7 @@ def main() -> None:
             physics=physics_cfg,
             visualizer_cfgs=[
                 NewtonGLVisualizerCfg(
-                    update_frequency=4,
+                    update_frequency=8,
                     enable_shadows=False,
                 )
             ],

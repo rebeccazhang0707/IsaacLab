@@ -58,6 +58,7 @@ SHOE_MU = 0.2
 GROUND_MU = 0.8
 COLLISION_GROUP = 1
 PINNED_TUBE_SIDES = 6
+SHOELACE_COLLIDER_ASSET = Path(__file__).resolve().parents[5] / "scripts/demos/assets/shoelace/collider_simplified.usd"
 
 
 def _resolve_asset_dir() -> Path:
@@ -592,7 +593,6 @@ class ShoelaceEnv(ManagerBasedRLEnv):
 
     def __init__(self, cfg: ShoelaceEnvCfg, render_mode: str | None = None, **kwargs):
         asset_dir = _resolve_asset_dir()
-        collider_asset = asset_dir / "collider.usd"
         curve_asset = asset_dir / "curve.usd"
         self._model_asset = asset_dir / "model.usd"
         authored_centerline, self._cable_radius = _load_usd_curve(curve_asset, "/World/Curve")
@@ -602,7 +602,7 @@ class ShoelaceEnv(ManagerBasedRLEnv):
         self._authored_mean_segment_length = float(authored_segment_lengths.mean())
         self._centerline = _resample_centerline(authored_centerline, SHOELACE_SEGMENT_COUNT)
         mean_segment_length = float(np.linalg.norm(np.diff(self._centerline, axis=0), axis=1).mean())
-        self._configure_runtime_cfg(cfg, collider_asset)
+        self._configure_runtime_cfg(cfg, SHOELACE_COLLIDER_ASSET)
         self._physics = _ShoelacePhysics(
             self._centerline,
             self._cable_radius,
