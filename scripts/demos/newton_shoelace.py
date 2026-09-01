@@ -14,20 +14,18 @@ interior uses one visible static collision mesh.
     # Run the complete 12 second sequence with the Newton visualizer.
     uv run python scripts/demos/newton_shoelace.py
 
-    # Use the Kit visualizer instead.
-    uv run --extra isaacsim python scripts/demos/newton_shoelace.py --visualizer kit
-
-    # Run the complete sequence headless.
-    uv run python scripts/demos/newton_shoelace.py --visualizer none
-
     # Run 1024 isolated Newton worlds in parallel (a large-memory workload).
     uv run python scripts/demos/newton_shoelace.py --num_envs 1024 --visualizer none
+
+    # Randomize shoe color, cable color, and cable radius once per environment.
+    uv run python scripts/demos/newton_shoelace.py --num_envs 16 --randomize --randomization_seed 7
 
 """
 
 from __future__ import annotations
 
 import argparse
+import colorsys
 import math
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -35,24 +33,21 @@ from typing import TYPE_CHECKING
 from isaaclab.app import add_launcher_args, launch_simulation
 
 parser = argparse.ArgumentParser(description="Force-controlled Newton VBD shoelace demo.", conflict_handler="resolve")
-parser.add_argument("--contact_buffer", type=int, default=128, help="Per-body VBD rigid-contact capacity.")
-parser.add_argument("--contacts_per_env", type=int, default=512, help="Rigid-contact capacity per environment.")
-parser.add_argument("--env_spacing", type=float, default=0.5, help="Distance between environment origins [m].")
 parser.add_argument("--max_steps", type=int, default=720, help="Number of 60 Hz simulation steps.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of isolated Newton worlds.")
-parser.add_argument("--physics", default="newton_vbd", choices=["newton_vbd"], help="Physics backend.")
 parser.add_argument(
-    "--triangle_pairs_per_env",
-    type=int,
-    default=8192,
-    help="Shoe-mesh narrow-phase pair capacity per environment.",
+    "--randomize",
+    action="store_true",
+    help="Randomize shoe color, cable color, and cable radius once per environment at startup.",
 )
+parser.add_argument("--randomization_seed", type=int, default=0, help="Seed for per-environment randomization.")
 add_launcher_args(parser)
-parser.set_defaults(visualizer=["newton_gl"])
+parser.set_defaults(physics="newton_vbd", visualizer=["newton_gl"])
 args_cli = parser.parse_args()
 
 import newton
 import numpy as np
+import torch
 import warp as wp
 from _newton_force_schedule import BodyForceMove, OpenLoopBodyForceSchedule
 from isaaclab_newton.physics import (
@@ -63,11 +58,12 @@ from isaaclab_newton.physics import (
     VBDSolverCfg,
 )
 from isaaclab_newton.sim.spawners.materials import NewtonMaterialCfg
+from isaaclab_visualizers.newton import NewtonGLVisualizerCfg
 
 from pxr import Gf, Usd, UsdGeom
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import AssetBaseCfg
+from isaaclab.assets import AssetBaseCfg, VisualMaterial, VisualMaterialCfg
 from isaaclab.physics import PhysicsCfg, PhysicsEvent
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.sim.spawners.materials import UsdPhysicsRigidBodyMaterialCfg
@@ -88,6 +84,7 @@ SIM_SUBSTEPS = 10
 SIM_ITERATIONS = 20
 FRAME_DT = 1.0 / FPS
 SIM_DT = FRAME_DT / SIM_SUBSTEPS
+ENV_SPACING = 0.5
 
 # Lace material. Stiffnesses and damping below are Newton per-joint values.
 CABLE_DENSITY = 1150.0
@@ -110,6 +107,9 @@ LACE_MU = 0.7
 SHOE_MU = 0.2
 GROUND_MU = 0.8
 COLLISION_GROUP = 1
+CONTACT_BUFFER = 128
+CONTACTS_PER_ENV = 512
+TRIANGLE_PAIRS_PER_ENV = 8192
 
 # Tightening and untying force schedule [s].
 SETTLE_END = 0.6
@@ -120,6 +120,8 @@ TIGHTEN_LIFT_END = 1.1
 PINNED_FIRST = 98
 PINNED_LAST = 352
 PINNED_TUBE_SIDES = 6
+CABLE_RADIUS_BUCKETS = 5
+CABLE_RADIUS_SCALE_RANGE = (0.85, 1.15)
 LOOP_GRAB_LEFT = (53, 58)
 LOOP_GRAB_RIGHT = (392, 397)
 UNTIE_FIRST_START = 3.0
@@ -155,7 +157,7 @@ CAMERA_TARGET = (-0.0000817, 0.0001354, 0.0722455)
 
 
 def _load_usd_curve(path: Path, prim_path: str) -> tuple[np.ndarray, float]:
-    """Load one world-space cable centerline and its radius."""
+    """Load one world-space cable centerline [m] and its minimum authored radius [m]."""
     stage = Usd.Stage.Open(str(path))
     prim = stage.GetPrimAtPath(prim_path)
     if not prim:
@@ -174,7 +176,7 @@ def _load_usd_curve(path: Path, prim_path: str) -> tuple[np.ndarray, float]:
 
 
 def _parallel_transport_normals(centerline: np.ndarray) -> list[tuple[float, float, float]]:
-    """Build per-point normals that preserve Newton's parallel-transport cable frames."""
+    """Build one normal per centerline point using Newton's parallel-transport frames."""
     positions = [wp.vec3(*point) for point in centerline]
     quaternions = newton.utils.create_parallel_transport_cable_quaternions(positions)
     normals = [wp.quat_rotate(quaternion, wp.vec3(0.0, 1.0, 0.0)) for quaternion in quaternions]
@@ -183,7 +185,7 @@ def _parallel_transport_normals(centerline: np.ndarray) -> list[tuple[float, flo
 
 
 def _tube_mesh(centerline: np.ndarray, radius: float, sides: int = 8) -> newton.Mesh:
-    """Build a tube mesh around a fixed cable centerline."""
+    """Build an open triangulated tube around a fixed centerline [m]."""
     tangents = np.gradient(centerline, axis=0)
     tangents /= np.linalg.norm(tangents, axis=1, keepdims=True)
 
@@ -220,6 +222,22 @@ def _neighbor_filter_window(points: np.ndarray, radius: float) -> int:
     return max(1, int(np.floor(contact_reach / minimum_length + 1.0e-9)) + 1)
 
 
+def _sample_randomization(num_envs: int, cable_radius: float, seed: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Sample per-environment linear RGB colors and bucketed cable radii [m]."""
+    rng = np.random.default_rng(seed)
+    shoe_colors = np.asarray(
+        [colorsys.hsv_to_rgb(rng.random(), rng.uniform(0.45, 0.80), rng.uniform(0.45, 0.85)) for _ in range(num_envs)],
+        dtype=np.float32,
+    )
+    radius_scales = np.linspace(*CABLE_RADIUS_SCALE_RANGE, CABLE_RADIUS_BUCKETS)
+    cable_radii = cable_radius * rng.choice(radius_scales, size=num_envs)
+    cable_colors = np.asarray(
+        [colorsys.hsv_to_rgb(rng.random(), rng.uniform(0.35, 0.75), rng.uniform(0.25, 0.70)) for _ in range(num_envs)],
+        dtype=np.float32,
+    )
+    return shoe_colors, cable_colors, cable_radii
+
+
 def _filter_rod_neighbors(builder: ModelBuilder, shapes: list[int], window: int) -> None:
     """Disable collisions between geometrically overlapping neighbor segments."""
     for first, first_shape in enumerate(shapes):
@@ -234,8 +252,21 @@ def _make_body_static(builder: ModelBuilder, body: int) -> None:
     builder.body_inv_inertia[body] = wp.mat33()
 
 
+def _resize_capsule(builder: ModelBuilder, body: int, shape: int, radius: float) -> None:
+    """Resize one cable capsule to ``radius`` [m] and update all mass properties."""
+    half_height = float(builder.shape_scale[shape][1])
+    scale = wp.vec3(radius, half_height, 0.0)
+    mass, _, inertia = newton.geometry.compute_inertia_shape(newton.GeoType.CAPSULE, scale, None, CABLE_DENSITY)
+    builder.shape_scale[shape] = (radius, half_height, 0.0)
+    builder.shape_collision_radius[shape] = radius + half_height
+    builder.body_mass[body] = mass
+    builder.body_inertia[body] = inertia
+    builder.body_inv_mass[body] = 1.0 / mass
+    builder.body_inv_inertia[body] = wp.inverse(inertia)
+
+
 def _set_shape_material(builder: ModelBuilder, shape: int, friction: float, damping: float = CONTACT_KD) -> None:
-    """Set the common Newton contact material fields on one shape."""
+    """Set contact stiffness, damping, friction, and gap on one Newton shape."""
     builder.shape_material_ke[shape] = CONTACT_KE
     builder.shape_material_kd[shape] = damping
     builder.shape_material_mu[shape] = friction
@@ -243,12 +274,34 @@ def _set_shape_material(builder: ModelBuilder, shape: int, friction: float, damp
 
 
 class ShoelaceController:
-    """Configure replicated Newton shoelaces and apply the virtual fingertip forces."""
+    """Configure replicated Newton shoelaces and apply virtual fingertip forces.
 
-    def __init__(self, centerline: np.ndarray, cable_radius: float, num_envs: int):
+    Args:
+        centerline: Authored cable centerline [m], shape [N, 3].
+        cable_radius: Authored cable radius [m].
+        num_envs: Number of isolated Newton worlds.
+        cable_radii: Optional randomized cable radii [m], shape [num_envs].
+        cable_colors: Optional randomized linear RGB colors, shape [num_envs, 3].
+    """
+
+    def __init__(
+        self,
+        centerline: np.ndarray,
+        cable_radius: float,
+        num_envs: int,
+        cable_radii: np.ndarray | None = None,
+        cable_colors: np.ndarray | None = None,
+    ) -> None:
+        """Initialize authored geometry and optional per-environment variations."""
         self.centerline = centerline
         self.cable_radius = cable_radius
         self.num_envs = num_envs
+        self.cable_radii = None if cable_radii is None else np.asarray(cable_radii, dtype=np.float64)
+        if self.cable_radii is not None and self.cable_radii.shape != (num_envs,):
+            raise ValueError(f"Expected {num_envs} cable radii, got shape {self.cable_radii.shape}")
+        self.cable_colors = None if cable_colors is None else np.asarray(cable_colors, dtype=np.float32)
+        if self.cable_colors is not None and self.cable_colors.shape != (num_envs, 3):
+            raise ValueError(f"Expected cable colors with shape {(num_envs, 3)}, got {self.cable_colors.shape}")
         self.cable_bodies: list[list[int]] = []
         self.cable_joints: list[list[int]] = []
         self._initial_body_q = None
@@ -261,10 +314,11 @@ class ShoelaceController:
         NewtonManager.register_state_force_callback(self._apply_forces)
 
     def _configure_builder(self, _: object) -> None:
-        """Apply cable properties that must exist before model finalization."""
+        """Finalize replicated cable geometry, materials, topology, and collision filters."""
         builder = NewtonManager.get_builder()
 
         def find_chains(labels: list[str], worlds: list[int], suffix: str) -> list[tuple[list[int], list[int]]]:
+            """Find ordered left and right cable indices in every Newton world."""
             sides = [
                 self._sorted_world_label_indices(labels, worlds, f"/Shoelace{side}/geometry/mesh_{suffix}_")
                 for side in ("Left", "Right")
@@ -288,6 +342,18 @@ class ShoelaceController:
 
         body_by_label = self._index_unique_labels(builder.body_label)
         shape_by_label = self._index_unique_labels(builder.shape_label)
+        pinned_centerline = self.centerline[PINNED_FIRST + 1 : PINNED_LAST + 1]
+        pinned_meshes = (
+            {radius: _tube_mesh(pinned_centerline, radius, PINNED_TUBE_SIDES) for radius in np.unique(self.cable_radii)}
+            if self.cable_radii is not None
+            else {}
+        )
+        linear_cable_colors = (
+            np.tile(CABLE_COLOR, (self.num_envs, 1)) if self.cable_colors is None else self.cable_colors
+        )
+        display_cable_colors = [
+            tuple(Gf.ConvertLinearToDisplay(Gf.Vec3f(*map(float, color)))) for color in linear_cable_colors
+        ]
         shoe_parts: list[tuple[int, int, int]] = []
         for world in range(self.num_envs):
             root = f"/World/envs/env_{world}/Shoe"
@@ -304,8 +370,14 @@ class ShoelaceController:
                 builder.shape_collision_group[shape] = COLLISION_GROUP
                 _set_shape_material(builder, shape, SHOE_MU)
             builder.shape_flags[pinned_shape] = newton.ShapeFlags.VISIBLE | newton.ShapeFlags.COLLIDE_SHAPES
+            builder.shape_color[pinned_shape] = display_cable_colors[world]
             builder.shape_collision_group[pinned_shape] = COLLISION_GROUP
             _set_shape_material(builder, pinned_shape, LACE_MU)
+            if self.cable_radii is not None:
+                tube = pinned_meshes[self.cable_radii[world]]
+                builder.shape_source[pinned_shape] = tube
+                extent = np.ptp(np.asarray(tube.vertices, dtype=np.float64), axis=0)
+                builder.shape_collision_radius[pinned_shape] = 0.5 * float(np.linalg.norm(extent))
 
         ground_shapes = [index for index, label in enumerate(builder.shape_label) if label.startswith("/World/Ground/")]
         for shape in ground_shapes:
@@ -315,12 +387,16 @@ class ShoelaceController:
         exact_quaternions = newton.utils.create_parallel_transport_cable_quaternions(
             [wp.vec3(*point) for point in self.centerline]
         )
-        neighbor_window = _neighbor_filter_window(self.centerline, self.cable_radius)
         segment_ranges = (range(0, PINNED_FIRST + 1), range(PINNED_LAST, len(self.centerline) - 1))
         for world, (world_bodies, world_joints, shoe) in enumerate(
             zip(body_chains, joint_chains, shoe_parts, strict=True)
         ):
             shoe_collider, tongue_collider, pinned_shape = shoe
+            cable_color = display_cable_colors[world]
+            randomized_radius = None if self.cable_radii is None else float(self.cable_radii[world])
+            neighbor_window = _neighbor_filter_window(
+                self.centerline, self.cable_radius if randomized_radius is None else randomized_radius
+            )
             chain_shapes: list[list[int]] = []
             for bodies, joints, segment_indices in zip(world_bodies, world_joints, segment_ranges, strict=True):
                 shapes: list[int] = []
@@ -330,14 +406,18 @@ class ShoelaceController:
                     builder.body_q[body] = wp.transform(wp.vec3(transform[0], transform[1], transform[2]), quaternion)
                     shape = int(builder.body_shapes[body][0])
                     shapes.append(shape)
+                    builder.shape_color[shape] = cable_color
                     builder.shape_collision_group[shape] = COLLISION_GROUP
-                    radius = float(builder.shape_scale[shape][0])
-                    segment_length = 2.0 * float(builder.shape_scale[shape][1])
-                    capsule_mass_scale = 1.0 + 4.0 * radius / (3.0 * segment_length)
-                    builder.body_mass[body] *= capsule_mass_scale
-                    builder.body_inertia[body] *= capsule_mass_scale
-                    builder.body_inv_mass[body] = 1.0 / builder.body_mass[body]
-                    builder.body_inv_inertia[body] = wp.inverse(builder.body_inertia[body])
+                    if randomized_radius is None:
+                        radius = float(builder.shape_scale[shape][0])
+                        segment_length = 2.0 * float(builder.shape_scale[shape][1])
+                        capsule_mass_scale = 1.0 + 4.0 * radius / (3.0 * segment_length)
+                        builder.body_mass[body] *= capsule_mass_scale
+                        builder.body_inertia[body] *= capsule_mass_scale
+                        builder.body_inv_mass[body] = 1.0 / builder.body_mass[body]
+                        builder.body_inv_inertia[body] = wp.inverse(builder.body_inertia[body])
+                    else:
+                        _resize_capsule(builder, body, shape, randomized_radius)
 
                 _filter_rod_neighbors(builder, shapes, neighbor_window)
                 chain_shapes.append(shapes)
@@ -362,7 +442,7 @@ class ShoelaceController:
                 builder.add_shape_collision_filter_pair(shape, pinned_shape)
 
     def _configure_model(self, _: object) -> None:
-        """Configure Dahl hysteresis and force buffers before solver construction."""
+        """Configure Dahl hysteresis and the force schedule before solver construction."""
         model = NewtonManager.get_model()
         dahl_eps = np.zeros(model.joint_count, dtype=np.float32)
         dahl_tau = np.zeros(model.joint_count, dtype=np.float32)
@@ -382,7 +462,7 @@ class ShoelaceController:
         )
 
     def restore_authored_state(self) -> None:
-        """Restore the knotted initial state after solver initialization evaluates FK."""
+        """Restore the authored knot and clear velocities, forces, contacts, and schedule state."""
         if self._initial_body_q is None or self._force_schedule is None:
             raise RuntimeError("The shoelace model was not initialized")
 
@@ -392,7 +472,10 @@ class ShoelaceController:
             for chain in (bodies[: PINNED_FIRST + 1], bodies[PINNED_FIRST + 1 :]):
                 rest[np.asarray(chain), 3:7] = rest[chain[0], 3:7]
         model.body_q.assign(rest)
-        for state in self._states():
+        state_0 = NewtonManager.get_state_0()
+        state_1 = NewtonManager.get_state_1()
+        states = (state_0,) if state_1 is None or state_1 is state_0 else (state_0, state_1)
+        for state in states:
             state.body_q.assign(self._initial_body_q)
             state.body_qd.zero_()
             state.clear_forces()
@@ -407,7 +490,7 @@ class ShoelaceController:
         self._force_schedule.apply(state)
 
     def _build_force_moves(self) -> list[BodyForceMove]:
-        """Build the complete tightening and untying force sequence."""
+        """Build the complete tightening and untying force sequence for every world."""
         midpoints = 0.5 * (self.centerline[:-1] + self.centerline[1:])
         knot = 0.5 * (midpoints[PINNED_FIRST] + midpoints[PINNED_LAST])
         moves: list[BodyForceMove] = []
@@ -475,7 +558,7 @@ class ShoelaceController:
         return moves
 
     def _bodies_for_segments(self, world: int, segments: range) -> tuple[int, ...]:
-        """Map semantic segment indices to physical bodies in one world."""
+        """Map full-centerline segment indices to simulated bodies in one world."""
         omitted_segments = PINNED_LAST - PINNED_FIRST - 1
         bodies = self.cable_bodies[world]
         return tuple(bodies[segment if segment <= PINNED_FIRST else segment - omitted_segments] for segment in segments)
@@ -501,19 +584,14 @@ class ShoelaceController:
 
     @staticmethod
     def _label_index(label_indices: dict[str, int], expected: str) -> int:
+        """Look up one required Newton label with a contextual error."""
         try:
             return label_indices[expected]
         except KeyError as exc:
             raise RuntimeError(f"Missing Newton label {expected!r}") from exc
 
-    @staticmethod
-    def _states() -> tuple[State, ...]:
-        state_0 = NewtonManager.get_state_0()
-        state_1 = NewtonManager.get_state_1()
-        return (state_0,) if state_1 is None or state_1 is state_0 else (state_0, state_1)
 
-
-def _rigid_material(friction: float, damping: float) -> list:
+def _rigid_material(friction: float, damping: float) -> list[UsdPhysicsRigidBodyMaterialCfg | NewtonMaterialCfg]:
     """Build composed standard-friction and Newton-contact material fragments."""
     return [
         UsdPhysicsRigidBodyMaterialCfg(static_friction=friction, dynamic_friction=friction, restitution=0.0),
@@ -526,7 +604,7 @@ def _configure_shoe_collider(
     _: sim_utils.SpawnerCfg,
     translation: tuple[float, float, float] | None = None,
     orientation: tuple[float, float, float, float] | None = None,
-    **kwargs,
+    **kwargs: object,
 ) -> Usd.Prim:
     """Enable and hide the collider prim already provided by the shoe USD."""
     del translation, orientation, kwargs
@@ -538,13 +616,22 @@ def _configure_shoe_collider(
     return prim
 
 
-def create_scene_cfg(centerline: np.ndarray, cable_radius: float) -> InteractiveSceneCfg:
-    """Create the homogeneous shoelace scene replicated into isolated Newton worlds."""
+def create_scene_cfg(centerline: np.ndarray, cable_radius: float, randomize: bool = False) -> InteractiveSceneCfg:
+    """Create the replicated three-part shoelace scene.
+
+    Args:
+        centerline: Authored cable centerline [m], shape [N, 3].
+        cable_radius: Authored cable radius [m].
+        randomize: Whether to create per-environment writable shoe materials.
+
+    Returns:
+        Scene configuration for isolated Newton worlds.
+    """
     mean_segment_length = float(np.linalg.norm(np.diff(centerline, axis=0), axis=1).mean())
     cross_section_area = math.pi * cable_radius**2
     second_moment = 0.25 * math.pi * cable_radius**4
     grid_side = math.ceil(math.sqrt(args_cli.num_envs))
-    ground_size = max(2.0, args_cli.env_spacing * (grid_side + 1))
+    ground_size = max(2.0, ENV_SPACING * (grid_side + 1))
     cable_normals = _parallel_transport_normals(centerline)
     left_centerline = centerline[: PINNED_FIRST + 2]
     right_centerline = centerline[PINNED_LAST:]
@@ -556,7 +643,7 @@ def create_scene_cfg(centerline: np.ndarray, cable_radius: float) -> Interactive
         _: sim_utils.SpawnerCfg,
         translation: tuple[float, float, float] | None = None,
         orientation: tuple[float, float, float, float] | None = None,
-        **kwargs,
+        **kwargs: object,
     ) -> Usd.Prim:
         """Spawn the fixed pinned span as one visible collision mesh."""
         del kwargs
@@ -578,6 +665,7 @@ def create_scene_cfg(centerline: np.ndarray, cable_radius: float) -> Interactive
     pinned_cfg = sim_utils.SpawnerCfg(func=spawn_pinned)
 
     def cable_cfg(points: np.ndarray, normals: list[tuple[float, float, float]]) -> sim_utils.CableCfg:
+        """Create one dynamic cable side from centerline points [m] and frame normals."""
         return sim_utils.CableCfg(
             positions=[tuple(point) for point in points],
             normals=normals,
@@ -592,12 +680,25 @@ def create_scene_cfg(centerline: np.ndarray, cable_radius: float) -> Interactive
         )
 
     def env_asset(prim_suffix: str, spawn: sim_utils.SpawnerCfg) -> AssetBaseCfg:
+        """Create an environment-scoped static asset configuration."""
         return AssetBaseCfg(prim_path=f"{{ENV_REGEX_NS}}/{prim_suffix}", spawn=spawn)
+
+    shoe_material_cfg = (
+        VisualMaterialCfg(
+            prim_path="{ENV_REGEX_NS}/Shoe/Visual/material",
+            spawn=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.5, 0.5, 0.5), roughness=0.75),
+            channels=("color",),
+        )
+        if randomize
+        else None
+    )
+    shoe_material_path = "./material" if randomize else "/World/ShoeMaterials/shoes"
 
     @configclass
     class ShoelaceSceneCfg(InteractiveSceneCfg):
         """Replicated shoe and cable assets with shared ground and lighting."""
 
+        shoe_material = shoe_material_cfg
         shoe = env_asset(
             "Shoe",
             spawn=sim_utils.UsdFileCfg(
@@ -610,7 +711,7 @@ def create_scene_cfg(centerline: np.ndarray, cable_radius: float) -> Interactive
             "Shoe/Visual",
             spawn=sim_utils.UsdFileCfg(
                 usd_path=str(MODEL_ASSET),
-                visual_material_bindings={"Model": "/World/ShoeMaterials/shoes"},
+                visual_material_bindings={"Model": shoe_material_path},
             ),
         )
         tongue_upper = AssetBaseCfg(
@@ -648,11 +749,16 @@ def create_scene_cfg(centerline: np.ndarray, cable_radius: float) -> Interactive
             spawn=sim_utils.DomeLightCfg(intensity=1800.0, color=(0.75, 0.80, 1.0)),
         )
 
-    return ShoelaceSceneCfg(num_envs=args_cli.num_envs, env_spacing=args_cli.env_spacing, replicate_physics=True)
+    return ShoelaceSceneCfg(num_envs=args_cli.num_envs, env_spacing=ENV_SPACING, replicate_physics=True)
 
 
 def run_simulator(sim: sim_utils.SimulationContext, controller: ShoelaceController) -> None:
-    """Run the requested force-controlled sequence."""
+    """Restore the authored knot and run the requested force-controlled sequence.
+
+    Args:
+        sim: Initialized simulation context.
+        controller: Configured shoelace controller.
+    """
     controller.restore_authored_state()
     for _ in range(args_cli.max_steps):
         if not sim.is_headless_or_exist_active_visualizer():
@@ -665,7 +771,12 @@ def run_simulator(sim: sim_utils.SimulationContext, controller: ShoelaceControll
 def main() -> None:
     """Launch Isaac Lab with Newton VBD and run the shoelace demo."""
     centerline, cable_radius = _load_usd_curve(CURVE_ASSET, "/World/Curve")
-    controller = ShoelaceController(centerline, cable_radius, args_cli.num_envs)
+    shoe_colors = cable_colors = cable_radii = None
+    if args_cli.randomize:
+        shoe_colors, cable_colors, cable_radii = _sample_randomization(
+            args_cli.num_envs, cable_radius, args_cli.randomization_seed
+        )
+    controller = ShoelaceController(centerline, cable_radius, args_cli.num_envs, cable_radii, cable_colors)
 
     with launch_simulation(cfg=PhysicsCfg(), launcher_args=args_cli) as physics_cfg:
         if not isinstance(physics_cfg, NewtonCfg) or not isinstance(physics_cfg.solver_cfg, VBDSolverCfg):
@@ -678,21 +789,26 @@ def main() -> None:
             kd=CONTACT_KD,
             mu=LACE_MU,
         )
-        triangle_pair_capacity = max(1_000_000, args_cli.triangle_pairs_per_env * args_cli.num_envs)
         physics_cfg.collision_cfg = NewtonCollisionPipelineCfg(
-            rigid_contact_max=args_cli.contacts_per_env * args_cli.num_envs,
-            max_triangle_pairs=triangle_pair_capacity,
+            rigid_contact_max=CONTACTS_PER_ENV * args_cli.num_envs,
+            max_triangle_pairs=max(1_000_000, TRIANGLE_PAIRS_PER_ENV * args_cli.num_envs),
         )
         physics_cfg.solver_cfg.iterations = SIM_ITERATIONS
         physics_cfg.solver_cfg.rigid_contact_hard = True
         physics_cfg.solver_cfg.rigid_avbd_alpha = 0.0
-        physics_cfg.solver_cfg.rigid_body_contact_buffer_size = args_cli.contact_buffer
+        physics_cfg.solver_cfg.rigid_body_contact_buffer_size = CONTACT_BUFFER
 
         sim_cfg = sim_utils.SimulationCfg(
             dt=FRAME_DT,
             device=args_cli.device,
             gravity=(0.0, 0.0, GRAVITY),
             physics=physics_cfg,
+            visualizer_cfgs=[
+                NewtonGLVisualizerCfg(
+                    update_frequency=4,
+                    enable_shadows=False,
+                )
+            ],
         )
         sim = sim_utils.SimulationContext(sim_cfg)
         controller.register()
@@ -700,15 +816,28 @@ def main() -> None:
         stage = sim_utils.get_current_stage()
         material_scope = UsdGeom.Scope.Define(stage, "/World/ShoeMaterials").GetPrim()
         material_scope.GetReferences().AddReference(str(MODEL_ASSET), "/mat")
-        _scene = InteractiveScene(create_scene_cfg(centerline, cable_radius))
+        scene = InteractiveScene(create_scene_cfg(centerline, cable_radius, args_cli.randomize))
         camera_eye, camera_target = CAMERA_EYE, CAMERA_TARGET
         if args_cli.num_envs > 1:
-            extent = args_cli.env_spacing * math.ceil(math.sqrt(args_cli.num_envs))
+            extent = ENV_SPACING * math.ceil(math.sqrt(args_cli.num_envs))
             camera_eye = (0.8 * extent, -0.8 * extent, 0.7 * extent)
             camera_target = (0.0, 0.0, CAMERA_TARGET[2])
         sim.set_camera_view(eye=camera_eye, target=camera_target)
 
         sim.reset()
+        if shoe_colors is not None:
+            material = scene["shoe_material"]
+            if not isinstance(material, VisualMaterial):
+                raise TypeError("Randomized shoe material did not initialize as a VisualMaterial")
+            VisualMaterial.write_channels(
+                [material],
+                {"color": torch.from_numpy(shoe_colors).unsqueeze(0)},
+            )
+            print(
+                f"[INFO]: Randomized shoe/cable colors in {args_cli.num_envs} environments with seed "
+                f"{args_cli.randomization_seed}; cable radius "
+                f"{1.0e3 * cable_radii.min():.3f}-{1.0e3 * cable_radii.max():.3f} mm."
+            )
         print(
             f"[INFO]: Shoelace ready: {args_cli.num_envs} worlds, "
             f"{len(centerline) - 1} visual segments/world, "
