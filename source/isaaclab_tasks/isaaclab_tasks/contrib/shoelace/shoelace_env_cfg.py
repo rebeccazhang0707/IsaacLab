@@ -223,7 +223,7 @@ class ShoelaceSceneCfg(InteractiveSceneCfg):
         ),
     )
     shoelace_left = _shoelace_cable_cfg("{ENV_REGEX_NS}/ShoelaceLeft")
-    shoelace_pinned_visual = AssetBaseCfg(prim_path="{ENV_REGEX_NS}/ShoelacePinnedVisual")
+    shoelace_pinned_visual = AssetBaseCfg(prim_path="{ENV_REGEX_NS}/ShoelacePinned")
     shoelace_right = _shoelace_cable_cfg("{ENV_REGEX_NS}/ShoelaceRight")
     ground = AssetBaseCfg(
         prim_path="/World/Ground",

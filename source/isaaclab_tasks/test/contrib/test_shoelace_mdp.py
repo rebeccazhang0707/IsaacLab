@@ -52,6 +52,35 @@ def test_shoe_collider_spawner_authors_collision_on_mesh(monkeypatch):
     assert UsdPhysics.CollisionAPI(collider_prim).GetCollisionEnabledAttr().Get()
 
 
+def test_pinned_shoelace_spawner_authors_one_visible_collision_mesh(monkeypatch):
+    """The fixed shoelace span must use the same mesh for rendering and collision."""
+    stage = Usd.Stage.CreateInMemory()
+    collision_paths: list[str] = []
+    centerline = np.column_stack((np.zeros(361), np.zeros(361), np.linspace(0.0, 0.45, 361)))
+    monkeypatch.setattr(
+        shoelace_env_module.sim_utils,
+        "create_prim",
+        lambda prim_path, *_args, **_kwargs: stage.DefinePrim(prim_path, "Xform"),
+    )
+    monkeypatch.setattr(shoelace_env_module.sim_utils, "get_current_stage", lambda: stage)
+    monkeypatch.setattr(
+        shoelace_env_module.sim_utils,
+        "apply_collision_properties",
+        lambda prim_path, _fragments: collision_paths.append(prim_path) or True,
+    )
+
+    cfg = shoelace_env_module._pinned_shoelace_spawner(centerline, 0.0015)
+    root = cfg.func.__wrapped__("/World/ShoelacePinned", cfg)
+    meshes = [prim for prim in Usd.PrimRange(root) if prim.IsA(UsdGeom.Mesh)]
+
+    assert [str(prim.GetPath()) for prim in meshes] == ["/World/ShoelacePinned/geometry/mesh"]
+    assert collision_paths == ["/World/ShoelacePinned/geometry/mesh"]
+    assert (
+        len(UsdGeom.Mesh(meshes[0]).GetPointsAttr().Get())
+        == (PINNED_LAST - PINNED_FIRST) * shoelace_env_module.PINNED_TUBE_SIDES
+    )
+
+
 def test_shoelace_task_uses_dual_franka_manager_contract():
     """The task exposes Cartesian arms, binary grippers, and no direct cable-force action."""
     cfg = ShoelaceEnvCfg()
@@ -95,6 +124,7 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.scene.tongue_upper.init_state.pos == pytest.approx((-0.008, 0.02, 0.10))
     assert hasattr(cfg.scene, "shoelace_left")
     assert hasattr(cfg.scene, "shoelace_pinned_visual")
+    assert cfg.scene.shoelace_pinned_visual.prim_path == "{ENV_REGEX_NS}/ShoelacePinned"
     assert hasattr(cfg.scene, "shoelace_right")
     assert not hasattr(cfg.scene, "shoelace")
     assert not hasattr(cfg.observations.policy, "reference_pull_directions")

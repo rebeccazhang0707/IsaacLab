@@ -7,7 +7,7 @@
 
 Only the virtual fingertip forces are scripted. The bow loops and tails stay dynamic, and no pose
 or velocity target is tracked. Two fixed endpoint segments anchor the eyelet-held span, whose
-interior uses static geometry with collision retained near the anchors.
+interior uses one visible static collision mesh.
 
 .. code-block:: bash
 
@@ -97,6 +97,8 @@ BEND_STIFFNESS = 0.50
 BEND_DAMPING = 0.45
 DAHL_MAX_STRAIN = 0.20
 DAHL_DECAY = 0.35
+CABLE_JOINT_STIFFNESS = (STRETCH_STIFFNESS, STRETCH_STIFFNESS, BEND_STIFFNESS, BEND_STIFFNESS)
+CABLE_JOINT_DAMPING = (STRETCH_DAMPING, STRETCH_DAMPING, BEND_DAMPING, BEND_DAMPING)
 
 # Contact model.
 GRAVITY = -9.81
@@ -113,12 +115,11 @@ COLLISION_GROUP = 1
 SETTLE_END = 0.6
 TIGHTEN_END = 1.6
 RELEASE_TIME = 2.1
+TIGHTEN_LIFT_END = 1.1
 # Asset-specific inclusive span held against the shoe by the eyelets.
 PINNED_FIRST = 98
 PINNED_LAST = 352
-# Only seam-local segments 24-34 of the former contact band retain collision.
-PINNED_CONTACT_FIRST = 24
-PINNED_CONTACT_LAST = 34
+PINNED_TUBE_SIDES = 6
 LOOP_GRAB_LEFT = (53, 58)
 LOOP_GRAB_RIGHT = (392, 397)
 UNTIE_FIRST_START = 3.0
@@ -136,8 +137,10 @@ EXTRACT_DOWNWARD_BIAS = 1.0
 TAIL_GRAB_FIRST = (446, 450)
 TAIL_GRAB_SECOND = (0, 4)
 TIGHTEN_FORCE_RAMP = 1.0
+TIGHTEN_LIFT_RAMP = 0.2
 UNTIE_FORCE_RAMP = 1.0
 TIGHTEN_FORCE = 0.1
+TIGHTEN_LIFT_FORCE = 0.01
 UNTIE_FORCE_FIRST = 0.1
 UNTIE_FORCE_SECOND = 0.1
 
@@ -224,6 +227,21 @@ def _filter_rod_neighbors(builder: ModelBuilder, shapes: list[int], window: int)
             builder.add_shape_collision_filter_pair(first_shape, second_shape)
 
 
+def _make_body_static(builder: ModelBuilder, body: int) -> None:
+    """Remove all mass and inertia from one Newton body."""
+    builder.body_mass[body] = builder.body_inv_mass[body] = 0.0
+    builder.body_inertia[body] = wp.mat33()
+    builder.body_inv_inertia[body] = wp.mat33()
+
+
+def _set_shape_material(builder: ModelBuilder, shape: int, friction: float, damping: float = CONTACT_KD) -> None:
+    """Set the common Newton contact material fields on one shape."""
+    builder.shape_material_ke[shape] = CONTACT_KE
+    builder.shape_material_kd[shape] = damping
+    builder.shape_material_mu[shape] = friction
+    builder.shape_gap[shape] = CONTACT_GAP
+
+
 class ShoelaceController:
     """Configure replicated Newton shoelaces and apply the virtual fingertip forces."""
 
@@ -256,12 +274,12 @@ class ShoelaceController:
         body_chains = find_chains(builder.body_label, builder.body_world, "edge_body")
         joint_chains = find_chains(builder.joint_label, builder.joint_world, "cable")
         expected_body_counts = (PINNED_FIRST + 1, len(self.centerline) - 1 - PINNED_LAST)
+        expected = tuple((count, count - 1) for count in expected_body_counts)
         for world, (bodies, joints) in enumerate(zip(body_chains, joint_chains, strict=True)):
             observed = tuple(
                 (len(chain_bodies), len(chain_joints))
                 for chain_bodies, chain_joints in zip(bodies, joints, strict=True)
             )
-            expected = tuple((count, count - 1) for count in expected_body_counts)
             if observed != expected:
                 raise RuntimeError(f"Unexpected cable topology in world {world}: {observed}, expected {expected}")
 
@@ -270,48 +288,28 @@ class ShoelaceController:
 
         body_by_label = self._index_unique_labels(builder.body_label)
         shape_by_label = self._index_unique_labels(builder.shape_label)
-        shoe_parts: list[tuple[int, int, int, int]] = []
+        shoe_parts: list[tuple[int, int, int]] = []
         for world in range(self.num_envs):
             root = f"/World/envs/env_{world}/Shoe"
             shoe_body = self._label_index(body_by_label, root)
             shoe_collider = self._label_index(shape_by_label, f"{root}/Collider")
             tongue_collider = self._label_index(shape_by_label, f"{root}/TongueUpper/geometry/mesh")
-            pinned_root = f"/World/envs/env_{world}/ShoelacePinnedVisual/geometry"
-            pinned_visual = shape_by_label.get(f"{pinned_root}/mesh")
-            pinned_colliders = tuple(
-                self._label_index(shape_by_label, f"{pinned_root}/collision_{side}") for side in ("left", "right")
-            )
-            pinned_shapes = pinned_colliders if pinned_visual is None else (pinned_visual, *pinned_colliders)
-            if any(builder.shape_world[shape] != world for shape in pinned_shapes):
-                raise RuntimeError(f"Pinned meshes are not local to Newton world {world}")
-            shoe_parts.append((shoe_collider, tongue_collider, *pinned_colliders))
-            builder.body_mass[shoe_body] = 0.0
-            builder.body_inv_mass[shoe_body] = 0.0
-            builder.body_inertia[shoe_body] = wp.mat33()
-            builder.body_inv_inertia[shoe_body] = wp.mat33()
-            if pinned_visual is not None:
-                builder.shape_flags[pinned_visual] = newton.ShapeFlags.VISIBLE
+            pinned_shape = self._label_index(shape_by_label, f"/World/envs/env_{world}/ShoelacePinned/geometry/mesh")
+            if builder.shape_world[pinned_shape] != world:
+                raise RuntimeError(f"Pinned mesh is not local to Newton world {world}")
+            shoe_parts.append((shoe_collider, tongue_collider, pinned_shape))
+            _make_body_static(builder, shoe_body)
             for shape in (shoe_collider, tongue_collider):
                 builder.shape_flags[shape] = newton.ShapeFlags.COLLIDE_SHAPES
                 builder.shape_collision_group[shape] = COLLISION_GROUP
-                builder.shape_material_ke[shape] = CONTACT_KE
-                builder.shape_material_kd[shape] = CONTACT_KD
-                builder.shape_material_mu[shape] = SHOE_MU
-                builder.shape_gap[shape] = CONTACT_GAP
-            for shape in pinned_colliders:
-                builder.shape_flags[shape] = newton.ShapeFlags.COLLIDE_SHAPES
-                builder.shape_collision_group[shape] = COLLISION_GROUP
-                builder.shape_material_ke[shape] = CONTACT_KE
-                builder.shape_material_kd[shape] = CONTACT_KD
-                builder.shape_material_mu[shape] = LACE_MU
-                builder.shape_gap[shape] = CONTACT_GAP
+                _set_shape_material(builder, shape, SHOE_MU)
+            builder.shape_flags[pinned_shape] = newton.ShapeFlags.VISIBLE | newton.ShapeFlags.COLLIDE_SHAPES
+            builder.shape_collision_group[pinned_shape] = COLLISION_GROUP
+            _set_shape_material(builder, pinned_shape, LACE_MU)
 
         ground_shapes = [index for index, label in enumerate(builder.shape_label) if label.startswith("/World/Ground/")]
         for shape in ground_shapes:
-            builder.shape_material_ke[shape] = CONTACT_KE
-            builder.shape_material_kd[shape] = GROUND_CONTACT_KD
-            builder.shape_material_mu[shape] = GROUND_MU
-            builder.shape_gap[shape] = CONTACT_GAP
+            _set_shape_material(builder, shape, GROUND_MU, GROUND_CONTACT_KD)
 
         # Restore exact source-demo frames and capsule mass/inertia while visiting each cable body once.
         exact_quaternions = newton.utils.create_parallel_transport_cable_quaternions(
@@ -322,7 +320,7 @@ class ShoelaceController:
         for world, (world_bodies, world_joints, shoe) in enumerate(
             zip(body_chains, joint_chains, shoe_parts, strict=True)
         ):
-            shoe_collider, tongue_collider, pinned_left, pinned_right = shoe
+            shoe_collider, tongue_collider, pinned_shape = shoe
             chain_shapes: list[list[int]] = []
             for bodies, joints, segment_indices in zip(world_bodies, world_joints, segment_ranges, strict=True):
                 shapes: list[int] = []
@@ -348,36 +346,20 @@ class ShoelaceController:
                 dof_end = int(builder.joint_qd_start[joints[-1]]) + 4
                 if dof_end - dof_start != 4 * len(joints):
                     raise RuntimeError("Cable joint DOFs must be contiguous")
-                builder.joint_target_ke[dof_start:dof_end] = (
-                    STRETCH_STIFFNESS,
-                    STRETCH_STIFFNESS,
-                    BEND_STIFFNESS,
-                    BEND_STIFFNESS,
-                ) * len(joints)
-                builder.joint_target_kd[dof_start:dof_end] = (
-                    STRETCH_DAMPING,
-                    STRETCH_DAMPING,
-                    BEND_DAMPING,
-                    BEND_DAMPING,
-                ) * len(joints)
+                builder.joint_target_ke[dof_start:dof_end] = CABLE_JOINT_STIFFNESS * len(joints)
+                builder.joint_target_kd[dof_start:dof_end] = CABLE_JOINT_DAMPING * len(joints)
 
             for body, shape in ((world_bodies[0][-1], chain_shapes[0][-1]), (world_bodies[1][0], chain_shapes[1][0])):
-                builder.body_mass[body] = 0.0
-                builder.body_inv_mass[body] = 0.0
-                builder.body_inertia[body] = wp.mat33()
-                builder.body_inv_inertia[body] = wp.mat33()
+                _make_body_static(builder, body)
                 for shoe_shape in (shoe_collider, tongue_collider):
                     builder.add_shape_collision_filter_pair(shape, shoe_shape)
 
-            for collision_shape in (pinned_left, pinned_right):
-                for static_shape in (shoe_collider, tongue_collider):
-                    builder.add_shape_collision_filter_pair(collision_shape, static_shape)
-            builder.add_shape_collision_filter_pair(pinned_left, pinned_right)
+            for static_shape in (shoe_collider, tongue_collider):
+                builder.add_shape_collision_filter_pair(pinned_shape, static_shape)
 
-            seam_shapes = (chain_shapes[0][-neighbor_window:], chain_shapes[1][:neighbor_window])
-            for collision_shape, neighbors in zip((pinned_left, pinned_right), seam_shapes, strict=True):
-                for shape in neighbors:
-                    builder.add_shape_collision_filter_pair(shape, collision_shape)
+            seam_shapes = (*chain_shapes[0][-neighbor_window:], *chain_shapes[1][:neighbor_window])
+            for shape in seam_shapes:
+                builder.add_shape_collision_filter_pair(shape, pinned_shape)
 
     def _configure_model(self, _: object) -> None:
         """Configure Dahl hysteresis and force buffers before solver construction."""
@@ -392,7 +374,7 @@ class ShoelaceController:
 
         state = NewtonManager.get_state_0()
         self._initial_body_q = wp.clone(state.body_q)
-        moves = self._build_tighten_moves() + self._build_untie_moves()
+        moves = self._build_force_moves()
         self._force_schedule = OpenLoopBodyForceSchedule(
             moves,
             device=str(model.device),
@@ -410,7 +392,7 @@ class ShoelaceController:
             for chain in (bodies[: PINNED_FIRST + 1], bodies[PINNED_FIRST + 1 :]):
                 rest[np.asarray(chain), 3:7] = rest[chain[0], 3:7]
         model.body_q.assign(rest)
-        for state in self._iter_states():
+        for state in self._states():
             state.body_q.assign(self._initial_body_q)
             state.body_qd.zero_()
             state.clear_forces()
@@ -424,8 +406,8 @@ class ShoelaceController:
             raise RuntimeError("The shoelace force schedule was not initialized")
         self._force_schedule.apply(state)
 
-    def _build_tighten_moves(self) -> list[BodyForceMove]:
-        """Build opposing force profiles that cinch the two bow loops."""
+    def _build_force_moves(self) -> list[BodyForceMove]:
+        """Build the complete tightening and untying force sequence."""
         midpoints = 0.5 * (self.centerline[:-1] + self.centerline[1:])
         knot = 0.5 * (midpoints[PINNED_FIRST] + midpoints[PINNED_LAST])
         moves: list[BodyForceMove] = []
@@ -438,6 +420,17 @@ class ShoelaceController:
                     BodyForceMove(
                         body_indices=self._bodies_for_segments(world, segments),
                         start_time=SETTLE_END,
+                        end_time=TIGHTEN_LIFT_END,
+                        direction=(0.0, 0.0, 1.0),
+                        magnitude=TIGHTEN_LIFT_FORCE,
+                        ramp_up=TIGHTEN_LIFT_RAMP,
+                        ramp_down=TIGHTEN_LIFT_RAMP,
+                    )
+                )
+                moves.append(
+                    BodyForceMove(
+                        body_indices=self._bodies_for_segments(world, segments),
+                        start_time=SETTLE_END,
                         end_time=RELEASE_TIME,
                         direction=tuple(outward),
                         magnitude=TIGHTEN_FORCE,
@@ -445,13 +438,6 @@ class ShoelaceController:
                         ramp_down=RELEASE_TIME - TIGHTEN_END,
                     )
                 )
-        return moves
-
-    def _build_untie_moves(self) -> list[BodyForceMove]:
-        """Build sequential force profiles that pull both tails and extract the loosened bight."""
-        midpoints = 0.5 * (self.centerline[:-1] + self.centerline[1:])
-        knot = 0.5 * (midpoints[PINNED_FIRST] + midpoints[PINNED_LAST])
-        moves: list[BodyForceMove] = []
         for world in range(self.num_envs):
             for (lower, upper), (start, pull_end), force in (
                 (TAIL_GRAB_FIRST, (UNTIE_FIRST_START, UNTIE_FIRST_END), UNTIE_FORCE_FIRST),
@@ -494,12 +480,7 @@ class ShoelaceController:
         bodies = self.cable_bodies[world]
         return tuple(bodies[segment if segment <= PINNED_FIRST else segment - omitted_segments] for segment in segments)
 
-    def _sorted_world_label_indices(
-        self,
-        labels: list[str],
-        worlds: list[int],
-        local_prefix: str,
-    ) -> list[list[int]]:
+    def _sorted_world_label_indices(self, labels: list[str], worlds: list[int], local_prefix: str) -> list[list[int]]:
         """Group numerically suffixed labels by Newton world in one pass."""
         matches: list[list[tuple[int, int]]] = [[] for _ in range(self.num_envs)]
         for index, (label, world) in enumerate(zip(labels, worlds, strict=True)):
@@ -526,22 +507,16 @@ class ShoelaceController:
             raise RuntimeError(f"Missing Newton label {expected!r}") from exc
 
     @staticmethod
-    def _iter_states():
+    def _states() -> tuple[State, ...]:
         state_0 = NewtonManager.get_state_0()
         state_1 = NewtonManager.get_state_1()
-        yield state_0
-        if state_1 is not None and state_1 is not state_0:
-            yield state_1
+        return (state_0,) if state_1 is None or state_1 is state_0 else (state_0, state_1)
 
 
 def _rigid_material(friction: float, damping: float) -> list:
     """Build composed standard-friction and Newton-contact material fragments."""
     return [
-        UsdPhysicsRigidBodyMaterialCfg(
-            static_friction=friction,
-            dynamic_friction=friction,
-            restitution=0.0,
-        ),
+        UsdPhysicsRigidBodyMaterialCfg(static_friction=friction, dynamic_friction=friction, restitution=0.0),
         NewtonMaterialCfg(contact_stiffness=CONTACT_KE, contact_damping=damping),
     ]
 
@@ -574,48 +549,33 @@ def create_scene_cfg(centerline: np.ndarray, cable_radius: float) -> Interactive
     left_centerline = centerline[: PINNED_FIRST + 2]
     right_centerline = centerline[PINNED_LAST:]
     pinned_centerline = centerline[PINNED_FIRST + 1 : PINNED_LAST + 1]
-    pinned_collision_centerlines = (
-        pinned_centerline[PINNED_CONTACT_FIRST - 1 : PINNED_CONTACT_LAST + 1],
-        pinned_centerline[-PINNED_CONTACT_LAST - 1 : -PINNED_CONTACT_FIRST + 1],
-    )
 
     @sim_utils.clone
-    def spawn_pinned_visual(
+    def spawn_pinned(
         prim_path: str,
         _: sim_utils.SpawnerCfg,
         translation: tuple[float, float, float] | None = None,
         orientation: tuple[float, float, float, float] | None = None,
         **kwargs,
     ) -> Usd.Prim:
-        """Spawn the fixed pinned span and its local collision bands."""
+        """Spawn the fixed pinned span as one visible collision mesh."""
         del kwargs
         root = sim_utils.create_prim(prim_path, "Xform", translation=translation, orientation=orientation)
-        stage = sim_utils.get_current_stage()
-
-        def define_tube(path: str, points: np.ndarray) -> UsdGeom.Mesh:
-            tube = _tube_mesh(points, cable_radius)
-            mesh = UsdGeom.Mesh.Define(stage, path)
-            mesh.CreatePointsAttr([Gf.Vec3f(*map(float, point)) for point in tube.vertices])
-            mesh.CreateFaceVertexCountsAttr([3] * (len(tube.indices) // 3))
-            mesh.CreateFaceVertexIndicesAttr(tube.indices.tolist())
-            mesh.CreateNormalsAttr([Gf.Vec3f(*map(float, normal)) for normal in tube.normals])
-            mesh.SetNormalsInterpolation(UsdGeom.Tokens.vertex)
-            mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
-            return mesh
-
-        visual_mesh = define_tube(f"{prim_path}/geometry/mesh", pinned_centerline)
-        visual_mesh.CreateDisplayColorAttr([Gf.Vec3f(*CABLE_COLOR)])
-        for side, points in zip(("left", "right"), pinned_collision_centerlines, strict=True):
-            mesh = define_tube(f"{prim_path}/geometry/collision_{side}", points)
-            collision_prim = mesh.GetPrim()
-            if not sim_utils.apply_collision_properties(
-                str(collision_prim.GetPath()), [sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)]
-            ):
-                raise RuntimeError(f"Failed to enable pinned collision mesh at {collision_prim.GetPath()}")
-            sim_utils.set_prim_visibility(collision_prim, False)
+        tube = _tube_mesh(pinned_centerline, cable_radius, sides=PINNED_TUBE_SIDES)
+        mesh = UsdGeom.Mesh.Define(sim_utils.get_current_stage(), f"{prim_path}/geometry/mesh")
+        mesh.CreatePointsAttr([Gf.Vec3f(*map(float, point)) for point in tube.vertices])
+        mesh.CreateFaceVertexCountsAttr([3] * (len(tube.indices) // 3))
+        mesh.CreateFaceVertexIndicesAttr(tube.indices.tolist())
+        mesh.CreateNormalsAttr([Gf.Vec3f(*map(float, normal)) for normal in tube.normals])
+        mesh.SetNormalsInterpolation(UsdGeom.Tokens.vertex)
+        mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
+        mesh.CreateDisplayColorAttr([Gf.Vec3f(*CABLE_COLOR)])
+        collision_cfg = [sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)]
+        if not sim_utils.apply_collision_properties(str(mesh.GetPath()), collision_cfg):
+            raise RuntimeError(f"Failed to enable pinned collision mesh at {mesh.GetPath()}")
         return root
 
-    pinned_visual_cfg = sim_utils.SpawnerCfg(func=spawn_pinned_visual)
+    pinned_cfg = sim_utils.SpawnerCfg(func=spawn_pinned)
 
     def cable_cfg(points: np.ndarray, normals: list[tuple[float, float, float]]) -> sim_utils.CableCfg:
         return sim_utils.CableCfg(
@@ -631,23 +591,23 @@ def create_scene_cfg(centerline: np.ndarray, cable_radius: float) -> Interactive
             collision_props=[sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)],
         )
 
+    def env_asset(prim_suffix: str, spawn: sim_utils.SpawnerCfg) -> AssetBaseCfg:
+        return AssetBaseCfg(prim_path=f"{{ENV_REGEX_NS}}/{prim_suffix}", spawn=spawn)
+
     @configclass
     class ShoelaceSceneCfg(InteractiveSceneCfg):
         """Replicated shoe and cable assets with shared ground and lighting."""
 
-        shoe = AssetBaseCfg(
-            prim_path="{ENV_REGEX_NS}/Shoe",
+        shoe = env_asset(
+            "Shoe",
             spawn=sim_utils.UsdFileCfg(
                 usd_path=str(COLLIDER_ASSET),
                 rigid_props=[sim_utils.UsdPhysicsRigidBodyCfg(kinematic_enabled=True)],
             ),
         )
-        shoe_collider = AssetBaseCfg(
-            prim_path="{ENV_REGEX_NS}/Shoe/Collider",
-            spawn=sim_utils.SpawnerCfg(func=_configure_shoe_collider),
-        )
-        shoe_visual = AssetBaseCfg(
-            prim_path="{ENV_REGEX_NS}/Shoe/Visual",
+        shoe_collider = env_asset("Shoe/Collider", sim_utils.SpawnerCfg(func=_configure_shoe_collider))
+        shoe_visual = env_asset(
+            "Shoe/Visual",
             spawn=sim_utils.UsdFileCfg(
                 usd_path=str(MODEL_ASSET),
                 visual_material_bindings={"Model": "/World/ShoeMaterials/shoes"},
@@ -671,18 +631,9 @@ def create_scene_cfg(centerline: np.ndarray, cable_radius: float) -> Interactive
                 ),
             ),
         )
-        shoelace_left = AssetBaseCfg(
-            prim_path="{ENV_REGEX_NS}/ShoelaceLeft",
-            spawn=cable_cfg(left_centerline, cable_normals[: PINNED_FIRST + 2]),
-        )
-        shoelace_pinned_visual = AssetBaseCfg(
-            prim_path="{ENV_REGEX_NS}/ShoelacePinnedVisual",
-            spawn=pinned_visual_cfg,
-        )
-        shoelace_right = AssetBaseCfg(
-            prim_path="{ENV_REGEX_NS}/ShoelaceRight",
-            spawn=cable_cfg(right_centerline, cable_normals[PINNED_LAST:]),
-        )
+        shoelace_left = env_asset("ShoelaceLeft", cable_cfg(left_centerline, cable_normals[: PINNED_FIRST + 2]))
+        shoelace_pinned = env_asset("ShoelacePinned", pinned_cfg)
+        shoelace_right = env_asset("ShoelaceRight", cable_cfg(right_centerline, cable_normals[PINNED_LAST:]))
         ground = AssetBaseCfg(
             prim_path="/World/Ground",
             spawn=sim_utils.GroundPlaneCfg(
@@ -697,22 +648,18 @@ def create_scene_cfg(centerline: np.ndarray, cable_radius: float) -> Interactive
             spawn=sim_utils.DomeLightCfg(intensity=1800.0, color=(0.75, 0.80, 1.0)),
         )
 
-    return ShoelaceSceneCfg(
-        num_envs=args_cli.num_envs,
-        env_spacing=args_cli.env_spacing,
-        replicate_physics=True,
-    )
+    return ShoelaceSceneCfg(num_envs=args_cli.num_envs, env_spacing=args_cli.env_spacing, replicate_physics=True)
 
 
 def run_simulator(sim: sim_utils.SimulationContext, controller: ShoelaceController) -> None:
     """Run the requested force-controlled sequence."""
     controller.restore_authored_state()
-    step_count = 0
-    while sim.is_headless_or_exist_active_visualizer() and step_count < args_cli.max_steps:
+    for _ in range(args_cli.max_steps):
+        if not sim.is_headless_or_exist_active_visualizer():
+            break
         sim.step(render=False)
         if sim.is_rendering:
             sim.render()
-        step_count += 1
 
 
 def main() -> None:
