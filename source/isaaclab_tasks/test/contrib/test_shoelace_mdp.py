@@ -119,6 +119,17 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.rewards.right_joint_velocity.weight == pytest.approx(-1.0e-4)
 
 
+def test_shoelace_coupler_solves_robot_shoe_contact_in_mjwarp():
+    """The robot solver must own the shoe while VBD receives it as a cable-contact proxy."""
+    solver_cfg = ShoelaceEnvCfg().sim.physics.solver_cfg
+    entries = {entry.name: entry for entry in solver_cfg.entries}
+    proxy = solver_cfg.proxies[0]
+
+    assert entries["robots"].bodies == [r"/World/envs/env_[^/]+/(Robot(Left|Right)|Shoe)"]
+    assert entries["shoelace"].bodies == [r"/World/envs/env_[^/]+/Shoelace(Left|Right)"]
+    assert r"/World/envs/env_[^/]+/Shoe" in proxy.bodies
+
+
 def test_shoelace_runtime_scales_outer_and_proxy_triangle_pair_capacities():
     """Both collision pipelines must scale triangle-pair capacity with the environment count."""
     cfg = ShoelaceEnvCfg()
@@ -305,8 +316,8 @@ def test_termination_event_reward_cancels_reward_manager_time_scaling():
     torch.testing.assert_close(event_rate * env.step_dt, torch.tensor([2.0, 1.0, 0.0]))
 
 
-def test_runtime_contact_history_is_disabled_during_cuda_graph_capture():
-    """Runtime sizing must not re-enable VBD history inside CUDA graph capture."""
+def test_runtime_configuration_authors_split_cable_assets():
+    """Runtime configuration must retain both dynamic cable ends and the pinned middle span."""
     env = ShoelaceEnv.__new__(ShoelaceEnv)
     env._is_closed = True
     env._centerline = np.column_stack((np.zeros(361), np.zeros(361), np.linspace(0.0, 0.45, 361)))
@@ -318,22 +329,9 @@ def test_runtime_contact_history_is_disabled_during_cuda_graph_capture():
 
     env._configure_runtime_cfg(cfg, Path("collider.usd"))
 
-    vbd_cfg = cfg.sim.physics.solver_cfg.entries[1].solver_cfg
     assert len(cfg.scene.shoelace_left.spawn.positions) - 1 == LEFT_CABLE_SEGMENT_COUNT
     assert len(cfg.scene.shoelace_right.spawn.positions) - 1 == RIGHT_CABLE_SEGMENT_COUNT
     assert callable(cfg.scene.shoelace_pinned_visual.spawn.func)
-    assert cfg.sim.physics.use_cuda_graph
-    assert not vbd_cfg.rigid_contact_history
-    assert cfg.sim.physics.collision_cfg.contact_matching == "disabled"
-
-    eager_cfg = ShoelaceEnvCfg()
-    eager_cfg.scene.num_envs = 2
-    eager_cfg.sim.physics.use_cuda_graph = False
-    env._configure_runtime_cfg(eager_cfg, Path("collider.usd"))
-
-    eager_vbd_cfg = eager_cfg.sim.physics.solver_cfg.entries[1].solver_cfg
-    assert eager_vbd_cfg.rigid_contact_history
-    assert eager_cfg.sim.physics.collision_cfg.contact_matching == "latest"
 
 
 def test_untying_potential_increases_for_separated_tails_and_a_clear_throat():

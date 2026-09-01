@@ -108,7 +108,6 @@ LACE_MU = 0.7
 SHOE_MU = 0.2
 GROUND_MU = 0.8
 COLLISION_GROUP = 1
-DETERMINISTIC_TRIANGLE_PAIR_LIMIT = 1 << 20
 
 # Tightening and untying force schedule [s].
 SETTLE_END = 0.6
@@ -733,9 +732,7 @@ def main() -> None:
             mu=LACE_MU,
         )
         triangle_pair_capacity = max(1_000_000, args_cli.triangle_pairs_per_env * args_cli.num_envs)
-        contact_history = triangle_pair_capacity <= DETERMINISTIC_TRIANGLE_PAIR_LIMIT
         physics_cfg.collision_cfg = NewtonCollisionPipelineCfg(
-            contact_matching="latest" if contact_history else "disabled",
             rigid_contact_max=args_cli.contacts_per_env * args_cli.num_envs,
             max_triangle_pairs=triangle_pair_capacity,
         )
@@ -743,14 +740,6 @@ def main() -> None:
         physics_cfg.solver_cfg.rigid_contact_hard = True
         physics_cfg.solver_cfg.rigid_avbd_alpha = 0.0
         physics_cfg.solver_cfg.rigid_body_contact_buffer_size = args_cli.contact_buffer
-        physics_cfg.solver_cfg.rigid_contact_history = contact_history
-
-        if not contact_history:
-            print(
-                "[INFO]: Contact history disabled because the replicated shoe meshes require "
-                f"{triangle_pair_capacity} triangle pairs, above the deterministic limit "
-                f"{DETERMINISTIC_TRIANGLE_PAIR_LIMIT}."
-            )
 
         sim_cfg = sim_utils.SimulationCfg(
             dt=FRAME_DT,

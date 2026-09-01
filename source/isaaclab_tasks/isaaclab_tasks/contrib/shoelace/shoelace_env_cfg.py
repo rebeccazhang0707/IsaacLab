@@ -475,7 +475,7 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
                             njmax=2048,
                             nconmax=256,
                         ),
-                        bodies=[r"/World/envs/env_[^/]+/Robot(Left|Right)"],
+                        bodies=[r"/World/envs/env_[^/]+/(Robot(Left|Right)|Shoe)"],
                     ),
                     CouplerEntryCfg(
                         name="shoelace",
@@ -483,10 +483,9 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
                             iterations=20,
                             rigid_contact_hard=True,
                             rigid_avbd_alpha=0.0,
-                            rigid_contact_history=False,
                             rigid_body_contact_buffer_size=128,
                         ),
-                        bodies=[r"/World/envs/env_[^/]+/(Shoelace(Left|Right)|Shoe)"],
+                        bodies=[r"/World/envs/env_[^/]+/Shoelace(Left|Right)"],
                         include_static_shapes=True,
                     ),
                 ],
@@ -497,6 +496,7 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
                         bodies=[
                             r"/World/envs/env_[^/]+/Robot(Left|Right)/Geometry/.*panda_hand",
                             r"/World/envs/env_[^/]+/Robot(Left|Right)/Geometry/.*panda_(left|right)finger",
+                            r"/World/envs/env_[^/]+/Shoe",
                         ],
                         collide_interval=2,
                     )
@@ -504,7 +504,6 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
                 iterations=1,
             ),
             collision_cfg=NewtonCollisionPipelineCfg(
-                contact_matching="disabled",
                 rigid_contact_max=512 * 32,
                 max_triangle_pairs=32768 * 32,
             ),
@@ -527,7 +526,6 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
 
     contacts_per_env = 512
     triangle_pairs_per_env = 8192
-    deterministic_triangle_pair_limit = 1 << 20
 
     def __post_init__(self) -> None:
         self.sim.default_visualizer_cfg = VisualizerCfg(
