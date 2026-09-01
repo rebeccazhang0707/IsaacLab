@@ -108,8 +108,22 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert not hasattr(cfg.actions, "force")
     assert cfg.events.reset_shoelace.func is shoelace_events.ResetShoelaceCurriculum
     assert cfg.curriculum.pull_to_grasp.func is shoelace_curriculums.PullToGraspCurriculum
-    assert cfg.curriculum.pull_to_grasp.params["level_count"] == 6
+    assert cfg.curriculum.pull_to_grasp.params["level_count"] == 15
+    assert cfg.curriculum.pull_to_grasp.params["approach_level_count"] == 11
+    assert cfg.curriculum.pull_to_grasp.params["grasp_assist_strengths"] == pytest.approx((1.0, 0.75, 0.5, 0.25, 0.0))
+    assert cfg.curriculum.pull_to_grasp.params["current_level_fraction"] == pytest.approx(0.5)
+    assert cfg.curriculum.pull_to_grasp.params["current_level_fraction_schedule"] == pytest.approx((0.2, 0.35, 0.5))
+    assert cfg.curriculum.pull_to_grasp.params["terminal_level_fraction"] == pytest.approx(1.0)
+    assert cfg.curriculum.pull_to_grasp.params["terminal_level_fraction_schedule"] == pytest.approx(
+        (0.2, 0.35, 0.5, 0.75, 1.0)
+    )
+    assert cfg.curriculum.pull_to_grasp.params["fraction_increase_success_rate"] == pytest.approx(0.5)
+    assert cfg.curriculum.pull_to_grasp.params["fraction_backoff_success_rate"] == pytest.approx(0.1)
+    assert cfg.curriculum.pull_to_grasp.params["promotion_window_count"] == 2
+    assert cfg.curriculum.pull_to_grasp.params["replay_level_weights"] == pytest.approx((0.5, 0.3, 0.2))
     assert cfg.curriculum.pull_to_grasp.params["initial_level"] == 0
+    assert cfg.events.reset_shoelace.params["gripper_open_phase_fraction"] == pytest.approx(0.4)
+    assert cfg.events.reset_shoelace.params["approach_phase_exponent"] == pytest.approx(2.0)
     assert cfg.events.reset_shoelace.params["grasp_joint_positions"][0] == pytest.approx(
         (0.306502, -0.108321, -0.457832, -2.629056, 1.130974, 2.579587, -0.254864)
     )
@@ -139,9 +153,12 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.sim.physics.num_substeps == 5
     assert cfg.sim.physics.collision_decimation == 2
     assert cfg.sim.physics.solver_cfg.entries[1].solver_cfg.iterations == 20
-    assert cfg.sim.physics.solver_cfg.entries[1].solver_cfg.rigid_body_contact_buffer_size == 128
+    assert cfg.sim.physics.solver_cfg.entries[1].solver_cfg.rigid_body_contact_buffer_size == 256
     assert cfg.sim.physics.solver_cfg.proxies[0].collide_interval == 2
     assert cfg.triangle_pairs_per_env == 8192
+    assert cfg.grasp_assist_release_distance == pytest.approx(
+        cfg.terminations.lost_grasp.params["maximum_grasp_distance"]
+    )
     assert SHOELACE_SEGMENT_COUNT == 360
     assert (PINNED_FIRST, PINNED_LAST) == (78, 281)
     assert (LEFT_CABLE_SEGMENT_COUNT, RIGHT_CABLE_SEGMENT_COUNT) == (79, 79)
@@ -188,8 +205,103 @@ def test_shoelace_play_mode_uses_complete_authored_reset():
 
     cfg.play_mode()
 
-    assert cfg.curriculum.pull_to_grasp.params["initial_level"] == 5
+    assert cfg.curriculum.pull_to_grasp.params["initial_level"] == 14
     assert cfg.curriculum.pull_to_grasp.params["current_level_fraction"] == pytest.approx(1.0)
+    assert cfg.curriculum.pull_to_grasp.params["current_level_fraction_schedule"] == pytest.approx((1.0,))
+    assert cfg.curriculum.pull_to_grasp.params["terminal_level_fraction"] == pytest.approx(1.0)
+    assert cfg.curriculum.pull_to_grasp.params["terminal_level_fraction_schedule"] == pytest.approx((1.0,))
+
+
+@pytest.mark.parametrize(
+    ("initial_level", "expected_difficulty", "expected_assist_scale"),
+    [
+        (10, 1.0, 1.0),
+        (11, 1.0, 0.75),
+        (12, 1.0, 0.5),
+        (13, 1.0, 0.25),
+        (14, 1.0, 0.0),
+    ],
+)
+def test_pull_to_grasp_curriculum_anneals_assistance_after_full_approach(
+    initial_level: int, expected_difficulty: float, expected_assist_scale: float
+):
+    """Levels after the complete approach must reduce only the compliant grasp force."""
+
+    class Physics:
+        scale = torch.full((4, 2), torch.nan)
+
+        def set_grasp_assist_scale(self, env_ids: torch.Tensor, scale: torch.Tensor) -> None:
+            self.scale[env_ids] = scale.unsqueeze(-1)
+
+    env = SimpleNamespace(num_envs=4, device="cpu", common_step_counter=0, _physics=Physics())
+    params = {
+        "level_count": 15,
+        "approach_level_count": 11,
+        "grasp_assist_strengths": (1.0, 0.75, 0.5, 0.25, 0.0),
+        "success_term_name": "success",
+        "promotion_success_rate": 0.7,
+        "minimum_episodes": 4,
+        "current_level_fraction": 1.0,
+        "initial_level": initial_level,
+    }
+    term = shoelace_curriculums.PullToGraspCurriculum(
+        CurriculumTermCfg(func=shoelace_curriculums.PullToGraspCurriculum, params=params), env
+    )
+
+    state = term(env, slice(None), **params)
+
+    torch.testing.assert_close(term.difficulty, torch.full((4,), expected_difficulty))
+    torch.testing.assert_close(term.grasp_assist_scale, torch.full((4,), expected_assist_scale))
+    torch.testing.assert_close(env._physics.scale, torch.full((4, 2), expected_assist_scale))
+    assert state["mean_grasp_assist_scale"] == pytest.approx(expected_assist_scale)
+    assert state["unassisted_fraction"] == pytest.approx(float(expected_assist_scale == 0.0))
+
+
+def test_pull_to_grasp_curriculum_expands_terminal_unassisted_exposure():
+    """The final unassisted level must grow beyond the replay ceiling only after successful windows."""
+
+    class TerminationManager:
+        successes = torch.ones(10, dtype=torch.bool)
+
+        def get_term(self, name: str) -> torch.Tensor:
+            assert name == "success"
+            return self.successes
+
+    env = SimpleNamespace(
+        num_envs=10,
+        device="cpu",
+        common_step_counter=0,
+        termination_manager=TerminationManager(),
+    )
+    params = {
+        "level_count": 15,
+        "approach_level_count": 11,
+        "grasp_assist_strengths": (1.0, 0.75, 0.5, 0.25, 0.0),
+        "success_term_name": "success",
+        "promotion_success_rate": 0.7,
+        "minimum_episodes": 2,
+        "current_level_fraction": 0.5,
+        "current_level_fraction_schedule": (0.5,),
+        "terminal_level_fraction": 1.0,
+        "terminal_level_fraction_schedule": (0.2, 0.5, 1.0),
+        "fraction_increase_success_rate": 0.5,
+        "promotion_window_count": 1,
+        "initial_level": 13,
+    }
+    term = shoelace_curriculums.PullToGraspCurriculum(
+        CurriculumTermCfg(func=shoelace_curriculums.PullToGraspCurriculum, params=params), env
+    )
+
+    term(env, slice(None), **params)
+    env.common_step_counter = 1
+    first_terminal_window = term(env, slice(None), **params)
+    second_terminal_window = term(env, slice(None), **params)
+    third_terminal_window = term(env, slice(None), **params)
+
+    assert first_terminal_window["current_level"] == pytest.approx(14.0)
+    assert first_terminal_window["current_level_fraction"] == pytest.approx(0.2)
+    assert second_terminal_window["current_level_fraction"] == pytest.approx(0.5)
+    assert third_terminal_window["current_level_fraction"] == pytest.approx(1.0)
 
 
 def test_pull_to_grasp_curriculum_promotes_only_after_successful_window():
@@ -209,7 +321,7 @@ def test_pull_to_grasp_curriculum_promotes_only_after_successful_window():
         termination_manager=TerminationManager(),
     )
     params = {
-        "level_count": 6,
+        "level_count": 11,
         "success_term_name": "success",
         "promotion_success_rate": 0.75,
         "minimum_episodes": 4,
@@ -226,22 +338,153 @@ def test_pull_to_grasp_curriculum_promotes_only_after_successful_window():
 
     assert state["current_level"] == pytest.approx(1.0)
     torch.testing.assert_close(term.levels, torch.ones(4, dtype=torch.long))
-    torch.testing.assert_close(term.difficulty, torch.full((4,), 0.2))
+    torch.testing.assert_close(term.difficulty, torch.full((4,), 0.1))
 
     env.termination_manager.successes[:] = False
     state = term(env, slice(None), **params)
     assert state["current_level"] == pytest.approx(1.0)
 
 
-def test_reset_curriculum_interpolates_robot_from_grasp_to_pregrasp():
-    """Reset difficulty must move the robot rather than deforming the authored cable."""
-    grasp = torch.tensor(((0.0, 1.0), (0.0, 1.0), (0.0, 1.0)))
-    pregrasp = torch.tensor(((2.0, 3.0), (2.0, 3.0), (2.0, 3.0)))
-    difficulty = torch.tensor(((0.0,), (0.5,), (1.0,)))
+@pytest.mark.parametrize(
+    ("initial_level", "expected_fractions"),
+    [
+        (5, (0.0, 0.0, 0.1, 0.15, 0.25, 0.5)),
+        (2, (0.1875, 0.3125, 0.5)),
+    ],
+)
+def test_pull_to_grasp_curriculum_replays_multiple_preceding_levels(
+    initial_level: int, expected_fractions: tuple[float, ...]
+):
+    """Replay sampling must retain configured ratios and normalize unavailable levels."""
+    env = SimpleNamespace(num_envs=40_000, device="cpu", common_step_counter=0)
+    params = {
+        "level_count": 11,
+        "success_term_name": "success",
+        "promotion_success_rate": 0.75,
+        "minimum_episodes": 128,
+        "current_level_fraction": 0.5,
+        "initial_level": initial_level,
+        "replay_level_weights": (0.5, 0.3, 0.2),
+    }
+    term = shoelace_curriculums.PullToGraspCurriculum(
+        CurriculumTermCfg(func=shoelace_curriculums.PullToGraspCurriculum, params=params), env
+    )
 
-    result = shoelace_events.ResetShoelaceCurriculum._interpolate_joint_positions(grasp, pregrasp, difficulty)
+    term(env, slice(None), **params)
+    sampled_levels = term.levels.clone()
+    term(env, torch.arange(0, env.num_envs, 2), **params)
 
-    torch.testing.assert_close(result, torch.tensor(((0.0, 1.0), (1.0, 2.0), (2.0, 3.0))))
+    sampled_fractions = torch.bincount(term.levels, minlength=len(expected_fractions)).float() / env.num_envs
+    torch.testing.assert_close(
+        sampled_fractions[: len(expected_fractions)], torch.tensor(expected_fractions), rtol=0.0, atol=0.01
+    )
+    torch.testing.assert_close(term.levels, sampled_levels)
+
+
+def test_pull_to_grasp_curriculum_increases_exposure_before_promotion():
+    """A new level must start at low exposure and require repeated mastery before promotion."""
+
+    class TerminationManager:
+        successes = torch.ones(10, dtype=torch.bool)
+
+        def get_term(self, name: str) -> torch.Tensor:
+            assert name == "success"
+            return self.successes
+
+    env = SimpleNamespace(
+        num_envs=10,
+        device="cpu",
+        common_step_counter=0,
+        termination_manager=TerminationManager(),
+    )
+    params = {
+        "level_count": 11,
+        "success_term_name": "success",
+        "promotion_success_rate": 0.7,
+        "minimum_episodes": 5,
+        "current_level_fraction": 0.5,
+        "current_level_fraction_schedule": (0.2, 0.35, 0.5),
+        "fraction_increase_success_rate": 0.5,
+        "fraction_backoff_success_rate": 0.1,
+        "promotion_window_count": 2,
+        "initial_level": 5,
+        "replay_level_weights": (0.5, 0.3, 0.2),
+    }
+    term = shoelace_curriculums.PullToGraspCurriculum(
+        CurriculumTermCfg(func=shoelace_curriculums.PullToGraspCurriculum, params=params), env
+    )
+
+    term(env, slice(None), **params)
+    env.common_step_counter = 1
+    first_window = term(env, slice(None), **params)
+    second_window = term(env, slice(None), **params)
+
+    assert first_window["current_level"] == pytest.approx(5.0)
+    assert first_window["successful_window_count"] == pytest.approx(1.0)
+    assert second_window["current_level"] == pytest.approx(6.0)
+    assert second_window["current_level_fraction"] == pytest.approx(0.2)
+    assert (term.levels == 6).sum().item() == 2
+
+
+def test_pull_to_grasp_curriculum_backs_off_current_level_exposure():
+    """Repeated low-success windows must reduce frontier exposure without demoting the level."""
+
+    class TerminationManager:
+        successes = torch.zeros(10, dtype=torch.bool)
+
+        def get_term(self, name: str) -> torch.Tensor:
+            assert name == "success"
+            return self.successes
+
+    env = SimpleNamespace(
+        num_envs=10,
+        device="cpu",
+        common_step_counter=0,
+        termination_manager=TerminationManager(),
+    )
+    params = {
+        "level_count": 11,
+        "success_term_name": "success",
+        "promotion_success_rate": 0.7,
+        "minimum_episodes": 3,
+        "current_level_fraction": 0.5,
+        "current_level_fraction_schedule": (0.2, 0.35, 0.5),
+        "fraction_increase_success_rate": 0.5,
+        "fraction_backoff_success_rate": 0.1,
+        "promotion_window_count": 2,
+        "initial_level": 6,
+        "replay_level_weights": (0.5, 0.3, 0.2),
+    }
+    term = shoelace_curriculums.PullToGraspCurriculum(
+        CurriculumTermCfg(func=shoelace_curriculums.PullToGraspCurriculum, params=params), env
+    )
+
+    term(env, slice(None), **params)
+    env.common_step_counter = 1
+    first_window = term(env, slice(None), **params)
+    second_window = term(env, slice(None), **params)
+
+    assert first_window["current_level"] == pytest.approx(6.0)
+    assert first_window["current_level_fraction"] == pytest.approx(0.35)
+    assert second_window["current_level"] == pytest.approx(6.0)
+    assert second_window["current_level_fraction"] == pytest.approx(0.2)
+
+
+def test_reset_curriculum_opens_gripper_before_increasing_approach_distance():
+    """Early levels must stage closure at the tail before moving the arms toward pregrasp."""
+    difficulty = torch.tensor(((0.0,), (0.2,), (0.4,), (0.5,), (0.6,), (0.7,), (1.0,)))
+
+    arm_difficulty, gripper_difficulty = shoelace_events.ResetShoelaceCurriculum._phase_difficulties(
+        difficulty, gripper_open_phase_fraction=0.4, approach_phase_exponent=2.0
+    )
+
+    torch.testing.assert_close(
+        arm_difficulty,
+        torch.tensor(((0.0,), (0.0,), (0.0,), (1.0 / 36.0,), (1.0 / 9.0,), (0.25,), (1.0,))),
+    )
+    torch.testing.assert_close(
+        gripper_difficulty, torch.tensor(((0.0,), (0.5,), (1.0,), (1.0,), (1.0,), (1.0,), (1.0,)))
+    )
 
 
 def test_shoelace_coupler_solves_robot_shoe_contact_in_mjwarp():
@@ -827,19 +1070,27 @@ def test_shoelace_unsafe_detects_non_finite_robot_state(monkeypatch):
     torch.testing.assert_close(unsafe, torch.tensor([False, True]))
 
 
-def test_lost_grasp_accepts_compliant_retention_beyond_geometric_distance(monkeypatch):
+def test_lost_grasp_uses_compliant_latch_when_available(monkeypatch):
     """A retained compliant grasp must not terminate until its latch releases."""
-    distances = torch.full((1, 2), 0.1)
-    retained = torch.ones((1, 2), dtype=torch.bool)
+    distances = torch.zeros((1, 2))
+    active = torch.ones((1, 2), dtype=torch.int32)
     monkeypatch.setattr(shoelace_terminations, "grasp_distances", lambda *args: distances)
-    monkeypatch.setattr(shoelace_terminations, "grasp_state", lambda *args: retained)
-    env = SimpleNamespace(num_envs=1, device="cpu")
+    monkeypatch.setattr(
+        shoelace_terminations,
+        "grasp_state",
+        lambda *args: pytest.fail("The compliant latch must be the authoritative grasp state."),
+    )
+    env = SimpleNamespace(
+        num_envs=1,
+        device="cpu",
+        _physics=SimpleNamespace(grasp_assist_active=active),
+    )
     term = shoelace_terminations.lost_grasp(None, env)
 
     result = term(env, 0.01, 0.01, 0.025, None, None, None)
     torch.testing.assert_close(result, torch.tensor([False]))
 
-    retained[0, 1] = False
+    active[0, 1] = 0
     result = term(env, 0.01, 0.01, 0.025, None, None, None)
     torch.testing.assert_close(result, torch.tensor([True]))
 

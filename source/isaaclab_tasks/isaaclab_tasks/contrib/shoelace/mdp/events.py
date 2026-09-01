@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -50,14 +51,16 @@ class ResetShoelaceCurriculum(ManagerTermBase):
         grasp_joint_positions: tuple[tuple[float, ...], tuple[float, ...]],
         open_position: float,
         closed_position: float,
+        gripper_open_phase_fraction: float,
+        approach_phase_exponent: float = 1.0,
     ) -> None:
         """Apply one curriculum reset.
 
         The cable is restored to its authored pose at every level. At zero
         difficulty, both arms start with their TCPs centered on the authored
-        tails and both grippers closed. Increasing difficulty interpolates the
-        arms toward their configured pregrasp joint positions and opens the
-        grippers.
+        tails and both grippers closed. Early levels open the grippers while
+        keeping the TCPs at the tails. Later levels move the open grippers
+        toward their configured pregrasp joint positions.
 
         Args:
             env: The learning environment.
@@ -69,16 +72,23 @@ class ResetShoelaceCurriculum(ManagerTermBase):
             grasp_joint_positions: Arm joint positions at zero difficulty [rad].
             open_position: Driven finger position for an open gripper [m].
             closed_position: Driven finger position for a closed gripper [m].
+            gripper_open_phase_fraction: Fraction of curriculum difficulty reserved for opening the gripper at the
+                tail before increasing approach distance.
+            approach_phase_exponent: Exponent applied to normalized approach difficulty. Values above one allocate
+                finer levels near the grasp pose.
         """
         difficulty_term = getattr(env.curriculum_manager.cfg, difficulty_term_name).func
         difficulty = difficulty_term.difficulty[env_ids].unsqueeze(-1)
+        arm_difficulty, gripper_difficulty = self._phase_difficulties(
+            difficulty, gripper_open_phase_fraction, approach_phase_exponent
+        )
         reset_shoelace_state(env, env_ids, asset_cfgs)
 
         for arm_cfg, grasp_position in zip(arm_cfgs, grasp_joint_positions, strict=True):
             robot = env.scene[arm_cfg.name]
             default_position = robot.data.default_joint_pos.torch[env_ids][:, arm_cfg.joint_ids]
             grasp_position_tensor = default_position.new_tensor(grasp_position).expand_as(default_position)
-            joint_position = self._interpolate_joint_positions(grasp_position_tensor, default_position, difficulty)
+            joint_position = self._interpolate_joint_positions(grasp_position_tensor, default_position, arm_difficulty)
             joint_velocity = torch.zeros_like(joint_position)
             robot.write_joint_position_to_sim_index(
                 position=joint_position, joint_ids=arm_cfg.joint_ids, env_ids=env_ids
@@ -88,7 +98,7 @@ class ResetShoelaceCurriculum(ManagerTermBase):
             )
             robot.set_joint_position_target_index(target=joint_position, joint_ids=arm_cfg.joint_ids, env_ids=env_ids)
 
-        finger_position = closed_position + difficulty.squeeze(-1) * (open_position - closed_position)
+        finger_position = closed_position + gripper_difficulty.squeeze(-1) * (open_position - closed_position)
         for gripper_cfg in gripper_cfgs:
             robot = env.scene[gripper_cfg.name]
             joint_position = finger_position.unsqueeze(-1).expand(-1, len(gripper_cfg.joint_ids))
@@ -111,3 +121,22 @@ class ResetShoelaceCurriculum(ManagerTermBase):
     ) -> torch.Tensor:
         """Interpolate arm positions from grasp to pregrasp over reset difficulty."""
         return torch.lerp(grasp_position, pregrasp_position, difficulty)
+
+    @staticmethod
+    def _phase_difficulties(
+        difficulty: torch.Tensor,
+        gripper_open_phase_fraction: float,
+        approach_phase_exponent: float = 1.0,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Split reset difficulty into sequential gripper and arm phases."""
+        if not 0.0 < gripper_open_phase_fraction < 1.0:
+            raise ValueError("gripper_open_phase_fraction must lie in (0, 1).")
+        if not math.isfinite(approach_phase_exponent) or approach_phase_exponent <= 0.0:
+            raise ValueError("approach_phase_exponent must be finite and positive.")
+        bounded_difficulty = difficulty.clamp(0.0, 1.0)
+        gripper_difficulty = (bounded_difficulty / gripper_open_phase_fraction).clamp(max=1.0)
+        normalized_arm_difficulty = (
+            (bounded_difficulty - gripper_open_phase_fraction) / (1.0 - gripper_open_phase_fraction)
+        ).clamp(0.0, 1.0)
+        arm_difficulty = normalized_arm_difficulty.pow(approach_phase_exponent)
+        return arm_difficulty, gripper_difficulty

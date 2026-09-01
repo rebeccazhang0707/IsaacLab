@@ -41,7 +41,7 @@ def shoelace_unsafe(
 
 
 class lost_grasp(ManagerTermBase):
-    """Terminate when either tail is dropped after bilateral grasp acquisition."""
+    """Terminate when either grasp latch releases after bilateral acquisition."""
 
     def __init__(self, cfg, env) -> None:
         super().__init__(cfg, env)
@@ -65,24 +65,29 @@ class lost_grasp(ManagerTermBase):
     ) -> torch.Tensor:
         """Return per-environment grasp-loss flags after acquisition."""
         distances = grasp_distances(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
-        acquired = grasp_state(
-            env,
-            acquisition_distance,
-            maximum_finger_position,
-            asset_cfgs,
-            left_robot_cfg,
-            right_robot_cfg,
-        )
+        physics = getattr(env, "_physics", None)
+        retained = getattr(physics, "grasp_assist_active", None)
+        if retained is None:
+            acquired = grasp_state(
+                env,
+                acquisition_distance,
+                maximum_finger_position,
+                asset_cfgs,
+                left_robot_cfg,
+                right_robot_cfg,
+            )
+            retained = grasp_state(
+                env,
+                maximum_grasp_distance,
+                maximum_finger_position,
+                asset_cfgs,
+                left_robot_cfg,
+                right_robot_cfg,
+            )
+        else:
+            acquired = retained = retained.bool()
         self._acquired |= acquired
         self._bilaterally_acquired |= acquired.all(dim=1)
-        retained = grasp_state(
-            env,
-            maximum_grasp_distance,
-            maximum_finger_position,
-            asset_cfgs,
-            left_robot_cfg,
-            right_robot_cfg,
-        )
         lost_after_bilateral_acquisition = self._bilaterally_acquired & (self._acquired & (~retained)).any(dim=1)
         return (~torch.isfinite(distances).all(dim=1)) | lost_after_bilateral_acquisition
 

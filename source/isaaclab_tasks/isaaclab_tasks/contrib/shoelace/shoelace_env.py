@@ -258,6 +258,7 @@ def _apply_grasp_assist_kernel(
     tail_ids: wp.array(dtype=wp.int32),
     active: wp.array(dtype=wp.int32),
     local_anchors: wp.array(dtype=wp.vec3f),
+    assist_scale: wp.array(dtype=wp.float32),
     tcp_offset: wp.vec3f,
     acquisition_distance: float,
     release_distance: float,
@@ -305,6 +306,7 @@ def _apply_grasp_assist_kernel(
     force_length = wp.length(force)
     if force_length > maximum_force:
         force *= maximum_force / force_length
+    force *= assist_scale[grasp]
     distributed_force = force / 3.0
     for index in range(3):
         wp.atomic_add(
@@ -348,11 +350,22 @@ class _ShoelacePhysics:
         self._grasp_assist_finger_ids: list[int] = []
         self._grasp_assist_tail_ids: list[int] = []
         self._grasp_assist_active_view: torch.Tensor | None = None
+        self._grasp_assist_scale_view: torch.Tensor | None = None
+
+    @property
+    def grasp_assist_active(self) -> torch.Tensor | None:
+        """Return per-environment left and right compliant grasp latch state."""
+        return self._grasp_assist_active_view
 
     def reset_grasp_assist(self, env_ids: torch.Tensor) -> None:
         """Clear compliant grasp state for selected Newton worlds."""
         if self._grasp_assist_active_view is not None:
             self._grasp_assist_active_view[env_ids] = 0
+
+    def set_grasp_assist_scale(self, env_ids: torch.Tensor, scale: torch.Tensor) -> None:
+        """Set the compliant grasp force fraction for selected Newton worlds."""
+        if self._grasp_assist_scale_view is not None:
+            self._grasp_assist_scale_view[env_ids] = scale.unsqueeze(-1)
 
     def register(self) -> None:
         """Register model lifecycle callbacks before the first simulation reset."""
@@ -525,7 +538,9 @@ class _ShoelacePhysics:
         self._grasp_assist_tail_ids_wp = wp.array(self._grasp_assist_tail_ids, dtype=wp.int32, device=device)
         self._grasp_assist_active = wp.zeros(grasp_count, dtype=wp.int32, device=device)
         self._grasp_assist_local_anchors = wp.zeros(grasp_count, dtype=wp.vec3f, device=device)
+        self._grasp_assist_scale = wp.ones(grasp_count, dtype=wp.float32, device=device)
         self._grasp_assist_active_view = wp.to_torch(self._grasp_assist_active).view(self.num_envs, 2)
+        self._grasp_assist_scale_view = wp.to_torch(self._grasp_assist_scale).view(self.num_envs, 2)
         NewtonManager.register_state_force_callback(self._apply_grasp_assist)
 
     def _apply_grasp_assist(self, state: newton.State) -> None:
@@ -543,6 +558,7 @@ class _ShoelacePhysics:
                 self._grasp_assist_tail_ids_wp,
                 self._grasp_assist_active,
                 self._grasp_assist_local_anchors,
+                self._grasp_assist_scale,
                 wp.vec3f(*TCP_OFFSET),
                 self.grasp_assist_acquisition_distance,
                 self.grasp_assist_release_distance,

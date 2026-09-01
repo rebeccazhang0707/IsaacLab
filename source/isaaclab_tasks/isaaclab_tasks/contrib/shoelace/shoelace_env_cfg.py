@@ -56,6 +56,11 @@ _GRIPPER_CLOSED_THRESHOLD = 0.02
 _TARGET_PULL_SPEED = 0.04
 _MINIMUM_LACE_HEIGHT = -0.003
 _MAXIMUM_LACE_SPREAD = 0.6
+_APPROACH_CURRICULUM_LEVEL_COUNT = 11
+_GRASP_ASSIST_STRENGTHS = (1.0, 0.75, 0.5, 0.25, 0.0)
+_CURRICULUM_LEVEL_COUNT = _APPROACH_CURRICULUM_LEVEL_COUNT + len(_GRASP_ASSIST_STRENGTHS) - 1
+_GRIPPER_OPEN_PHASE_FRACTION = 0.4
+_APPROACH_PHASE_EXPONENT = 2.0
 
 _LEFT_ROBOT_POSITION = (-0.525248, 0.023338, -0.089901)
 _RIGHT_ROBOT_POSITION = (0.507963, -0.001890, -0.088518)
@@ -406,6 +411,8 @@ class EventCfg:
             ),
             "open_position": _GRIPPER_OPEN_POSITION,
             "closed_position": _GRIPPER_CLOSED_POSITION,
+            "gripper_open_phase_fraction": _GRIPPER_OPEN_PHASE_FRACTION,
+            "approach_phase_exponent": _APPROACH_PHASE_EXPONENT,
         },
     )
 
@@ -417,11 +424,20 @@ class CurriculumCfg:
     pull_to_grasp = CurrTerm(
         func=mdp.PullToGraspCurriculum,
         params={
-            "level_count": 6,
+            "level_count": _CURRICULUM_LEVEL_COUNT,
             "success_term_name": "success",
             "promotion_success_rate": 0.7,
             "minimum_episodes": 128,
-            "current_level_fraction": 0.8,
+            "current_level_fraction": 0.5,
+            "current_level_fraction_schedule": (0.2, 0.35, 0.5),
+            "terminal_level_fraction": 1.0,
+            "terminal_level_fraction_schedule": (0.2, 0.35, 0.5, 0.75, 1.0),
+            "fraction_increase_success_rate": 0.5,
+            "fraction_backoff_success_rate": 0.1,
+            "promotion_window_count": 2,
+            "replay_level_weights": (0.5, 0.3, 0.2),
+            "approach_level_count": _APPROACH_CURRICULUM_LEVEL_COUNT,
+            "grasp_assist_strengths": _GRASP_ASSIST_STRENGTHS,
             "initial_level": 0,
         },
     )
@@ -548,7 +564,7 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
                             iterations=20,
                             rigid_contact_hard=True,
                             rigid_avbd_alpha=0.0,
-                            rigid_body_contact_buffer_size=128,
+                            rigid_body_contact_buffer_size=256,
                         ),
                         bodies=[r"/World/envs/env_[^/]+/Shoelace(Left|Right)"],
                         include_static_shapes=True,
@@ -593,7 +609,7 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
     contacts_per_env = 512
     triangle_pairs_per_env = 8192
     grasp_assist_acquisition_distance = _GRASP_ACQUISITION_DISTANCE
-    grasp_assist_release_distance = 0.2
+    grasp_assist_release_distance = _MAXIMUM_GRASP_DISTANCE
     grasp_assist_acquisition_closed_separation = 0.02
     grasp_assist_release_open_separation = 0.06
     grasp_assist_stiffness = 20.0
@@ -611,3 +627,6 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
         maximum_level = self.curriculum.pull_to_grasp.params["level_count"] - 1
         self.curriculum.pull_to_grasp.params["initial_level"] = maximum_level
         self.curriculum.pull_to_grasp.params["current_level_fraction"] = 1.0
+        self.curriculum.pull_to_grasp.params["current_level_fraction_schedule"] = (1.0,)
+        self.curriculum.pull_to_grasp.params["terminal_level_fraction"] = 1.0
+        self.curriculum.pull_to_grasp.params["terminal_level_fraction_schedule"] = (1.0,)
