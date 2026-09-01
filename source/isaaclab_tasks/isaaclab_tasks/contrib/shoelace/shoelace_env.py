@@ -57,8 +57,7 @@ LACE_MU = 0.7
 SHOE_MU = 0.2
 GROUND_MU = 0.8
 COLLISION_GROUP = 1
-# Half-open segment ranges remapped from the demo's seam-local collision bands.
-PINNED_CONTACT_RANGES = ((98, 106), (254, 263))
+PINNED_TUBE_SIDES = 6
 
 
 def _resolve_asset_dir() -> Path:
@@ -164,9 +163,8 @@ def _tube_mesh(centerline: np.ndarray, radius: float, sides: int = 8) -> newton.
 
 
 def _pinned_shoelace_spawner(centerline: np.ndarray, cable_radius: float) -> sim_utils.SpawnerCfg:
-    """Build a cloned spawner for the fixed pinned span and its local collision bands."""
+    """Build a cloned spawner for the fixed pinned span as one visible collision mesh."""
     pinned_centerline = centerline[PINNED_FIRST + 1 : PINNED_LAST + 1]
-    pinned_collision_centerlines = tuple(centerline[lower : upper + 1] for lower, upper in PINNED_CONTACT_RANGES)
 
     @sim_utils.clone
     def spawn_pinned_shoelace(
@@ -178,29 +176,20 @@ def _pinned_shoelace_spawner(centerline: np.ndarray, cable_radius: float) -> sim
     ) -> Usd.Prim:
         del kwargs
         root = sim_utils.create_prim(prim_path, "Xform", translation=translation, orientation=orientation)
-        stage = sim_utils.get_current_stage()
-
-        def define_tube(path: str, points: np.ndarray) -> UsdGeom.Mesh:
-            tube = _tube_mesh(points, cable_radius)
-            mesh = UsdGeom.Mesh.Define(stage, path)
-            mesh.CreatePointsAttr([Gf.Vec3f(*map(float, point)) for point in tube.vertices])
-            mesh.CreateFaceVertexCountsAttr([3] * (len(tube.indices) // 3))
-            mesh.CreateFaceVertexIndicesAttr(tube.indices.tolist())
-            mesh.CreateNormalsAttr([Gf.Vec3f(*map(float, normal)) for normal in tube.normals])
-            mesh.SetNormalsInterpolation(UsdGeom.Tokens.vertex)
-            mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
-            return mesh
-
-        visual_mesh = define_tube(f"{prim_path}/geometry/mesh", pinned_centerline)
-        visual_mesh.CreateDisplayColorAttr([Gf.Vec3f(112.0 / 255.0, 65.0 / 255.0, 39.0 / 255.0)])
-        for side, points in zip(("left", "right"), pinned_collision_centerlines, strict=True):
-            mesh = define_tube(f"{prim_path}/geometry/collision_{side}", points)
-            collision_prim = mesh.GetPrim()
-            if not sim_utils.apply_collision_properties(
-                str(collision_prim.GetPath()), [sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)]
-            ):
-                raise RuntimeError(f"Failed to enable pinned collision mesh at {collision_prim.GetPath()}")
-            sim_utils.set_prim_visibility(collision_prim, False)
+        tube = _tube_mesh(pinned_centerline, cable_radius, sides=PINNED_TUBE_SIDES)
+        mesh = UsdGeom.Mesh.Define(sim_utils.get_current_stage(), f"{prim_path}/geometry/mesh")
+        mesh.CreatePointsAttr([Gf.Vec3f(*map(float, point)) for point in tube.vertices])
+        mesh.CreateFaceVertexCountsAttr([3] * (len(tube.indices) // 3))
+        mesh.CreateFaceVertexIndicesAttr(tube.indices.tolist())
+        mesh.CreateNormalsAttr([Gf.Vec3f(*map(float, normal)) for normal in tube.normals])
+        mesh.SetNormalsInterpolation(UsdGeom.Tokens.vertex)
+        mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
+        mesh.CreateDisplayColorAttr([Gf.Vec3f(112.0 / 255.0, 65.0 / 255.0, 39.0 / 255.0)])
+        collision_prim = mesh.GetPrim()
+        if not sim_utils.apply_collision_properties(
+            str(collision_prim.GetPath()), [sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)]
+        ):
+            raise RuntimeError(f"Failed to enable pinned collision mesh at {collision_prim.GetPath()}")
         return root
 
     return sim_utils.SpawnerCfg(func=spawn_pinned_shoelace)
@@ -416,27 +405,20 @@ class _ShoelacePhysics:
         ) = _resolve_grasp_assist_bodies(builder, self.cable_bodies, self.num_envs)
         body_by_label = self._index_unique_labels(builder.body_label)
         shape_by_label = self._index_unique_labels(builder.shape_label)
-        shoe_parts: list[tuple[int, int, int, int]] = []
+        shoe_parts: list[tuple[int, int, int]] = []
         for world in range(self.num_envs):
             root = f"/World/envs/env_{world}/Shoe"
             shoe_body = self._label_index(body_by_label, root)
             shoe_collider = self._label_index(shape_by_label, f"{root}/Collider")
             tongue_collider = self._label_index(shape_by_label, f"{root}/TongueUpper/geometry/mesh")
-            pinned_root = f"/World/envs/env_{world}/ShoelacePinnedVisual/geometry"
-            pinned_visual = shape_by_label.get(f"{pinned_root}/mesh")
-            pinned_colliders = tuple(
-                self._label_index(shape_by_label, f"{pinned_root}/collision_{side}") for side in ("left", "right")
-            )
-            pinned_shapes = pinned_colliders if pinned_visual is None else (pinned_visual, *pinned_colliders)
-            if any(builder.shape_world[shape] != world for shape in pinned_shapes):
-                raise RuntimeError(f"Pinned meshes are not local to Newton world {world}")
-            shoe_parts.append((shoe_collider, tongue_collider, *pinned_colliders))
+            pinned_shape = self._label_index(shape_by_label, f"/World/envs/env_{world}/ShoelacePinned/geometry/mesh")
+            if builder.shape_world[pinned_shape] != world:
+                raise RuntimeError(f"Pinned mesh is not local to Newton world {world}")
+            shoe_parts.append((shoe_collider, tongue_collider, pinned_shape))
             builder.body_mass[shoe_body] = 0.0
             builder.body_inv_mass[shoe_body] = 0.0
             builder.body_inertia[shoe_body] = wp.mat33()
             builder.body_inv_inertia[shoe_body] = wp.mat33()
-            if pinned_visual is not None:
-                builder.shape_flags[pinned_visual] = newton.ShapeFlags.VISIBLE
             for shape in (shoe_collider, tongue_collider):
                 builder.shape_flags[shape] = newton.ShapeFlags.COLLIDE_SHAPES
                 builder.shape_collision_group[shape] = COLLISION_GROUP
@@ -444,13 +426,12 @@ class _ShoelacePhysics:
                 builder.shape_material_kd[shape] = CONTACT_KD
                 builder.shape_material_mu[shape] = SHOE_MU
                 builder.shape_gap[shape] = CONTACT_GAP
-            for shape in pinned_colliders:
-                builder.shape_flags[shape] = newton.ShapeFlags.COLLIDE_SHAPES
-                builder.shape_collision_group[shape] = COLLISION_GROUP
-                builder.shape_material_ke[shape] = CONTACT_KE
-                builder.shape_material_kd[shape] = CONTACT_KD
-                builder.shape_material_mu[shape] = LACE_MU
-                builder.shape_gap[shape] = CONTACT_GAP
+            builder.shape_flags[pinned_shape] = newton.ShapeFlags.VISIBLE | newton.ShapeFlags.COLLIDE_SHAPES
+            builder.shape_collision_group[pinned_shape] = COLLISION_GROUP
+            builder.shape_material_ke[pinned_shape] = CONTACT_KE
+            builder.shape_material_kd[pinned_shape] = CONTACT_KD
+            builder.shape_material_mu[pinned_shape] = LACE_MU
+            builder.shape_gap[pinned_shape] = CONTACT_GAP
 
         ground_shapes = [index for index, label in enumerate(builder.shape_label) if label.startswith("/World/Ground/")]
         for shape in ground_shapes:
@@ -467,7 +448,7 @@ class _ShoelacePhysics:
         for world, (world_bodies, world_joints, shoe) in enumerate(
             zip(body_chains, joint_chains, shoe_parts, strict=True)
         ):
-            shoe_collider, tongue_collider, pinned_left, pinned_right = shoe
+            shoe_collider, tongue_collider, pinned_shape = shoe
             chain_shapes: list[list[int]] = []
             for bodies, joints, segment_indices in zip(world_bodies, world_joints, segment_ranges, strict=True):
                 shapes: list[int] = []
@@ -518,15 +499,12 @@ class _ShoelacePhysics:
                 for shoe_shape in (shoe_collider, tongue_collider):
                     builder.add_shape_collision_filter_pair(shape, shoe_shape)
 
-            for collision_shape in (pinned_left, pinned_right):
-                for static_shape in (shoe_collider, tongue_collider):
-                    builder.add_shape_collision_filter_pair(collision_shape, static_shape)
-            builder.add_shape_collision_filter_pair(pinned_left, pinned_right)
+            for static_shape in (shoe_collider, tongue_collider):
+                builder.add_shape_collision_filter_pair(pinned_shape, static_shape)
 
-            seam_shapes = (chain_shapes[0][-neighbor_window:], chain_shapes[1][:neighbor_window])
-            for collision_shape, neighbors in zip((pinned_left, pinned_right), seam_shapes, strict=True):
-                for shape in neighbors:
-                    builder.add_shape_collision_filter_pair(shape, collision_shape)
+            seam_shapes = (*chain_shapes[0][-neighbor_window:], *chain_shapes[1][:neighbor_window])
+            for shape in seam_shapes:
+                builder.add_shape_collision_filter_pair(shape, pinned_shape)
 
     def _configure_model(self, _: object) -> None:
         """Configure cable hysteresis and compliant grasp transport before solver construction."""
