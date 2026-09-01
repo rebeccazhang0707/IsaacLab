@@ -184,5 +184,5 @@ def potential(
     return (
         2.0 * throat_clearance
         + (tail_separation / tail_success_separation).clamp(max=2.0)
-        + 0.5 * (tail_distances.mean(dim=1) / tail_success_distance).clamp(max=2.0)
+        + 0.5 * (tail_distances.amin(dim=1) / tail_success_distance).clamp(max=2.0)
     )

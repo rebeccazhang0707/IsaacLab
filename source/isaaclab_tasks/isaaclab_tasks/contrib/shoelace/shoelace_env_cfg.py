@@ -22,6 +22,7 @@ from isaaclab.assets import ArticulationCfg, AssetBaseCfg, CableObjectCfg
 from isaaclab.controllers import DifferentialIKControllerCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs.mdp.actions import DifferentialInverseKinematicsActionCfg
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -40,6 +41,8 @@ import isaaclab_tasks.contrib.shoelace.mdp as mdp
 
 from isaaclab_assets.robots.franka import FRANKA_PANDA_MENAGERIE_CFG
 
+from .mdp.constants import TCP_OFFSET
+
 _THROAT_RADIUS = 0.025
 _MAXIMUM_THROAT_SEGMENTS = 52
 _TAIL_SUCCESS_DISTANCE = 0.09
@@ -48,7 +51,7 @@ _MAXIMUM_SUCCESS_GRASP_DISTANCE = 0.03
 _GRASP_ACQUISITION_DISTANCE = 0.02
 _MAXIMUM_GRASP_DISTANCE = 0.07
 _GRIPPER_OPEN_POSITION = 0.04
-_GRIPPER_CLOSED_POSITION = 0.0015
+_GRIPPER_CLOSED_POSITION = 0.0035
 _GRIPPER_CLOSED_THRESHOLD = 0.02
 _TARGET_PULL_SPEED = 0.04
 _MINIMUM_LACE_HEIGHT = -0.003
@@ -56,15 +59,34 @@ _MAXIMUM_LACE_SPREAD = 0.6
 
 _LEFT_ROBOT_POSITION = (-0.525248, 0.023338, -0.089901)
 _RIGHT_ROBOT_POSITION = (0.507963, -0.001890, -0.088518)
-_FRANKA_ARM_JOINT_POSITIONS = {
-    "panda_joint1": 0.0444,
-    "panda_joint2": -0.1894,
-    "panda_joint3": -0.1107,
-    "panda_joint4": -2.5148,
-    "panda_joint5": 0.0044,
-    "panda_joint6": 2.3775,
-    "panda_joint7": 0.6952,
+_LEFT_FRANKA_ARM_JOINT_POSITIONS = {
+    "panda_joint1": 0.267436,
+    "panda_joint2": -0.276844,
+    "panda_joint3": -0.509809,
+    "panda_joint4": -2.681384,
+    "panda_joint5": 0.871062,
+    "panda_joint6": 2.543250,
+    "panda_joint7": -0.079776,
 }
+_RIGHT_FRANKA_ARM_JOINT_POSITIONS = {
+    "panda_joint1": -0.379171,
+    "panda_joint2": -0.306599,
+    "panda_joint3": 0.461994,
+    "panda_joint4": -2.726323,
+    "panda_joint5": -0.930591,
+    "panda_joint6": 2.645580,
+    "panda_joint7": 1.577059,
+}
+_LEFT_FRANKA_GRASP_JOINT_POSITIONS = (0.306502, -0.108321, -0.457832, -2.629056, 1.130974, 2.579587, -0.254864)
+_RIGHT_FRANKA_GRASP_JOINT_POSITIONS = (
+    -0.405931,
+    -0.120616,
+    0.399613,
+    -2.651660,
+    -1.227738,
+    2.667932,
+    1.787070,
+)
 
 
 def _rigid_material(friction: float, damping: float) -> list:
@@ -83,12 +105,13 @@ def _franka_cfg(
     prim_path: str,
     position: tuple[float, float, float],
     rotation: tuple[float, float, float, float],
+    arm_joint_positions: dict[str, float],
 ) -> ArticulationCfg:
     """Build one fixed-base Franka initialized above a free shoelace tail."""
     robot = FRANKA_PANDA_MENAGERIE_CFG.replace(prim_path=prim_path)
     robot.init_state.pos = position
     robot.init_state.rot = rotation
-    robot.init_state.joint_pos.update(_FRANKA_ARM_JOINT_POSITIONS)
+    robot.init_state.joint_pos.update(arm_joint_positions)
     robot.init_state.joint_pos["panda_finger_joint.*"] = _GRIPPER_OPEN_POSITION
     robot.spawn.rigid_props.disable_gravity = True
     robot.actuators = {
@@ -149,7 +172,7 @@ def _arm_action(asset_name: str) -> DifferentialInverseKinematicsActionCfg:
             ik_params={"lambda_val": 0.01},
         ),
         scale=(0.005, 0.005, 0.005, 0.01, 0.01, 0.01),
-        body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=(0.0, 0.0, 0.107)),
+        body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=TCP_OFFSET),
     )
 
 
@@ -182,11 +205,13 @@ class ShoelaceSceneCfg(InteractiveSceneCfg):
         "{ENV_REGEX_NS}/RobotLeft",
         _LEFT_ROBOT_POSITION,
         (0.0, 0.0, 0.0, 1.0),
+        _LEFT_FRANKA_ARM_JOINT_POSITIONS,
     )
     robot_right = _franka_cfg(
         "{ENV_REGEX_NS}/RobotRight",
         _RIGHT_ROBOT_POSITION,
         (0.0, 0.0, 1.0, 0.0),
+        _RIGHT_FRANKA_ARM_JOINT_POSITIONS,
     )
     shoe = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Shoe",
@@ -341,7 +366,7 @@ class ObservationsCfg:
 
 @configclass
 class EventCfg:
-    """Reset both open grippers above the authored shoelace tails."""
+    """Restore the authored shoelace and apply staged robot start poses."""
 
     reset_left_robot = EventTerm(
         func=mdp.reset_joints_by_scale,
@@ -362,9 +387,43 @@ class EventCfg:
         },
     )
     reset_shoelace = EventTerm(
-        func=mdp.reset_shoelace_state,
+        func=mdp.ResetShoelaceCurriculum,
         mode="reset",
-        params={"asset_cfgs": _SHOELACE_ASSET_CFGS},
+        params={
+            "difficulty_term_name": "pull_to_grasp",
+            "asset_cfgs": _SHOELACE_ASSET_CFGS,
+            "arm_cfgs": (
+                SceneEntityCfg("robot_left", joint_names=["panda_joint[1-7]"]),
+                SceneEntityCfg("robot_right", joint_names=["panda_joint[1-7]"]),
+            ),
+            "gripper_cfgs": (
+                SceneEntityCfg("robot_left", joint_names=["panda_finger_joint.*"]),
+                SceneEntityCfg("robot_right", joint_names=["panda_finger_joint.*"]),
+            ),
+            "grasp_joint_positions": (
+                _LEFT_FRANKA_GRASP_JOINT_POSITIONS,
+                _RIGHT_FRANKA_GRASP_JOINT_POSITIONS,
+            ),
+            "open_position": _GRIPPER_OPEN_POSITION,
+            "closed_position": _GRIPPER_CLOSED_POSITION,
+        },
+    )
+
+
+@configclass
+class CurriculumCfg:
+    """Success-driven progression from pull-only to full shoelace untying."""
+
+    pull_to_grasp = CurrTerm(
+        func=mdp.PullToGraspCurriculum,
+        params={
+            "level_count": 6,
+            "success_term_name": "success",
+            "promotion_success_rate": 0.7,
+            "minimum_episodes": 128,
+            "current_level_fraction": 0.8,
+            "initial_level": 0,
+        },
     )
 
 
@@ -404,14 +463,20 @@ class RewardsCfg:
     )
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
     left_joint_velocity = RewTerm(
-        func=mdp.joint_vel_l2,
+        func=mdp.finite_joint_vel_l2,
         weight=-1.0e-4,
-        params={"asset_cfg": SceneEntityCfg("robot_left", joint_names=["panda_joint.*"])},
+        params={
+            "asset_cfg": SceneEntityCfg("robot_left", joint_names=["panda_joint.*"]),
+            "maximum_penalty": 100.0,
+        },
     )
     right_joint_velocity = RewTerm(
-        func=mdp.joint_vel_l2,
+        func=mdp.finite_joint_vel_l2,
         weight=-1.0e-4,
-        params={"asset_cfg": SceneEntityCfg("robot_right", joint_names=["panda_joint.*"])},
+        params={
+            "asset_cfg": SceneEntityCfg("robot_right", joint_names=["panda_joint.*"]),
+            "maximum_penalty": 100.0,
+        },
     )
 
 
@@ -436,7 +501,7 @@ class TerminationsCfg:
     unsafe = DoneTerm(
         func=mdp.shoelace_unsafe,
         params={
-            "asset_cfgs": _SHOELACE_ASSET_CFGS,
+            **_ROBOT_TERM_PARAMS,
             "minimum_lace_height": _MINIMUM_LACE_HEIGHT,
             "maximum_lace_spread": _MAXIMUM_LACE_SPREAD,
         },
@@ -458,7 +523,7 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for two Frankas untying an authored shoelace knot."""
 
     decimation = 4
-    episode_length_s = 10.0
+    episode_length_s = 20.0
     sim: SimulationCfg = SimulationCfg(
         dt=1.0 / 120.0,
         render_interval=decimation,
@@ -521,14 +586,28 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     events: EventCfg = EventCfg()
+    curriculum: CurriculumCfg = CurriculumCfg()
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
 
     contacts_per_env = 512
     triangle_pairs_per_env = 8192
+    grasp_assist_acquisition_distance = _GRASP_ACQUISITION_DISTANCE
+    grasp_assist_release_distance = 0.2
+    grasp_assist_acquisition_closed_separation = 0.02
+    grasp_assist_release_open_separation = 0.06
+    grasp_assist_stiffness = 20.0
+    grasp_assist_damping = 0.04
+    grasp_assist_maximum_force = 2.0
 
     def __post_init__(self) -> None:
         self.sim.default_visualizer_cfg = VisualizerCfg(
             eye=(0.85, -0.85, 0.55),
             lookat=(0.0, 0.0, 0.08),
         )
+
+    def play_mode(self) -> None:
+        """Evaluate the complete authored approach-and-grasp task."""
+        maximum_level = self.curriculum.pull_to_grasp.params["level_count"] - 1
+        self.curriculum.pull_to_grasp.params["initial_level"] = maximum_level
+        self.curriculum.pull_to_grasp.params["current_level_fraction"] = 1.0

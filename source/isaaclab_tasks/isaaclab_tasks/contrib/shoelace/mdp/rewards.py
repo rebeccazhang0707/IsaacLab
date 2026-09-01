@@ -25,19 +25,282 @@ from .utils import (
 )
 
 if TYPE_CHECKING:
+    from isaaclab.assets import Articulation
     from isaaclab.envs import ManagerBasedRLEnv
 
 
+class grasp_acquisition_event(ManagerTermBase):
+    """Reward each strict per-tail grasp once per episode."""
+
+    def __init__(self, cfg, env) -> None:
+        super().__init__(cfg, env)
+        self._acquired = torch.zeros((env.num_envs, 2), dtype=torch.bool, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        selected = slice(None) if env_ids is None else env_ids
+        self._acquired[selected] = False
+
+    def __call__(
+        self,
+        env,
+        maximum_grasp_distance: float,
+        maximum_finger_position: float,
+        side_weights: tuple[float, float],
+        asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
+        left_robot_cfg: SceneEntityCfg,
+        right_robot_cfg: SceneEntityCfg,
+    ) -> torch.Tensor:
+        """Return the weighted rate of first-time strict tail acquisitions.
+
+        Args:
+            env: The task environment.
+            maximum_grasp_distance: Maximum tail-to-TCP acquisition distance [m].
+            maximum_finger_position: Maximum driven finger-joint position for acquisition [m].
+            side_weights: Relative acquisition weights for the left and right robots.
+            asset_cfgs: Scene entities for the left and right cable chains.
+            left_robot_cfg: Left robot hand and finger scene entity.
+            right_robot_cfg: Right robot hand and finger scene entity.
+
+        Returns:
+            Per-environment weighted acquisition-event rate.
+        """
+        grasped = grasp_state(
+            env,
+            maximum_grasp_distance,
+            maximum_finger_position,
+            asset_cfgs,
+            left_robot_cfg,
+            right_robot_cfg,
+        )
+        newly_acquired = grasped & (~self._acquired)
+        self._acquired |= grasped
+        weights = newly_acquired.new_tensor(side_weights, dtype=torch.float)
+        return (
+            torch.sum(newly_acquired.float() * weights, dim=1)
+            / max(sum(side_weights), 1.0e-6)
+            / max(env.step_dt, 1.0e-6)
+        )
+
+
+def second_tail_coordination(
+    env: ManagerBasedRLEnv,
+    reach_std: float,
+    grasp_std: float,
+    open_position: float,
+    closed_position: float,
+    asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
+    left_robot_cfg: SceneEntityCfg,
+    right_robot_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Reward approaching either tail while the other tail remains acquired.
+
+    Args:
+        env: The task environment.
+        reach_std: Approach-distance tanh width [m].
+        grasp_std: Grasp-proximity tanh width [m].
+        open_position: Driven finger-joint position when open [m].
+        closed_position: Driven finger-joint position when closed [m].
+        asset_cfgs: Scene entities for the left and right cable chains.
+        left_robot_cfg: Left robot hand and finger scene entity.
+        right_robot_cfg: Right robot hand and finger scene entity.
+
+    Returns:
+        Per-environment coordination score in the interval ``[0, 1]``.
+    """
+    distances = grasp_distances(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
+    closure = gripper_closed_fraction(
+        env,
+        open_position,
+        closed_position,
+        left_robot_cfg,
+        right_robot_cfg,
+    )
+    reach = 1.0 - torch.tanh(distances / max(reach_std, 1.0e-6))
+    grasp_proximity = 1.0 - torch.tanh(distances / max(grasp_std, 1.0e-6))
+    acquisition = _hamacher_product(grasp_proximity, closure)
+    cross_tail_scores = torch.stack(
+        (
+            _hamacher_product(reach[:, 0], acquisition[:, 1]),
+            _hamacher_product(reach[:, 1], acquisition[:, 0]),
+        ),
+        dim=1,
+    )
+    score = cross_tail_scores.amax(dim=1)
+    finite = torch.isfinite(distances).all(dim=1) & torch.isfinite(closure).all(dim=1)
+    return torch.where(finite, score, torch.zeros_like(score))
+
+
+class second_tail_approach_progress(ManagerTermBase):
+    """Reward approaching the remaining tail after one strict acquisition."""
+
+    def __init__(self, cfg, env) -> None:
+        super().__init__(cfg, env)
+        self._previous_distances = torch.full((env.num_envs, 2), torch.nan, device=env.device)
+        self._acquired = torch.zeros((env.num_envs, 2), dtype=torch.bool, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        selected = slice(None) if env_ids is None else env_ids
+        self._previous_distances[selected] = torch.nan
+        self._acquired[selected] = False
+
+    def __call__(
+        self,
+        env,
+        std: float,
+        maximum_grasp_distance: float,
+        maximum_finger_position: float,
+        open_position: float,
+        closed_position: float,
+        asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
+        left_robot_cfg: SceneEntityCfg,
+        right_robot_cfg: SceneEntityCfg,
+    ) -> torch.Tensor:
+        """Return normalized progress toward the unacquired tail.
+
+        Args:
+            env: The task environment.
+            std: Distance-improvement normalization width [m].
+            maximum_grasp_distance: Maximum tail-to-TCP acquisition distance [m].
+            maximum_finger_position: Maximum driven finger-joint position for acquisition [m].
+            open_position: Driven finger-joint position when open [m].
+            closed_position: Driven finger-joint position when closed [m].
+            asset_cfgs: Scene entities for the left and right cable chains.
+            left_robot_cfg: Left robot hand and finger scene entity.
+            right_robot_cfg: Right robot hand and finger scene entity.
+
+        Returns:
+            Per-environment progress toward the remaining tail after exactly one acquisition.
+        """
+        distances = grasp_distances(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
+        open_fraction = 1.0 - gripper_closed_fraction(
+            env,
+            open_position,
+            closed_position,
+            left_robot_cfg,
+            right_robot_cfg,
+        )
+        grasped = grasp_state(
+            env,
+            maximum_grasp_distance,
+            maximum_finger_position,
+            asset_cfgs,
+            left_robot_cfg,
+            right_robot_cfg,
+        )
+        self._acquired |= grasped
+
+        finite = torch.isfinite(distances) & torch.isfinite(open_fraction)
+        seeded = torch.isfinite(self._previous_distances)
+        progress = torch.where(
+            finite & seeded,
+            self._previous_distances - distances,
+            torch.zeros_like(distances),
+        )
+        self._previous_distances.copy_(torch.where(torch.isfinite(distances), distances, self._previous_distances))
+        remaining_tail = torch.stack(
+            (
+                self._acquired[:, 1] & (~self._acquired[:, 0]),
+                self._acquired[:, 0] & (~self._acquired[:, 1]),
+            ),
+            dim=1,
+        )
+        normalized_progress = progress / max(std, 1.0e-6) * open_fraction
+        return torch.sum(torch.where(finite & remaining_tail, normalized_progress, 0.0), dim=1)
+
+
+class remaining_tail_grasping(ManagerTermBase):
+    """Reward closing and retaining every gripper after its strict tail acquisition."""
+
+    def __init__(self, cfg, env) -> None:
+        super().__init__(cfg, env)
+        self._acquired = torch.zeros((env.num_envs, 2), dtype=torch.bool, device=env.device)
+        self._ready = torch.zeros((env.num_envs, 2), dtype=torch.bool, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        selected = slice(None) if env_ids is None else env_ids
+        self._acquired[selected] = False
+        self._ready[selected] = False
+
+    def __call__(
+        self,
+        env,
+        std: float,
+        maximum_grasp_distance: float,
+        maximum_finger_position: float,
+        open_position: float,
+        closed_position: float,
+        command_temperature: float,
+        command_weight: float,
+        gripper_action_names: tuple[str, str],
+        asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
+        left_robot_cfg: SceneEntityCfg,
+        right_robot_cfg: SceneEntityCfg,
+    ) -> torch.Tensor:
+        """Return normalized close-command retention for acquired grippers.
+
+        Args:
+            env: The task environment.
+            std: Grasp-proximity exponential width [m].
+            maximum_grasp_distance: Maximum tail-to-TCP acquisition distance [m].
+            maximum_finger_position: Maximum driven finger-joint position for acquisition [m].
+            open_position: Driven finger-joint position when open [m].
+            closed_position: Driven finger-joint position when closed [m].
+            command_temperature: Binary-action margin scale used for smooth closure shaping.
+            command_weight: Relative weight of the current close-command margin in the grasp score.
+            gripper_action_names: Names of the left and right gripper action terms.
+            asset_cfgs: Scene entities for the left and right cable chains.
+            left_robot_cfg: Left robot hand and finger scene entity.
+            right_robot_cfg: Right robot hand and finger scene entity.
+
+        Returns:
+            Per-environment acquired-gripper retention score in the interval ``[0, 1]``.
+        """
+        distances = grasp_distances(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
+        closure = gripper_closed_fraction(
+            env,
+            open_position,
+            closed_position,
+            left_robot_cfg,
+            right_robot_cfg,
+        )
+        raw_actions = torch.cat(
+            tuple(env.action_manager.get_term(name).raw_actions for name in gripper_action_names),
+            dim=1,
+        )
+        command_closure = torch.sigmoid(-raw_actions / max(command_temperature, 1.0e-6))
+        grasped = grasp_state(
+            env,
+            maximum_grasp_distance,
+            maximum_finger_position,
+            asset_cfgs,
+            left_robot_cfg,
+            right_robot_cfg,
+        )
+        self._acquired |= grasped
+        finite = torch.isfinite(distances) & torch.isfinite(closure) & torch.isfinite(command_closure)
+        self._ready |= finite & grasped
+        proximity = torch.exp(-torch.square(distances / max(std, 1.0e-6)))
+        retained_proximity = torch.maximum(proximity, grasped.float())
+        bounded_command_weight = min(max(command_weight, 0.0), 1.0)
+        grasp_score = (1.0 - bounded_command_weight) * closure + bounded_command_weight * command_closure
+        per_gripper_score = torch.where(finite & self._ready, retained_proximity * grasp_score, 0.0)
+        ready_count = self._ready.sum(dim=1).clamp_min(1)
+        score = torch.sum(per_gripper_score, dim=1) / ready_count
+        return torch.where(finite.all(dim=1), score, torch.zeros_like(score))
+
+
 class untying_progress(ManagerTermBase):
-    """Reward increases in two-tail separation and knot-throat clearance."""
+    """Reward the rate of net two-tail separation and knot-throat clearance after acquisition."""
 
     def __init__(self, cfg, env) -> None:
         super().__init__(cfg, env)
         self._previous_potential = torch.full((env.num_envs,), torch.nan, device=env.device)
+        self._acquired = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         selected = slice(None) if env_ids is None else env_ids
         self._previous_potential[selected] = torch.nan
+        self._acquired[selected] = False
 
     def __call__(
         self,
@@ -47,11 +310,12 @@ class untying_progress(ManagerTermBase):
         tail_success_separation: float,
         maximum_grasp_distance: float,
         maximum_finger_position: float,
+        maximum_progress_rate: float,
         asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
         left_robot_cfg: SceneEntityCfg,
         right_robot_cfg: SceneEntityCfg,
     ) -> torch.Tensor:
-        """Return untying-potential improvement while both tails are grasped."""
+        """Return finite untying-potential improvement per second while both tails are grasped."""
         positions, _, knot, tail_positions, _ = task_state(env, asset_cfgs)
         current = potential(
             positions,
@@ -61,9 +325,10 @@ class untying_progress(ManagerTermBase):
             tail_success_distance,
             tail_success_separation,
         )
-        unseeded = torch.isnan(self._previous_potential)
-        progress = torch.where(unseeded, torch.zeros_like(current), current - self._previous_potential)
-        self._previous_potential.copy_(current)
+        finite = torch.isfinite(current)
+        unseeded = ~torch.isfinite(self._previous_potential)
+        progress = torch.where(finite & (~unseeded), current - self._previous_potential, torch.zeros_like(current))
+        self._previous_potential.copy_(torch.where(finite, current, self._previous_potential))
         both_grasped = grasp_state(
             env,
             maximum_grasp_distance,
@@ -72,7 +337,57 @@ class untying_progress(ManagerTermBase):
             left_robot_cfg,
             right_robot_cfg,
         ).all(dim=1)
-        return progress * both_grasped
+        self._acquired |= finite & both_grasped
+        progress_rate = progress / max(env.step_dt, 1.0e-6)
+        bounded_maximum_rate = max(maximum_progress_rate, 0.0)
+        progress_rate = progress_rate.clamp(min=-bounded_maximum_rate, max=bounded_maximum_rate)
+        return progress_rate * self._acquired
+
+
+class acquired_grasp_retention(ManagerTermBase):
+    """Reward retaining each strict grasp after its acquisition event."""
+
+    def __init__(self, cfg, env) -> None:
+        super().__init__(cfg, env)
+        self._acquired = torch.zeros((env.num_envs, 2), dtype=torch.bool, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        selected = slice(None) if env_ids is None else env_ids
+        self._acquired[selected] = False
+
+    def __call__(
+        self,
+        env,
+        maximum_grasp_distance: float,
+        maximum_finger_position: float,
+        asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
+        left_robot_cfg: SceneEntityCfg,
+        right_robot_cfg: SceneEntityCfg,
+    ) -> torch.Tensor:
+        """Return the fraction of previously acquired tails that remain strictly grasped.
+
+        Args:
+            env: The task environment.
+            maximum_grasp_distance: Maximum tail-to-TCP grasp distance [m].
+            maximum_finger_position: Maximum driven finger-joint position for grasping [m].
+            asset_cfgs: Scene entities for the left and right cable chains.
+            left_robot_cfg: Left robot hand and finger scene entity.
+            right_robot_cfg: Right robot hand and finger scene entity.
+
+        Returns:
+            Per-environment retained-grasp fraction in the interval ``[0, 1]``.
+        """
+        grasped = grasp_state(
+            env,
+            maximum_grasp_distance,
+            maximum_finger_position,
+            asset_cfgs,
+            left_robot_cfg,
+            right_robot_cfg,
+        )
+        retention = (grasped & self._acquired).float().mean(dim=1)
+        self._acquired |= grasped
+        return retention
 
 
 class tail_approach_progress(ManagerTermBase):
@@ -95,12 +410,10 @@ class tail_approach_progress(ManagerTermBase):
         asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
         left_robot_cfg: SceneEntityCfg,
         right_robot_cfg: SceneEntityCfg,
+        side_weights: tuple[float, float] = (1.0, 1.0),
     ) -> torch.Tensor:
-        """Return normalized tail-distance improvement for open grippers."""
+        """Return weighted, normalized tail-distance improvement for open grippers."""
         distances = grasp_distances(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
-        unseeded = torch.isnan(self._previous_distances)
-        progress = torch.where(unseeded, torch.zeros_like(distances), self._previous_distances - distances)
-        self._previous_distances.copy_(distances)
         open_fraction = 1.0 - gripper_closed_fraction(
             env,
             open_position,
@@ -108,7 +421,89 @@ class tail_approach_progress(ManagerTermBase):
             left_robot_cfg,
             right_robot_cfg,
         )
-        return (progress / std * open_fraction).mean(dim=1)
+        finite = torch.isfinite(distances) & torch.isfinite(open_fraction)
+        unseeded = ~torch.isfinite(self._previous_distances)
+        progress = torch.where(
+            finite & (~unseeded),
+            self._previous_distances - distances,
+            torch.zeros_like(distances),
+        )
+        self._previous_distances.copy_(torch.where(torch.isfinite(distances), distances, self._previous_distances))
+        normalized_progress = torch.where(
+            finite,
+            progress / max(std, 1.0e-6) * open_fraction,
+            torch.zeros_like(progress),
+        )
+        weights = normalized_progress.new_tensor(side_weights)
+        return torch.sum(normalized_progress * weights, dim=1) / max(sum(side_weights), 1.0e-6)
+
+
+class premature_close_event(ManagerTermBase):
+    """Penalize closing motion away from a tail before its first acquisition."""
+
+    def __init__(self, cfg, env) -> None:
+        super().__init__(cfg, env)
+        self._previous_closure = torch.full((env.num_envs, 2), torch.nan, device=env.device)
+        self._acquired = torch.zeros((env.num_envs, 2), dtype=torch.bool, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        selected = slice(None) if env_ids is None else env_ids
+        self._previous_closure[selected] = torch.nan
+        self._acquired[selected] = False
+
+    def __call__(
+        self,
+        env,
+        acquisition_distance: float,
+        maximum_finger_position: float,
+        open_position: float,
+        closed_position: float,
+        asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
+        left_robot_cfg: SceneEntityCfg,
+        right_robot_cfg: SceneEntityCfg,
+    ) -> torch.Tensor:
+        """Return closure increments made away from a tail before acquisition.
+
+        Args:
+            env: The task environment.
+            acquisition_distance: Maximum tail-to-TCP acquisition distance [m].
+            maximum_finger_position: Maximum driven finger-joint position for acquisition [m].
+            open_position: Driven finger-joint position when open [m].
+            closed_position: Driven finger-joint position when closed [m].
+            asset_cfgs: Scene entities for the left and right cable chains.
+            left_robot_cfg: Left robot hand and finger scene entity.
+            right_robot_cfg: Right robot hand and finger scene entity.
+
+        Returns:
+            Per-environment premature closure increment averaged over both grippers.
+        """
+        distances = grasp_distances(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
+        closure = gripper_closed_fraction(
+            env,
+            open_position,
+            closed_position,
+            left_robot_cfg,
+            right_robot_cfg,
+        )
+        self._acquired |= grasp_state(
+            env,
+            acquisition_distance,
+            maximum_finger_position,
+            asset_cfgs,
+            left_robot_cfg,
+            right_robot_cfg,
+        )
+        unseeded = torch.isnan(self._previous_closure)
+        closing = torch.where(
+            unseeded,
+            torch.zeros_like(closure),
+            (closure - self._previous_closure).clamp(min=0.0),
+        )
+        self._previous_closure.copy_(closure)
+        excess_distance = (distances / max(acquisition_distance, 1.0e-6) - 1.0).clamp(0.0, 1.0)
+        penalty = (closing * excess_distance * (~self._acquired)).mean(dim=1)
+        finite = torch.isfinite(distances).all(dim=1) & torch.isfinite(closure).all(dim=1)
+        return torch.where(finite, penalty, torch.zeros_like(penalty))
 
 
 class termination_event_reward(is_terminated_term):
@@ -117,6 +512,30 @@ class termination_event_reward(is_terminated_term):
     def __call__(self, env: ManagerBasedRLEnv, term_keys: str | list[str] = ".*") -> torch.Tensor:
         """Return selected event counts divided by the environment step interval."""
         return super().__call__(env, term_keys) / env.step_dt
+
+
+def finite_joint_vel_l2(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    maximum_penalty: float = 100.0,
+) -> torch.Tensor:
+    """Penalize squared joint velocities without propagating terminal-state outliers.
+
+    Args:
+        env: The task environment.
+        asset_cfg: Articulation and joint selection to penalize.
+        maximum_penalty: Maximum per-step squared-velocity penalty.
+
+    Returns:
+        Bounded per-environment squared joint-velocity penalty.
+
+    The joint velocities use [m/s or rad/s, depending on joint type]. The penalty has units
+    [(m/s)^2 or (rad/s)^2, depending on joint type].
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    penalty = torch.sum(torch.square(asset.data.joint_vel.torch[:, asset_cfg.joint_ids]), dim=1)
+    bounded_penalty = penalty.clamp_max(max(maximum_penalty, 0.0))
+    return torch.where(torch.isfinite(penalty), bounded_penalty, torch.zeros_like(penalty))
 
 
 def shoelace_dense_reward(
@@ -178,12 +597,20 @@ def shoelace_dense_reward(
         left_robot_cfg,
         right_robot_cfg,
     )
+    finite = (
+        torch.isfinite(positions).all(dim=(1, 2))
+        & torch.isfinite(tail_positions).all(dim=(1, 2))
+        & torch.isfinite(tail_velocities).all(dim=(1, 2))
+        & torch.isfinite(tcp_positions).all(dim=(1, 2))
+        & torch.isfinite(closure).all(dim=1)
+    )
 
     reach = 1.0 - torch.tanh(distances / max(reach_std, 1.0e-6))
     grasp_proximity = 1.0 - torch.tanh(distances / max(grasp_std, 1.0e-6))
     acquisition = _hamacher_product(grasp_proximity, closure)
     approach_score = reach.mean(dim=1)
-    acquisition_score = _hamacher_product(reach, acquisition).mean(dim=1)
+    per_tail_acquisition = _hamacher_product(reach, acquisition)
+    acquisition_score = _hamacher_product(per_tail_acquisition[:, 0], per_tail_acquisition[:, 1])
     both_acquired = _hamacher_product(acquisition[:, 0], acquisition[:, 1])
 
     throat_count, tail_distances, tail_separation = untying_metrics(
@@ -204,14 +631,17 @@ def shoelace_dense_reward(
 
     projected_speed = torch.sum(tail_velocities * pull_directions(tail_velocities), dim=-1)
     positive_pull = torch.tanh(projected_speed / max(target_speed, 1.0e-6)).clamp(min=0.0)
-    pull_score = (positive_pull * acquisition).mean(dim=1)
+    per_tail_pull = positive_pull * acquisition
+    pull_score = _hamacher_product(per_tail_pull[:, 0], per_tail_pull[:, 1])
 
-    return (
+    reward = (
         approach_weight * approach_score
         + acquisition_weight * acquisition_score
         + task_weight * task_score
         + pull_weight * pull_score
     )
+    # Terminations are evaluated before rewards and resets, so invalid terminal state can reach this term once.
+    return torch.where(finite, reward, torch.zeros_like(reward))
 
 
 def tail_reaching(

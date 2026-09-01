@@ -28,9 +28,11 @@ from .mdp.constants import (
     PINNED_FIRST,
     PINNED_LAST,
     SHOELACE_SEGMENT_COUNT,
+    TCP_OFFSET,
 )
 
 if TYPE_CHECKING:
+    import torch
     from newton import ModelBuilder
 
     from .shoelace_env_cfg import ShoelaceEnvCfg
@@ -207,6 +209,110 @@ def _filter_rod_neighbors(builder: ModelBuilder, shapes: list[int], window: int)
             builder.add_shape_collision_filter_pair(first_shape, second_shape)
 
 
+def _resolve_grasp_assist_bodies(
+    builder: ModelBuilder,
+    cable_bodies: list[list[int]],
+    num_envs: int,
+) -> tuple[list[int], list[int], list[int]]:
+    """Resolve hand, finger, and three-segment tail body indices for each grasp."""
+    hand_ids: list[int] = []
+    finger_ids: list[int] = []
+    tail_ids: list[int] = []
+    for world, world_cable_bodies in enumerate(cable_bodies):
+        if len(world_cable_bodies) % 2 != 0:
+            raise RuntimeError(f"Expected two equal cable chains in Newton world {world}")
+        chain_length = len(world_cable_bodies) // 2
+        left_cable = world_cable_bodies[:chain_length]
+        right_cable = world_cable_bodies[chain_length:]
+        grasps = (("Left", right_cable[-3:]), ("Right", left_cable[:3]))
+        for robot_side, grasp_tail_ids in grasps:
+            root = f"/World/envs/env_{world}/Robot{robot_side}/"
+            robot_bodies = [
+                (body, str(label)) for body, label in enumerate(builder.body_label) if str(label).startswith(root)
+            ]
+            hand_matches = [body for body, label in robot_bodies if label.endswith("/panda_hand")]
+            finger_matches = [
+                [body for body, label in robot_bodies if label.endswith(f"/panda_{finger_side}finger")]
+                for finger_side in ("left", "right")
+            ]
+            if len(hand_matches) != 1 or any(len(matches) != 1 for matches in finger_matches):
+                raise RuntimeError(f"Unexpected grasp-assist robot topology below {root}")
+            hand_ids.append(hand_matches[0])
+            finger_ids.extend(matches[0] for matches in finger_matches)
+            if len(grasp_tail_ids) != 3:
+                raise RuntimeError(f"Expected three grasp-tail bodies in Newton world {world}")
+            tail_ids.extend(grasp_tail_ids)
+    if len(cable_bodies) != num_envs:
+        raise RuntimeError(f"Expected {num_envs} Newton cable worlds, got {len(cable_bodies)}")
+    return hand_ids, finger_ids, tail_ids
+
+
+@wp.kernel(enable_backward=False)
+def _apply_grasp_assist_kernel(
+    body_q: wp.array(dtype=wp.transformf),
+    body_qd: wp.array(dtype=wp.spatial_vectorf),
+    body_f: wp.array(dtype=wp.spatial_vectorf),
+    hand_ids: wp.array(dtype=wp.int32),
+    finger_ids: wp.array(dtype=wp.int32),
+    tail_ids: wp.array(dtype=wp.int32),
+    active: wp.array(dtype=wp.int32),
+    local_anchors: wp.array(dtype=wp.vec3f),
+    tcp_offset: wp.vec3f,
+    acquisition_distance: float,
+    release_distance: float,
+    acquisition_closed_separation: float,
+    release_open_separation: float,
+    stiffness: float,
+    damping: float,
+    maximum_force: float,
+):
+    """Apply a breakable cable-side spring after a geometric grasp is acquired."""
+    grasp = wp.tid()
+    hand_id = hand_ids[grasp]
+    finger_base = 2 * grasp
+    tail_base = 3 * grasp
+    hand_pose = body_q[hand_id]
+    hand_position = wp.transform_get_translation(hand_pose)
+    tcp_position = wp.transform_point(hand_pose, tcp_offset)
+    tail_position = wp.vec3f(0.0)
+    tail_velocity = wp.vec3f(0.0)
+    for index in range(3):
+        tail_id = tail_ids[tail_base + index]
+        tail_position += wp.transform_get_translation(body_q[tail_id]) / 3.0
+        tail_velocity += wp.spatial_top(body_qd[tail_id]) / 3.0
+
+    finger_separation = wp.length(
+        wp.transform_get_translation(body_q[finger_ids[finger_base]])
+        - wp.transform_get_translation(body_q[finger_ids[finger_base + 1]])
+    )
+    distance = wp.length(tail_position - tcp_position)
+    if active[grasp] == 0:
+        if finger_separation <= acquisition_closed_separation and distance <= acquisition_distance:
+            active[grasp] = 1
+            local_anchors[grasp] = wp.transform_point(wp.transform_inverse(hand_pose), tail_position)
+        else:
+            return
+    elif finger_separation >= release_open_separation or distance > release_distance:
+        active[grasp] = 0
+        return
+
+    target_position = wp.transform_point(hand_pose, local_anchors[grasp])
+    hand_velocity = wp.spatial_top(body_qd[hand_id])
+    hand_angular_velocity = wp.spatial_bottom(body_qd[hand_id])
+    target_velocity = hand_velocity + wp.cross(hand_angular_velocity, target_position - hand_position)
+    force = stiffness * (target_position - tail_position) + damping * (target_velocity - tail_velocity)
+    force_length = wp.length(force)
+    if force_length > maximum_force:
+        force *= maximum_force / force_length
+    distributed_force = force / 3.0
+    for index in range(3):
+        wp.atomic_add(
+            body_f,
+            tail_ids[tail_base + index],
+            wp.spatial_vectorf(distributed_force[0], distributed_force[1], distributed_force[2], 0.0, 0.0, 0.0),
+        )
+
+
 class _ShoelacePhysics:
     """Configure shoelace parity before coupled MJWarp/VBD solver construction."""
 
@@ -216,13 +322,36 @@ class _ShoelacePhysics:
         cable_radius: float,
         num_envs: int,
         joint_stiffness_scale: float,
+        grasp_assist_acquisition_distance: float,
+        grasp_assist_release_distance: float,
+        grasp_assist_acquisition_closed_separation: float,
+        grasp_assist_release_open_separation: float,
+        grasp_assist_stiffness: float,
+        grasp_assist_damping: float,
+        grasp_assist_maximum_force: float,
     ):
         self.centerline = centerline
         self.cable_radius = cable_radius
         self.num_envs = num_envs
         self.joint_stiffness_scale = joint_stiffness_scale
+        self.grasp_assist_acquisition_distance = grasp_assist_acquisition_distance
+        self.grasp_assist_release_distance = grasp_assist_release_distance
+        self.grasp_assist_acquisition_closed_separation = grasp_assist_acquisition_closed_separation
+        self.grasp_assist_release_open_separation = grasp_assist_release_open_separation
+        self.grasp_assist_stiffness = grasp_assist_stiffness
+        self.grasp_assist_damping = grasp_assist_damping
+        self.grasp_assist_maximum_force = grasp_assist_maximum_force
         self.cable_bodies: list[list[int]] = []
         self.cable_joints: list[list[int]] = []
+        self._grasp_assist_hand_ids: list[int] = []
+        self._grasp_assist_finger_ids: list[int] = []
+        self._grasp_assist_tail_ids: list[int] = []
+        self._grasp_assist_active_view: torch.Tensor | None = None
+
+    def reset_grasp_assist(self, env_ids: torch.Tensor) -> None:
+        """Clear compliant grasp state for selected Newton worlds."""
+        if self._grasp_assist_active_view is not None:
+            self._grasp_assist_active_view[env_ids] = 0
 
     def register(self) -> None:
         """Register model lifecycle callbacks before the first simulation reset."""
@@ -269,7 +398,11 @@ class _ShoelacePhysics:
 
         self.cable_bodies = [left + right for left, right in body_chains]
         self.cable_joints = [left + right for left, right in joint_chains]
-
+        (
+            self._grasp_assist_hand_ids,
+            self._grasp_assist_finger_ids,
+            self._grasp_assist_tail_ids,
+        ) = _resolve_grasp_assist_bodies(builder, self.cable_bodies, self.num_envs)
         body_by_label = self._index_unique_labels(builder.body_label)
         shape_by_label = self._index_unique_labels(builder.shape_label)
         shoe_parts: list[tuple[int, int, int]] = []
@@ -374,7 +507,7 @@ class _ShoelacePhysics:
                 builder.add_shape_collision_filter_pair(shape, pinned_shape)
 
     def _configure_model(self, _: object) -> None:
-        """Configure cable Dahl hysteresis before coupled solver construction."""
+        """Configure cable hysteresis and compliant grasp transport before solver construction."""
         model = NewtonManager.get_model()
         dahl_eps = np.zeros(model.joint_count, dtype=np.float32)
         dahl_tau = np.zeros(model.joint_count, dtype=np.float32)
@@ -383,6 +516,43 @@ class _ShoelacePhysics:
         dahl_tau[cable_joints] = DAHL_DECAY
         model.vbd.dahl_eps_max.assign(dahl_eps)
         model.vbd.dahl_tau.assign(dahl_tau)
+
+        device = model.device
+        grasp_count = 2 * self.num_envs
+        self._grasp_assist_hand_ids_wp = wp.array(self._grasp_assist_hand_ids, dtype=wp.int32, device=device)
+        self._grasp_assist_finger_ids_wp = wp.array(self._grasp_assist_finger_ids, dtype=wp.int32, device=device)
+        self._grasp_assist_tail_ids_wp = wp.array(self._grasp_assist_tail_ids, dtype=wp.int32, device=device)
+        self._grasp_assist_active = wp.zeros(grasp_count, dtype=wp.int32, device=device)
+        self._grasp_assist_local_anchors = wp.zeros(grasp_count, dtype=wp.vec3f, device=device)
+        self._grasp_assist_active_view = wp.to_torch(self._grasp_assist_active).view(self.num_envs, 2)
+        NewtonManager.register_state_force_callback(self._apply_grasp_assist)
+
+    def _apply_grasp_assist(self, state: newton.State) -> None:
+        """Apply the graph-safe compliant grasp force before each solver substep."""
+        # Proxy contact is one-way, so transport the acquired cable tail on the cable side.
+        wp.launch(
+            _apply_grasp_assist_kernel,
+            dim=2 * self.num_envs,
+            inputs=[
+                state.body_q,
+                state.body_qd,
+                state.body_f,
+                self._grasp_assist_hand_ids_wp,
+                self._grasp_assist_finger_ids_wp,
+                self._grasp_assist_tail_ids_wp,
+                self._grasp_assist_active,
+                self._grasp_assist_local_anchors,
+                wp.vec3f(*TCP_OFFSET),
+                self.grasp_assist_acquisition_distance,
+                self.grasp_assist_release_distance,
+                self.grasp_assist_acquisition_closed_separation,
+                self.grasp_assist_release_open_separation,
+                self.grasp_assist_stiffness,
+                self.grasp_assist_damping,
+                self.grasp_assist_maximum_force,
+            ],
+            device=state.body_q.device,
+        )
 
     def _sorted_world_label_indices(
         self,
@@ -438,6 +608,13 @@ class ShoelaceEnv(ManagerBasedRLEnv):
             self._cable_radius,
             cfg.scene.num_envs,
             self._authored_mean_segment_length / mean_segment_length,
+            grasp_assist_acquisition_distance=cfg.grasp_assist_acquisition_distance,
+            grasp_assist_release_distance=cfg.grasp_assist_release_distance,
+            grasp_assist_acquisition_closed_separation=cfg.grasp_assist_acquisition_closed_separation,
+            grasp_assist_release_open_separation=cfg.grasp_assist_release_open_separation,
+            grasp_assist_stiffness=cfg.grasp_assist_stiffness,
+            grasp_assist_damping=cfg.grasp_assist_damping,
+            grasp_assist_maximum_force=cfg.grasp_assist_maximum_force,
         )
 
         super().__init__(cfg, render_mode, **kwargs)

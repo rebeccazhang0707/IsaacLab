@@ -16,11 +16,14 @@ from pxr import Usd, UsdGeom, UsdPhysics
 
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs.mdp.actions import BinaryJointPositionActionCfg, DifferentialInverseKinematicsActionCfg
-from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import CurriculumTermCfg, SceneEntityCfg
 
 from isaaclab_contrib.coupling import CouplerProxyCfg
 
+import isaaclab_tasks.contrib.shoelace.mdp.curriculums as shoelace_curriculums
+import isaaclab_tasks.contrib.shoelace.mdp.events as shoelace_events
 import isaaclab_tasks.contrib.shoelace.mdp.rewards as shoelace_rewards
+import isaaclab_tasks.contrib.shoelace.mdp.terminations as shoelace_terminations
 import isaaclab_tasks.contrib.shoelace.shoelace_env as shoelace_env_module
 from isaaclab_tasks.contrib.shoelace.agents.rsl_rl_ppo_cfg import ShoelacePPORunnerCfg
 from isaaclab_tasks.contrib.shoelace.mdp.constants import (
@@ -93,22 +96,36 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert isinstance(cfg.actions.left_gripper, BinaryJointPositionActionCfg)
     assert isinstance(cfg.actions.right_gripper, BinaryJointPositionActionCfg)
     assert not hasattr(cfg.actions, "force")
+    assert cfg.events.reset_shoelace.func is shoelace_events.ResetShoelaceCurriculum
+    assert cfg.curriculum.pull_to_grasp.func is shoelace_curriculums.PullToGraspCurriculum
+    assert cfg.curriculum.pull_to_grasp.params["level_count"] == 6
+    assert cfg.curriculum.pull_to_grasp.params["initial_level"] == 0
+    assert cfg.events.reset_shoelace.params["grasp_joint_positions"][0] == pytest.approx(
+        (0.306502, -0.108321, -0.457832, -2.629056, 1.130974, 2.579587, -0.254864)
+    )
+    assert cfg.events.reset_shoelace.params["grasp_joint_positions"][1] == pytest.approx(
+        (-0.405931, -0.120616, 0.399613, -2.651660, -1.227738, 2.667932, 1.787070)
+    )
+    assert cfg.events.reset_shoelace.params["closed_position"] == pytest.approx(0.0035)
     assert cfg.actions.left_arm.scale == pytest.approx((0.005, 0.005, 0.005, 0.01, 0.01, 0.01))
+    assert cfg.actions.left_arm.body_offset.pos == pytest.approx((0.0, 0.0, 0.1034))
     assert cfg.actions.left_gripper.open_command_expr["panda_finger_joint1"] == pytest.approx(0.04)
-    assert cfg.actions.left_gripper.close_command_expr["panda_finger_joint1"] == pytest.approx(0.0015)
+    assert cfg.actions.left_gripper.close_command_expr["panda_finger_joint1"] == pytest.approx(0.0035)
     assert cfg.actions.right_gripper.open_command_expr["panda_finger_joint1"] == pytest.approx(0.04)
-    assert cfg.actions.right_gripper.close_command_expr["panda_finger_joint1"] == pytest.approx(0.0015)
+    assert cfg.actions.right_gripper.close_command_expr["panda_finger_joint1"] == pytest.approx(0.0035)
     assert cfg.scene.robot_left.init_state.joint_pos["panda_finger_joint.*"] == pytest.approx(0.04)
     assert cfg.scene.robot_right.init_state.joint_pos["panda_finger_joint.*"] == pytest.approx(0.04)
-    assert cfg.scene.robot_left.init_state.joint_pos["panda_joint4"] == pytest.approx(-2.5148)
-    assert cfg.scene.robot_left.init_state.joint_pos["panda_joint6"] == pytest.approx(2.3775)
-    assert cfg.scene.robot_right.init_state.joint_pos["panda_joint4"] == pytest.approx(-2.5148)
-    assert cfg.scene.robot_right.init_state.joint_pos["panda_joint6"] == pytest.approx(2.3775)
+    assert cfg.scene.robot_left.init_state.joint_pos["panda_joint4"] == pytest.approx(-2.681384)
+    assert cfg.scene.robot_left.init_state.joint_pos["panda_joint5"] == pytest.approx(0.871062)
+    assert cfg.scene.robot_left.init_state.joint_pos["panda_joint6"] == pytest.approx(2.543250)
+    assert cfg.scene.robot_right.init_state.joint_pos["panda_joint4"] == pytest.approx(-2.726323)
+    assert cfg.scene.robot_right.init_state.joint_pos["panda_joint5"] == pytest.approx(-0.930591)
+    assert cfg.scene.robot_right.init_state.joint_pos["panda_joint6"] == pytest.approx(2.645580)
     assert not hasattr(cfg.terminations, "left_joint_velocity")
     assert not hasattr(cfg.terminations, "right_joint_velocity")
     assert cfg.rewards.failure.params["term_keys"] == ["unsafe", "lost_grasp"]
     assert cfg.decimation == 4
-    assert cfg.episode_length_s == pytest.approx(10.0)
+    assert cfg.episode_length_s == pytest.approx(20.0)
     assert cfg.sim.physics.num_substeps == 5
     assert cfg.sim.physics.collision_decimation == 2
     assert cfg.sim.physics.solver_cfg.entries[1].solver_cfg.iterations == 20
@@ -134,19 +151,87 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert not hasattr(cfg.observations.policy, "throat_density")
     assert hasattr(cfg.observations.privileged, "throat_density")
     assert cfg.rewards.dense_task.weight == pytest.approx(10.0)
-    assert not hasattr(cfg.rewards, "progress")
-    assert not hasattr(cfg.rewards, "reach_tails")
+    assert cfg.rewards.dense_task.params["pull_weight"] == pytest.approx(0.25)
     assert not hasattr(cfg.rewards, "approach_progress")
-    assert not hasattr(cfg.rewards, "grasp_tails")
-    assert not hasattr(cfg.rewards, "directional_pull")
+    assert not hasattr(cfg.rewards, "acquisition")
+    assert not hasattr(cfg.rewards, "coordination")
+    assert not hasattr(cfg.rewards, "remaining_grasp")
+    assert not hasattr(cfg.rewards, "progress")
+    assert not hasattr(cfg.rewards, "grasp_retention")
     assert not hasattr(cfg.rewards, "premature_close")
     assert cfg.rewards.success.func is shoelace_rewards.termination_event_reward
     assert cfg.rewards.success.weight == pytest.approx(60.0)
     assert cfg.rewards.failure.func is shoelace_rewards.termination_event_reward
     assert cfg.rewards.failure.weight == pytest.approx(-2.0)
     assert cfg.rewards.action_rate.weight == pytest.approx(-0.01)
+    assert cfg.rewards.left_joint_velocity.func is shoelace_rewards.finite_joint_vel_l2
     assert cfg.rewards.left_joint_velocity.weight == pytest.approx(-1.0e-4)
+    assert cfg.rewards.left_joint_velocity.params["maximum_penalty"] == pytest.approx(100.0)
+    assert cfg.rewards.right_joint_velocity.func is shoelace_rewards.finite_joint_vel_l2
     assert cfg.rewards.right_joint_velocity.weight == pytest.approx(-1.0e-4)
+    assert cfg.rewards.right_joint_velocity.params["maximum_penalty"] == pytest.approx(100.0)
+
+
+def test_shoelace_play_mode_uses_complete_authored_reset():
+    """Evaluation must use the full approach-and-grasp task rather than an easy curriculum level."""
+    cfg = ShoelaceEnvCfg()
+
+    cfg.play_mode()
+
+    assert cfg.curriculum.pull_to_grasp.params["initial_level"] == 5
+    assert cfg.curriculum.pull_to_grasp.params["current_level_fraction"] == pytest.approx(1.0)
+
+
+def test_pull_to_grasp_curriculum_promotes_only_after_successful_window():
+    """The reset level must advance from measured success rather than elapsed iterations."""
+
+    class TerminationManager:
+        successes = torch.ones(4, dtype=torch.bool)
+
+        def get_term(self, name: str) -> torch.Tensor:
+            assert name == "success"
+            return self.successes
+
+    env = SimpleNamespace(
+        num_envs=4,
+        device="cpu",
+        common_step_counter=0,
+        termination_manager=TerminationManager(),
+    )
+    params = {
+        "level_count": 6,
+        "success_term_name": "success",
+        "promotion_success_rate": 0.75,
+        "minimum_episodes": 4,
+        "current_level_fraction": 1.0,
+        "initial_level": 0,
+    }
+    term = shoelace_curriculums.PullToGraspCurriculum(
+        CurriculumTermCfg(func=shoelace_curriculums.PullToGraspCurriculum, params=params), env
+    )
+
+    term(env, slice(None), **params)
+    env.common_step_counter = 1
+    state = term(env, slice(None), **params)
+
+    assert state["current_level"] == pytest.approx(1.0)
+    torch.testing.assert_close(term.levels, torch.ones(4, dtype=torch.long))
+    torch.testing.assert_close(term.difficulty, torch.full((4,), 0.2))
+
+    env.termination_manager.successes[:] = False
+    state = term(env, slice(None), **params)
+    assert state["current_level"] == pytest.approx(1.0)
+
+
+def test_reset_curriculum_interpolates_robot_from_grasp_to_pregrasp():
+    """Reset difficulty must move the robot rather than deforming the authored cable."""
+    grasp = torch.tensor(((0.0, 1.0), (0.0, 1.0), (0.0, 1.0)))
+    pregrasp = torch.tensor(((2.0, 3.0), (2.0, 3.0), (2.0, 3.0)))
+    difficulty = torch.tensor(((0.0,), (0.5,), (1.0,)))
+
+    result = shoelace_events.ResetShoelaceCurriculum._interpolate_joint_positions(grasp, pregrasp, difficulty)
+
+    torch.testing.assert_close(result, torch.tensor(((0.0, 1.0), (1.0, 2.0), (2.0, 3.0))))
 
 
 def test_shoelace_coupler_solves_robot_shoe_contact_in_mjwarp():
@@ -311,17 +396,472 @@ def test_dense_reward_orders_approach_acquisition_and_untying(monkeypatch):
         )
 
     hovering = compute_reward()
+    closure[0, 0] = 1.0
+    one_sided = compute_reward()
     closure.fill_(1.0)
     acquired = compute_reward()
     positions.fill_(0.1)
     tail_positions.copy_(torch.tensor([[[0.1, 0.0, 0.0], [-0.1, 0.0, 0.0]]]))
+    tail_velocities[:, 0].copy_(0.04 * pull_directions(tail_velocities)[0])
+    torch.testing.assert_close(compute_reward(), torch.tensor([1.35]), rtol=1.0e-5, atol=1.0e-5)
     tail_velocities.copy_(0.04 * pull_directions(tail_velocities).unsqueeze(0))
     untied = compute_reward()
 
     torch.testing.assert_close(hovering, torch.tensor([0.1]))
+    torch.testing.assert_close(one_sided, torch.tensor([0.1]))
     torch.testing.assert_close(acquired, torch.tensor([0.35]), rtol=1.0e-5, atol=1.0e-5)
-    expected_untied = 1.35 + 0.25 * torch.tanh(torch.tensor(1.0))
+    pull = torch.tanh(torch.tensor(1.0))
+    expected_untied = 1.35 + 0.25 * pull / (2.0 - pull)
     torch.testing.assert_close(untied, expected_untied.unsqueeze(0), rtol=1.0e-5, atol=1.0e-5)
+
+
+def test_dense_reward_is_finite_for_non_finite_terminal_states(monkeypatch):
+    """Invalid cable state must not propagate through the terminal-step reward."""
+    closure = torch.ones((3, 2))
+    positions = torch.zeros((3, DYNAMIC_SEGMENT_COUNT, 3))
+    knot = torch.zeros((3, 3))
+    tail_positions = torch.zeros((3, 2, 3))
+    tail_velocities = torch.zeros((3, 2, 3))
+    tail_positions[0, 0, 0] = torch.nan
+    tail_velocities[1, 0, 0] = torch.inf
+
+    monkeypatch.setattr(
+        shoelace_rewards,
+        "robot_tcp_position",
+        lambda _, robot_cfg: torch.zeros((3, 3)),
+    )
+    monkeypatch.setattr(shoelace_rewards, "gripper_closed_fraction", lambda *args: closure)
+    monkeypatch.setattr(
+        shoelace_rewards,
+        "task_state",
+        lambda *args: (positions, None, knot, tail_positions, tail_velocities),
+    )
+
+    reward = shoelace_rewards.shoelace_dense_reward(
+        None,
+        reach_std=0.05,
+        grasp_std=0.02,
+        throat_radius=0.025,
+        maximum_throat_segments=52,
+        tail_success_distance=0.09,
+        tail_success_separation=0.18,
+        target_speed=0.04,
+        open_position=0.04,
+        closed_position=0.0015,
+        approach_weight=0.1,
+        acquisition_weight=0.25,
+        task_weight=1.0,
+        pull_weight=0.25,
+        asset_cfgs=None,
+        left_robot_cfg="left",
+        right_robot_cfg="right",
+    )
+
+    torch.testing.assert_close(reward, torch.tensor([0.0, 0.0, 0.35]))
+    assert torch.isfinite(reward).all()
+
+
+def test_premature_close_penalizes_only_first_pre_acquisition_closure(monkeypatch):
+    """Closing far from a tail is penalized once without blocking post-acquisition recovery."""
+    distances = torch.tensor([[0.05, 0.01]])
+    closure = torch.zeros((1, 2))
+    grasped = torch.zeros((1, 2), dtype=torch.bool)
+    monkeypatch.setattr(shoelace_rewards, "grasp_distances", lambda *args: distances)
+    monkeypatch.setattr(shoelace_rewards, "gripper_closed_fraction", lambda *args: closure)
+    monkeypatch.setattr(shoelace_rewards, "grasp_state", lambda *args: grasped)
+    env = SimpleNamespace(num_envs=1, device="cpu")
+    term = shoelace_rewards.premature_close_event(None, env)
+
+    def compute_penalty() -> torch.Tensor:
+        return term(
+            env,
+            acquisition_distance=0.02,
+            maximum_finger_position=0.02,
+            open_position=0.04,
+            closed_position=0.0015,
+            asset_cfgs=None,
+            left_robot_cfg=None,
+            right_robot_cfg=None,
+        )
+
+    torch.testing.assert_close(compute_penalty(), torch.zeros(1))
+    closure[0, 0] = 1.0
+    torch.testing.assert_close(compute_penalty(), torch.tensor([0.5]))
+    torch.testing.assert_close(compute_penalty(), torch.zeros(1))
+
+    grasped[0, 0] = True
+    torch.testing.assert_close(compute_penalty(), torch.zeros(1))
+    grasped[0, 0] = False
+    closure[0, 0] = 0.5
+    torch.testing.assert_close(compute_penalty(), torch.zeros(1))
+    closure[0, 0] = 1.0
+    torch.testing.assert_close(compute_penalty(), torch.zeros(1))
+
+
+def test_grasp_acquisition_rewards_each_side_only_once(monkeypatch):
+    """Strict acquisition emits one per-side event and does not reward regrasping."""
+    grasped = torch.zeros((2, 2), dtype=torch.bool)
+    monkeypatch.setattr(shoelace_rewards, "grasp_state", lambda *args: grasped)
+    env = SimpleNamespace(num_envs=2, device="cpu", step_dt=0.2)
+    term = shoelace_rewards.grasp_acquisition_event(None, env)
+
+    def compute_reward() -> torch.Tensor:
+        return term(
+            env,
+            maximum_grasp_distance=0.01,
+            maximum_finger_position=0.004,
+            side_weights=(3.0, 1.0),
+            asset_cfgs=None,
+            left_robot_cfg=None,
+            right_robot_cfg=None,
+        )
+
+    torch.testing.assert_close(compute_reward(), torch.zeros(2))
+    grasped[0, 0] = True
+    grasped[1] = True
+    torch.testing.assert_close(compute_reward(), torch.tensor([3.75, 5.0]))
+    torch.testing.assert_close(compute_reward(), torch.zeros(2))
+
+    grasped[0, 0] = False
+    torch.testing.assert_close(compute_reward(), torch.zeros(2))
+    grasped[0] = True
+    torch.testing.assert_close(compute_reward(), torch.tensor([1.25, 0.0]))
+
+    term.reset([0])
+    torch.testing.assert_close(compute_reward(), torch.tensor([5.0, 0.0]))
+
+
+def test_tail_approach_progress_is_side_weighted_and_finite(monkeypatch):
+    """Open-gripper approach must favor the lagging side without propagating invalid state."""
+    distances = torch.full((2, 2), 0.05)
+    closure = torch.zeros((2, 2))
+    monkeypatch.setattr(shoelace_rewards, "grasp_distances", lambda *args: distances)
+    monkeypatch.setattr(shoelace_rewards, "gripper_closed_fraction", lambda *args: closure)
+    env = SimpleNamespace(num_envs=2, device="cpu")
+    term = shoelace_rewards.tail_approach_progress(None, env)
+
+    def compute_reward() -> torch.Tensor:
+        return term(
+            env,
+            std=0.05,
+            open_position=0.04,
+            closed_position=0.0,
+            asset_cfgs=None,
+            left_robot_cfg=None,
+            right_robot_cfg=None,
+            side_weights=(3.0, 1.0),
+        )
+
+    torch.testing.assert_close(compute_reward(), torch.zeros(2))
+    distances[0, 0] = 0.04
+    distances[1, 1] = 0.04
+    torch.testing.assert_close(compute_reward(), torch.tensor([0.15, 0.05]))
+    distances[0, 0] = torch.nan
+    distances[1, 1] = 0.03
+    torch.testing.assert_close(compute_reward(), torch.tensor([0.0, 0.05]))
+    assert torch.isfinite(compute_reward()).all()
+
+
+def test_second_tail_coordination_rewards_reaching_after_first_acquisition(monkeypatch):
+    """Acquiring one tail must expose a continuous signal for reaching the other tail."""
+    distances = torch.full((1, 2), 0.05)
+    closure = torch.zeros((1, 2))
+    monkeypatch.setattr(shoelace_rewards, "grasp_distances", lambda *args: distances)
+    monkeypatch.setattr(shoelace_rewards, "gripper_closed_fraction", lambda *args: closure)
+
+    def compute_reward() -> torch.Tensor:
+        return shoelace_rewards.second_tail_coordination(
+            None,
+            reach_std=0.05,
+            grasp_std=0.01,
+            open_position=0.04,
+            closed_position=0.0,
+            asset_cfgs=None,
+            left_robot_cfg=None,
+            right_robot_cfg=None,
+        )
+
+    torch.testing.assert_close(compute_reward(), torch.zeros(1))
+    distances[0, 1] = 0.0
+    closure[0, 1] = 1.0
+    first_tail_only = compute_reward()
+    distances[0, 0] = 0.02
+    closer_to_second_tail = compute_reward()
+    distances[0, 0] = 0.0
+    closure[0, 0] = 1.0
+    both_tails = compute_reward()
+
+    assert 0.0 < first_tail_only.item() < closer_to_second_tail.item() < both_tails.item()
+    torch.testing.assert_close(both_tails, torch.ones(1))
+
+
+def test_second_tail_approach_progress_requires_strict_first_acquisition(monkeypatch):
+    """Only progress toward the remaining open-gripper tail is rewarded after acquisition."""
+    distances = torch.full((1, 2), 0.05)
+    closure = torch.zeros((1, 2))
+    grasped = torch.zeros((1, 2), dtype=torch.bool)
+    monkeypatch.setattr(shoelace_rewards, "grasp_distances", lambda *args: distances)
+    monkeypatch.setattr(shoelace_rewards, "gripper_closed_fraction", lambda *args: closure)
+    monkeypatch.setattr(shoelace_rewards, "grasp_state", lambda *args: grasped)
+    env = SimpleNamespace(num_envs=1, device="cpu")
+    term = shoelace_rewards.second_tail_approach_progress(None, env)
+
+    def compute_reward() -> torch.Tensor:
+        return term(
+            env,
+            std=0.05,
+            maximum_grasp_distance=0.01,
+            maximum_finger_position=0.004,
+            open_position=0.04,
+            closed_position=0.0,
+            asset_cfgs=None,
+            left_robot_cfg=None,
+            right_robot_cfg=None,
+        )
+
+    torch.testing.assert_close(compute_reward(), torch.zeros(1))
+    distances[0, 1] = 0.04
+    torch.testing.assert_close(compute_reward(), torch.zeros(1))
+    grasped[0, 0] = True
+    torch.testing.assert_close(compute_reward(), torch.zeros(1))
+    grasped[0, 0] = False
+    distances[0, 1] = 0.03
+    torch.testing.assert_close(compute_reward(), torch.tensor([0.2]))
+    distances[0, 1] = 0.035
+    torch.testing.assert_close(compute_reward(), torch.tensor([-0.1]))
+    closure[0, 1] = 1.0
+    distances[0, 1] = 0.025
+    torch.testing.assert_close(compute_reward(), torch.zeros(1))
+    grasped[0, 1] = True
+    closure[0, 1] = 0.0
+    distances[0, 1] = 0.015
+    torch.testing.assert_close(compute_reward(), torch.zeros(1))
+
+
+def test_remaining_tail_grasping_latches_simultaneous_acquisitions(monkeypatch):
+    """Simultaneously acquired grippers must receive normalized close-command retention."""
+    distances = torch.full((1, 2), 0.05)
+    closure = torch.zeros((1, 2))
+    grasped = torch.zeros((1, 2), dtype=torch.bool)
+    actions = {
+        "left_gripper": SimpleNamespace(raw_actions=torch.zeros((1, 1))),
+        "right_gripper": SimpleNamespace(raw_actions=torch.zeros((1, 1))),
+    }
+    monkeypatch.setattr(shoelace_rewards, "grasp_distances", lambda *args: distances)
+    monkeypatch.setattr(shoelace_rewards, "gripper_closed_fraction", lambda *args: closure)
+    monkeypatch.setattr(shoelace_rewards, "grasp_state", lambda *args: grasped)
+    env = SimpleNamespace(
+        num_envs=1,
+        device="cpu",
+        action_manager=SimpleNamespace(get_term=actions.__getitem__),
+    )
+    term = shoelace_rewards.remaining_tail_grasping(None, env)
+
+    def compute_reward() -> torch.Tensor:
+        return term(
+            env,
+            std=0.03,
+            maximum_grasp_distance=0.01,
+            maximum_finger_position=0.004,
+            open_position=0.04,
+            closed_position=0.0,
+            command_temperature=0.5,
+            command_weight=0.75,
+            gripper_action_names=("left_gripper", "right_gripper"),
+            asset_cfgs=None,
+            left_robot_cfg=None,
+            right_robot_cfg=None,
+        )
+
+    torch.testing.assert_close(compute_reward(), torch.zeros(1))
+    grasped[:] = True
+    closure[0, 0] = 0.5
+    closure[0, 1] = 1.0
+    actions["right_gripper"].raw_actions[0, 0] = -1.0
+    left_score = 0.25 * 0.5 + 0.75 * 0.5
+    right_score = 0.25 + 0.75 * torch.sigmoid(torch.tensor(2.0))
+    expected = 0.5 * (left_score + right_score)
+    torch.testing.assert_close(compute_reward(), expected.unsqueeze(0))
+    distances[:] = 0.1
+    torch.testing.assert_close(compute_reward(), expected.unsqueeze(0))
+    distances[0, 1] = torch.nan
+    torch.testing.assert_close(compute_reward(), torch.zeros(1))
+    term.reset()
+    grasped[:] = False
+    distances[:] = 0.0
+    torch.testing.assert_close(compute_reward(), torch.zeros(1))
+
+
+def test_untying_progress_reports_finite_potential_rate(monkeypatch):
+    """Post-grasp shaping must retain regressions after acquisition without propagating NaN."""
+    current = torch.tensor([1.0, 1.0])
+    grasped = torch.zeros((2, 2), dtype=torch.bool)
+    monkeypatch.setattr(shoelace_rewards, "task_state", lambda *args: (None, None, None, None, None))
+    monkeypatch.setattr(shoelace_rewards, "potential", lambda *args: current)
+    monkeypatch.setattr(shoelace_rewards, "grasp_state", lambda *args: grasped)
+    env = SimpleNamespace(num_envs=2, device="cpu", step_dt=0.2)
+    term = shoelace_rewards.untying_progress(None, env)
+
+    def compute_progress() -> torch.Tensor:
+        return term(
+            env,
+            throat_radius=0.025,
+            tail_success_distance=0.09,
+            tail_success_separation=0.18,
+            maximum_grasp_distance=0.02,
+            maximum_finger_position=0.02,
+            maximum_progress_rate=3.0,
+            asset_cfgs=None,
+            left_robot_cfg=None,
+            right_robot_cfg=None,
+        )
+
+    torch.testing.assert_close(compute_progress(), torch.zeros(2))
+    grasped[:] = True
+    current.copy_(torch.tensor([1.1, 1.1]))
+    torch.testing.assert_close(compute_progress(), torch.tensor([0.5, 0.5]))
+    grasped[:] = False
+    current.copy_(torch.tensor([1.0, 1.2]))
+    torch.testing.assert_close(compute_progress(), torch.tensor([-0.5, 0.5]))
+    current.copy_(torch.tensor([torch.nan, 1.3]))
+    torch.testing.assert_close(compute_progress(), torch.tensor([0.0, 0.5]))
+    current.copy_(torch.tensor([10.0, -10.0]))
+    torch.testing.assert_close(compute_progress(), torch.tensor([3.0, -3.0]))
+    term.reset()
+    current.copy_(torch.tensor([1.2, 1.2]))
+    torch.testing.assert_close(compute_progress(), torch.zeros(2))
+
+
+def test_acquired_grasp_retention_starts_after_acquisition_and_resets(monkeypatch):
+    """Retention shaping must begin after acquisition and track each side independently."""
+    grasped = torch.zeros((1, 2), dtype=torch.bool)
+    monkeypatch.setattr(shoelace_rewards, "grasp_state", lambda *args: grasped)
+    env = SimpleNamespace(num_envs=1, device="cpu")
+    term = shoelace_rewards.acquired_grasp_retention(None, env)
+
+    def compute_retention() -> torch.Tensor:
+        return term(
+            env,
+            maximum_grasp_distance=0.01,
+            maximum_finger_position=0.004,
+            asset_cfgs=None,
+            left_robot_cfg=None,
+            right_robot_cfg=None,
+        )
+
+    torch.testing.assert_close(compute_retention(), torch.zeros(1))
+    grasped[0, 0] = True
+    torch.testing.assert_close(compute_retention(), torch.zeros(1))
+    torch.testing.assert_close(compute_retention(), torch.tensor([0.5]))
+    grasped[0, 1] = True
+    torch.testing.assert_close(compute_retention(), torch.tensor([0.5]))
+    torch.testing.assert_close(compute_retention(), torch.ones(1))
+    term.reset()
+    torch.testing.assert_close(compute_retention(), torch.zeros(1))
+
+
+def test_shoelace_unsafe_detects_non_finite_velocity(monkeypatch):
+    """A non-finite cable velocity must terminate before it reaches observations."""
+    positions = torch.zeros((2, DYNAMIC_SEGMENT_COUNT, 3))
+    velocities = torch.zeros_like(positions)
+    velocities[1, 0, 0] = torch.nan
+    monkeypatch.setattr(
+        shoelace_terminations,
+        "task_state",
+        lambda *args: (positions, velocities, None, None, None),
+    )
+
+    unsafe = shoelace_terminations.shoelace_unsafe(
+        None,
+        minimum_lace_height=-0.003,
+        maximum_lace_spread=0.6,
+        asset_cfgs=None,
+    )
+
+    torch.testing.assert_close(unsafe, torch.tensor([False, True]))
+
+
+def test_shoelace_unsafe_detects_non_finite_robot_state(monkeypatch):
+    """Non-finite robot state must reset with the coupled shoelace state."""
+    positions = torch.zeros((2, DYNAMIC_SEGMENT_COUNT, 3))
+    velocities = torch.zeros_like(positions)
+    robot_state = {
+        "joint_pos": torch.zeros((2, 9)),
+        "joint_vel": torch.zeros((2, 9)),
+        "body_pos_w": torch.zeros((2, 12, 3)),
+        "body_quat_w": torch.zeros((2, 12, 4)),
+    }
+    robot_state["joint_vel"][1, 0] = torch.nan
+
+    def make_robot(state):
+        return SimpleNamespace(
+            data=SimpleNamespace(**{name: SimpleNamespace(torch=value) for name, value in state.items()})
+        )
+
+    env = SimpleNamespace(scene={"robot_left": make_robot(robot_state), "robot_right": make_robot(robot_state)})
+    monkeypatch.setattr(
+        shoelace_terminations,
+        "task_state",
+        lambda *args: (positions, velocities, None, None, None),
+    )
+
+    unsafe = shoelace_terminations.shoelace_unsafe(
+        env,
+        minimum_lace_height=-0.003,
+        maximum_lace_spread=0.6,
+        asset_cfgs=None,
+        left_robot_cfg=SceneEntityCfg("robot_left"),
+        right_robot_cfg=SceneEntityCfg("robot_right"),
+    )
+
+    torch.testing.assert_close(unsafe, torch.tensor([False, True]))
+
+
+def test_lost_grasp_accepts_compliant_retention_beyond_geometric_distance(monkeypatch):
+    """A retained compliant grasp must not terminate until its latch releases."""
+    distances = torch.full((1, 2), 0.1)
+    retained = torch.ones((1, 2), dtype=torch.bool)
+    monkeypatch.setattr(shoelace_terminations, "grasp_distances", lambda *args: distances)
+    monkeypatch.setattr(shoelace_terminations, "grasp_state", lambda *args: retained)
+    env = SimpleNamespace(num_envs=1, device="cpu")
+    term = shoelace_terminations.lost_grasp(None, env)
+
+    result = term(env, 0.01, 0.01, 0.025, None, None, None)
+    torch.testing.assert_close(result, torch.tensor([False]))
+
+    retained[0, 1] = False
+    result = term(env, 0.01, 0.01, 0.025, None, None, None)
+    torch.testing.assert_close(result, torch.tensor([True]))
+
+
+def test_lost_grasp_allows_recovery_before_bilateral_acquisition(monkeypatch):
+    """Dropping the first tail during acquisition must not reset before the second is reached."""
+    distances = torch.full((1, 2), 0.1)
+    retained = torch.tensor([[True, False]])
+    monkeypatch.setattr(shoelace_terminations, "grasp_distances", lambda *args: distances)
+    monkeypatch.setattr(shoelace_terminations, "grasp_state", lambda *args: retained)
+    env = SimpleNamespace(num_envs=1, device="cpu")
+    term = shoelace_terminations.lost_grasp(None, env)
+
+    torch.testing.assert_close(term(env, 0.01, 0.01, 0.025, None, None, None), torch.tensor([False]))
+    retained[:] = False
+    torch.testing.assert_close(term(env, 0.01, 0.01, 0.025, None, None, None), torch.tensor([False]))
+    retained[:] = True
+    torch.testing.assert_close(term(env, 0.01, 0.01, 0.025, None, None, None), torch.tensor([False]))
+    retained[0, 1] = False
+    torch.testing.assert_close(term(env, 0.01, 0.01, 0.025, None, None, None), torch.tensor([True]))
+
+
+def test_finite_joint_vel_l2_bounds_terminal_state_outliers():
+    """A reset-bound robot must not emit invalid or destabilizing velocity penalties."""
+    joint_velocities = torch.tensor([[1.0, 2.0], [torch.nan, 2.0], [torch.inf, 2.0], [1000.0, 2.0]])
+    robot = SimpleNamespace(data=SimpleNamespace(joint_vel=SimpleNamespace(torch=joint_velocities)))
+    env = SimpleNamespace(scene={"robot": robot})
+    asset_cfg = SimpleNamespace(name="robot", joint_ids=[0, 1])
+
+    penalty = shoelace_rewards.finite_joint_vel_l2(env, asset_cfg, maximum_penalty=100.0)
+
+    torch.testing.assert_close(penalty, torch.tensor([5.0, 0.0, 0.0, 100.0]))
 
 
 def test_termination_event_reward_cancels_reward_manager_time_scaling():
@@ -392,3 +932,16 @@ def test_untying_potential_increases_for_separated_tails_and_a_clear_throat():
 
     assert len(TAIL_REGIONS) == 2
     assert untied.item() > baseline.item()
+
+
+def test_untying_potential_does_not_credit_the_already_farther_tail_distance():
+    """The tail-distance term must track the lagging tail rather than their average."""
+    positions = torch.zeros((1, DYNAMIC_SEGMENT_COUNT, 3))
+    knot = torch.zeros((1, 3))
+    baseline_tails = torch.tensor([[[-0.06, 0.0, 0.0], [0.06, 0.0, 0.0]]])
+    one_sided_tails = torch.tensor([[[-0.10, 0.0, 0.0], [0.06, 0.0, 0.0]]])
+
+    baseline = potential(positions, knot, baseline_tails, 0.025, 0.09, 0.18)
+    one_sided = potential(positions, knot, one_sided_tails, 0.025, 0.09, 0.18)
+
+    torch.testing.assert_close(one_sided - baseline, torch.tensor([0.04 / 0.18]))
