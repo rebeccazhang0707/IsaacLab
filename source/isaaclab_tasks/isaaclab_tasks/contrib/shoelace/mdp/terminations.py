@@ -19,24 +19,39 @@ def shoelace_unsafe(
     minimum_lace_height: float,
     maximum_lace_spread: float,
     asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
+    left_robot_cfg: SceneEntityCfg | None = None,
+    right_robot_cfg: SceneEntityCfg | None = None,
 ) -> torch.Tensor:
-    """Terminate non-finite cables and cables outside the safe workspace."""
-    positions, _, _, _, _ = task_state(env, asset_cfgs)
-    finite = torch.isfinite(positions).all(dim=(1, 2))
+    """Terminate non-finite task state and cables outside the safe workspace."""
+    positions, velocities, _, _, _ = task_state(env, asset_cfgs)
+    finite = torch.isfinite(positions).all(dim=(1, 2)) & torch.isfinite(velocities).all(dim=(1, 2))
+    for robot_cfg in (left_robot_cfg, right_robot_cfg):
+        if robot_cfg is None:
+            continue
+        robot = env.scene[robot_cfg.name]
+        for state in (
+            robot.data.joint_pos.torch,
+            robot.data.joint_vel.torch,
+            robot.data.body_pos_w.torch,
+            robot.data.body_quat_w.torch,
+        ):
+            finite &= torch.isfinite(state).flatten(start_dim=1).all(dim=1)
     spread = torch.linalg.vector_norm(positions - positions.mean(dim=1, keepdim=True), dim=-1).amax(dim=1)
     return (~finite) | (positions[..., 2].amin(dim=1) < minimum_lace_height) | (spread > maximum_lace_spread)
 
 
 class lost_grasp(ManagerTermBase):
-    """Terminate when a previously acquired tail leaves its assigned TCP."""
+    """Terminate when either tail is dropped after bilateral grasp acquisition."""
 
     def __init__(self, cfg, env) -> None:
         super().__init__(cfg, env)
         self._acquired = torch.zeros((env.num_envs, 2), dtype=torch.bool, device=env.device)
+        self._bilaterally_acquired = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         selected = slice(None) if env_ids is None else env_ids
         self._acquired[selected] = False
+        self._bilaterally_acquired[selected] = False
 
     def __call__(
         self,
@@ -50,7 +65,7 @@ class lost_grasp(ManagerTermBase):
     ) -> torch.Tensor:
         """Return per-environment grasp-loss flags after acquisition."""
         distances = grasp_distances(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
-        self._acquired |= grasp_state(
+        acquired = grasp_state(
             env,
             acquisition_distance,
             maximum_finger_position,
@@ -58,9 +73,18 @@ class lost_grasp(ManagerTermBase):
             left_robot_cfg,
             right_robot_cfg,
         )
-        return (~torch.isfinite(distances).all(dim=1)) | (self._acquired & (distances > maximum_grasp_distance)).any(
-            dim=1
+        self._acquired |= acquired
+        self._bilaterally_acquired |= acquired.all(dim=1)
+        retained = grasp_state(
+            env,
+            maximum_grasp_distance,
+            maximum_finger_position,
+            asset_cfgs,
+            left_robot_cfg,
+            right_robot_cfg,
         )
+        lost_after_bilateral_acquisition = self._bilaterally_acquired & (self._acquired & (~retained)).any(dim=1)
+        return (~torch.isfinite(distances).all(dim=1)) | lost_after_bilateral_acquisition
 
 
 def shoelace_success(
@@ -93,7 +117,14 @@ def shoelace_success(
         left_robot_cfg,
         right_robot_cfg,
     ).all(dim=1)
-    unsafe = shoelace_unsafe(env, minimum_lace_height, maximum_lace_spread, asset_cfgs)
+    unsafe = shoelace_unsafe(
+        env,
+        minimum_lace_height,
+        maximum_lace_spread,
+        asset_cfgs,
+        left_robot_cfg,
+        right_robot_cfg,
+    )
     return (
         (throat_count <= maximum_throat_segments)
         & (tail_distances.amin(dim=1) >= tail_success_distance)
