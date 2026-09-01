@@ -48,8 +48,8 @@ _MAXIMUM_THROAT_SEGMENTS = 52
 _TAIL_SUCCESS_DISTANCE = 0.09
 _TAIL_SUCCESS_SEPARATION = 0.18
 _MAXIMUM_SUCCESS_GRASP_DISTANCE = 0.03
-_GRASP_ACQUISITION_DISTANCE = 0.02
-_MAXIMUM_GRASP_DISTANCE = 0.07
+_GRASP_ACQUISITION_DISTANCE = 0.018
+_MAXIMUM_GRASP_DISTANCE = 0.035
 _GRIPPER_OPEN_POSITION = 0.04
 _GRIPPER_CLOSED_POSITION = 0.0035
 _GRIPPER_CLOSED_THRESHOLD = 0.02
@@ -57,7 +57,7 @@ _TARGET_PULL_SPEED = 0.04
 _MINIMUM_LACE_HEIGHT = -0.003
 _MAXIMUM_LACE_SPREAD = 0.6
 _APPROACH_CURRICULUM_LEVEL_COUNT = 11
-_GRASP_ASSIST_STRENGTHS = (1.0, 0.75, 0.5, 0.25, 0.0)
+_GRASP_ASSIST_STRENGTHS = (1.0,)
 _CURRICULUM_LEVEL_COUNT = _APPROACH_CURRICULUM_LEVEL_COUNT + len(_GRASP_ASSIST_STRENGTHS) - 1
 _GRIPPER_OPEN_PHASE_FRACTION = 0.4
 _APPROACH_PHASE_EXPONENT = 2.0
@@ -467,6 +467,16 @@ class RewardsCfg:
             "pull_weight": 0.25,
         },
     )
+    grasp_acquisition = RewTerm(
+        func=mdp.grasp_acquisition_event,
+        weight=10.0,
+        params={
+            **_ROBOT_TERM_PARAMS,
+            "maximum_grasp_distance": _GRASP_ACQUISITION_DISTANCE,
+            "maximum_finger_position": _GRIPPER_CLOSED_THRESHOLD,
+            "side_weights": (1.0, 1.0),
+        },
+    )
     success = RewTerm(
         func=mdp.termination_event_reward,
         weight=60.0,
@@ -610,8 +620,8 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
     triangle_pairs_per_env = 8192
     grasp_assist_acquisition_distance = _GRASP_ACQUISITION_DISTANCE
     grasp_assist_release_distance = _MAXIMUM_GRASP_DISTANCE
-    grasp_assist_acquisition_closed_separation = 0.02
-    grasp_assist_release_open_separation = 0.06
+    grasp_assist_acquisition_closed_separation = 0.0805
+    grasp_assist_release_open_separation = 0.081
     grasp_assist_stiffness = 20.0
     grasp_assist_damping = 0.04
     grasp_assist_maximum_force = 2.0

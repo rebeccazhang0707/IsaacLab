@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
+import warp as wp
 
 from pxr import Usd, UsdGeom, UsdPhysics
 
@@ -108,9 +109,9 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert not hasattr(cfg.actions, "force")
     assert cfg.events.reset_shoelace.func is shoelace_events.ResetShoelaceCurriculum
     assert cfg.curriculum.pull_to_grasp.func is shoelace_curriculums.PullToGraspCurriculum
-    assert cfg.curriculum.pull_to_grasp.params["level_count"] == 15
+    assert cfg.curriculum.pull_to_grasp.params["level_count"] == 11
     assert cfg.curriculum.pull_to_grasp.params["approach_level_count"] == 11
-    assert cfg.curriculum.pull_to_grasp.params["grasp_assist_strengths"] == pytest.approx((1.0, 0.75, 0.5, 0.25, 0.0))
+    assert cfg.curriculum.pull_to_grasp.params["grasp_assist_strengths"] == pytest.approx((1.0,))
     assert cfg.curriculum.pull_to_grasp.params["current_level_fraction"] == pytest.approx(0.5)
     assert cfg.curriculum.pull_to_grasp.params["current_level_fraction_schedule"] == pytest.approx((0.2, 0.35, 0.5))
     assert cfg.curriculum.pull_to_grasp.params["terminal_level_fraction"] == pytest.approx(1.0)
@@ -159,6 +160,11 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.grasp_assist_release_distance == pytest.approx(
         cfg.terminations.lost_grasp.params["maximum_grasp_distance"]
     )
+    assert cfg.grasp_assist_acquisition_distance == pytest.approx(0.018)
+    assert cfg.grasp_assist_release_distance == pytest.approx(0.035)
+    assert cfg.grasp_assist_acquisition_closed_separation == pytest.approx(0.0805)
+    assert cfg.grasp_assist_release_open_separation == pytest.approx(0.081)
+    assert cfg.grasp_assist_maximum_force == pytest.approx(2.0)
     assert SHOELACE_SEGMENT_COUNT == 360
     assert (PINNED_FIRST, PINNED_LAST) == (78, 281)
     assert (LEFT_CABLE_SEGMENT_COUNT, RIGHT_CABLE_SEGMENT_COUNT) == (79, 79)
@@ -179,8 +185,12 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert hasattr(cfg.observations.privileged, "throat_density")
     assert cfg.rewards.dense_task.weight == pytest.approx(10.0)
     assert cfg.rewards.dense_task.params["pull_weight"] == pytest.approx(0.25)
+    assert cfg.rewards.grasp_acquisition.func is shoelace_rewards.grasp_acquisition_event
+    assert cfg.rewards.grasp_acquisition.weight == pytest.approx(10.0)
+    assert cfg.rewards.grasp_acquisition.params["maximum_grasp_distance"] == pytest.approx(0.018)
+    assert cfg.rewards.grasp_acquisition.params["maximum_finger_position"] == pytest.approx(0.02)
+    assert cfg.rewards.grasp_acquisition.params["side_weights"] == pytest.approx((1.0, 1.0))
     assert not hasattr(cfg.rewards, "approach_progress")
-    assert not hasattr(cfg.rewards, "acquisition")
     assert not hasattr(cfg.rewards, "coordination")
     assert not hasattr(cfg.rewards, "remaining_grasp")
     assert not hasattr(cfg.rewards, "progress")
@@ -205,11 +215,89 @@ def test_shoelace_play_mode_uses_complete_authored_reset():
 
     cfg.play_mode()
 
-    assert cfg.curriculum.pull_to_grasp.params["initial_level"] == 14
+    assert cfg.curriculum.pull_to_grasp.params["initial_level"] == 10
     assert cfg.curriculum.pull_to_grasp.params["current_level_fraction"] == pytest.approx(1.0)
     assert cfg.curriculum.pull_to_grasp.params["current_level_fraction_schedule"] == pytest.approx((1.0,))
     assert cfg.curriculum.pull_to_grasp.params["terminal_level_fraction"] == pytest.approx(1.0)
     assert cfg.curriculum.pull_to_grasp.params["terminal_level_fraction_schedule"] == pytest.approx((1.0,))
+
+
+def test_grasp_assist_requires_close_geometry_and_releases_at_bounded_distance():
+    """The assistant must not acquire remotely and must release at its bounded retention distance."""
+
+    def body_poses(tail_distance: float, finger_separation: float = 0.01) -> wp.array:
+        positions = (
+            (0.0, 0.0, 0.0),
+            (0.0, -0.5 * finger_separation, 0.0),
+            (0.0, 0.5 * finger_separation, 0.0),
+            (tail_distance, 0.0, 0.0),
+            (tail_distance, 0.0, 0.0),
+            (tail_distance, 0.0, 0.0),
+        )
+        return wp.array(
+            [wp.transformf(position, (0.0, 0.0, 0.0, 1.0)) for position in positions],
+            dtype=wp.transformf,
+            device="cpu",
+        )
+
+    body_qd = wp.zeros(6, dtype=wp.spatial_vectorf, device="cpu")
+    hand_ids = wp.array([0], dtype=wp.int32, device="cpu")
+    finger_ids = wp.array([1, 2], dtype=wp.int32, device="cpu")
+    tail_ids = wp.array([3, 4, 5], dtype=wp.int32, device="cpu")
+    active = wp.zeros(1, dtype=wp.int32, device="cpu")
+    local_anchors = wp.zeros(1, dtype=wp.vec3f, device="cpu")
+    assist_scale = wp.ones(1, dtype=wp.float32, device="cpu")
+
+    def apply(tail_distance: float, finger_separation: float = 0.01) -> np.ndarray:
+        body_f = wp.zeros(6, dtype=wp.spatial_vectorf, device="cpu")
+        wp.launch(
+            shoelace_env_module._apply_grasp_assist_kernel,
+            dim=1,
+            inputs=[
+                body_poses(tail_distance, finger_separation),
+                body_qd,
+                body_f,
+                hand_ids,
+                finger_ids,
+                tail_ids,
+                active,
+                local_anchors,
+                assist_scale,
+                wp.vec3f(0.0),
+                0.018,
+                0.035,
+                0.0805,
+                0.081,
+                20.0,
+                0.0,
+                2.0,
+            ],
+            device="cpu",
+        )
+        return body_f.numpy()
+
+    apply(0.0181)
+    assert active.numpy().tolist() == [0]
+    apply(0.0, finger_separation=0.0806)
+    assert active.numpy().tolist() == [0]
+
+    apply(0.0, finger_separation=0.08)
+    opening_forces = apply(0.0115, finger_separation=0.08)
+    opening_scale = (0.0805 - 0.08) / (0.25 * 0.0805)
+    expected_opening_force = 20.0 * -0.0115 * opening_scale / 3.0
+    np.testing.assert_allclose(opening_forces[3:, 0], expected_opening_force, atol=1.0e-6)
+    apply(0.035, finger_separation=0.08)
+
+    apply(0.0)
+    assert active.numpy().tolist() == [1]
+    forces = apply(0.0115)
+    expected_tail_force = 20.0 * -0.0115 / 3.0
+    np.testing.assert_allclose(forces[3:, 0], expected_tail_force, atol=1.0e-6)
+    np.testing.assert_allclose(forces[:, 1:], 0.0, atol=1.0e-7)
+
+    released_forces = apply(0.035)
+    assert active.numpy().tolist() == [0]
+    np.testing.assert_allclose(released_forces, 0.0, atol=1.0e-7)
 
 
 @pytest.mark.parametrize(

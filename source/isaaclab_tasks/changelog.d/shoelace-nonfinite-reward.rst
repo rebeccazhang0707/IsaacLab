@@ -12,7 +12,12 @@ Fixed
 Added
 ^^^^^
 
-* Added a success-driven fifteen-level curriculum that first staged gripper closure at the authored tails, then
-  increased approach distance toward the complete task with finer early approach levels, transition-balanced replay
-  strata, gradual frontier exposure, low-success exposure backoff, and four final levels that annealed compliant grasp
-  assistance to zero.
+* Added a success-driven eleven-level curriculum that first opened the grippers at the authored tails, then increased
+  approach distance toward the complete task with finer early approach levels, transition-balanced replay strata,
+  gradual frontier exposure, and low-success exposure backoff.
+
+* Restricted compliant grasp assistance to cable tails within 18 mm of a gripper TCP and inside its closing finger
+  opening, released it at 35 mm, ramped its force from near zero as the fingers closed, and retained its 2 N maximum
+  force.
+
+* Added a per-tail reward for acquiring the cable within the grasp-assistance distance.

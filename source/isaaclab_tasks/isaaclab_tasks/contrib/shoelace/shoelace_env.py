@@ -294,7 +294,7 @@ def _apply_grasp_assist_kernel(
             local_anchors[grasp] = wp.transform_point(wp.transform_inverse(hand_pose), tail_position)
         else:
             return
-    elif finger_separation >= release_open_separation or distance > release_distance:
+    elif finger_separation >= release_open_separation or distance >= release_distance:
         active[grasp] = 0
         return
 
@@ -306,7 +306,12 @@ def _apply_grasp_assist_kernel(
     force_length = wp.length(force)
     if force_length > maximum_force:
         force *= maximum_force / force_length
-    force *= assist_scale[grasp]
+    closure_scale = wp.clamp(
+        (acquisition_closed_separation - finger_separation) / (0.25 * acquisition_closed_separation),
+        0.0,
+        1.0,
+    )
+    force *= assist_scale[grasp] * closure_scale
     distributed_force = force / 3.0
     for index in range(3):
         wp.atomic_add(
@@ -333,6 +338,12 @@ class _ShoelacePhysics:
         grasp_assist_damping: float,
         grasp_assist_maximum_force: float,
     ):
+        if not 0.0 < grasp_assist_acquisition_distance < grasp_assist_release_distance:
+            raise ValueError("Grasp-assist distances must satisfy 0 < acquisition < release")
+        if not 0.0 < grasp_assist_acquisition_closed_separation < grasp_assist_release_open_separation:
+            raise ValueError("Grasp-assist finger separations must satisfy 0 < acquisition < release")
+        if grasp_assist_stiffness < 0.0 or grasp_assist_damping < 0.0 or grasp_assist_maximum_force < 0.0:
+            raise ValueError("Grasp-assist stiffness, damping, and maximum force must be non-negative")
         self.centerline = centerline
         self.cable_radius = cable_radius
         self.num_envs = num_envs
