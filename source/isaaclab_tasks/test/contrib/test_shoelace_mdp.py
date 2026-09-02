@@ -19,7 +19,7 @@ from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs.mdp.actions import BinaryJointPositionActionCfg, DifferentialInverseKinematicsActionCfg
 from isaaclab.managers import CurriculumTermCfg, SceneEntityCfg
 
-from isaaclab_contrib.coupling import CouplerProxyCfg
+from isaaclab_contrib.coupling import CouplerAdmmCfg, CouplerProxyCfg
 
 import isaaclab_tasks.contrib.shoelace.mdp.curriculums as shoelace_curriculums
 import isaaclab_tasks.contrib.shoelace.mdp.events as shoelace_events
@@ -103,6 +103,7 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     cfg.validate()
 
     assert isinstance(cfg, ManagerBasedRLEnvCfg)
+    assert cfg.coupling_mode == "proxy"
     assert isinstance(cfg.sim.physics.solver_cfg, CouplerProxyCfg)
     assert isinstance(cfg.actions.left_arm, DifferentialInverseKinematicsActionCfg)
     assert isinstance(cfg.actions.right_arm, DifferentialInverseKinematicsActionCfg)
@@ -133,13 +134,13 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.events.reset_shoelace.params["grasp_joint_positions"][1] == pytest.approx(
         (-0.405931, -0.120616, 0.399613, -2.651660, -1.227738, 2.667932, 1.787070)
     )
-    assert cfg.events.reset_shoelace.params["closed_position"] == pytest.approx(0.0035)
+    assert cfg.events.reset_shoelace.params["closed_position"] == pytest.approx(0.0)
     assert cfg.actions.left_arm.scale == pytest.approx((0.005, 0.005, 0.005, 0.01, 0.01, 0.01))
     assert cfg.actions.left_arm.body_offset.pos == pytest.approx((0.0, 0.0, 0.1034))
     assert cfg.actions.left_gripper.open_command_expr["panda_finger_joint1"] == pytest.approx(0.04)
-    assert cfg.actions.left_gripper.close_command_expr["panda_finger_joint1"] == pytest.approx(0.0035)
+    assert cfg.actions.left_gripper.close_command_expr["panda_finger_joint1"] == pytest.approx(0.0)
     assert cfg.actions.right_gripper.open_command_expr["panda_finger_joint1"] == pytest.approx(0.04)
-    assert cfg.actions.right_gripper.close_command_expr["panda_finger_joint1"] == pytest.approx(0.0035)
+    assert cfg.actions.right_gripper.close_command_expr["panda_finger_joint1"] == pytest.approx(0.0)
     assert cfg.scene.robot_left.init_state.joint_pos["panda_finger_joint.*"] == pytest.approx(0.04)
     assert cfg.scene.robot_right.init_state.joint_pos["panda_finger_joint.*"] == pytest.approx(0.04)
     assert cfg.scene.robot_left.init_state.joint_pos["panda_joint4"] == pytest.approx(-2.681384)
@@ -674,10 +675,8 @@ def test_shoelace_coupler_solves_robot_shoe_contact_in_mjwarp():
     assert r"/World/envs/env_[^/]+/Shoe" in proxy.bodies
 
 
-def test_shoelace_runtime_scales_outer_and_proxy_triangle_pair_capacities():
-    """Both collision pipelines must scale triangle-pair capacity with the environment count."""
-    cfg = ShoelaceEnvCfg()
-    cfg.scene.num_envs = 4096
+def _runtime_config_env() -> ShoelaceEnv:
+    """Build the minimal environment state needed by runtime configuration tests."""
     env = ShoelaceEnv.__new__(ShoelaceEnv)
     env._is_closed = True
     x_coordinates = np.linspace(0.0, 0.36, SHOELACE_SEGMENT_COUNT + 1)
@@ -685,6 +684,14 @@ def test_shoelace_runtime_scales_outer_and_proxy_triangle_pair_capacities():
     env._cable_radius = 0.001
     env._authored_mean_segment_length = 0.001
     env._model_asset = Path("model.usd")
+    return env
+
+
+def test_shoelace_runtime_scales_outer_and_proxy_triangle_pair_capacities():
+    """Both collision pipelines must scale triangle-pair capacity with the environment count."""
+    cfg = ShoelaceEnvCfg()
+    cfg.scene.num_envs = 4096
+    env = _runtime_config_env()
 
     env._configure_runtime_cfg(cfg, Path("collider.usd"))
 
@@ -692,6 +699,52 @@ def test_shoelace_runtime_scales_outer_and_proxy_triangle_pair_capacities():
     proxy_pipeline = cfg.sim.physics.solver_cfg.proxies[0].collision_pipeline
     assert cfg.sim.physics.collision_cfg.max_triangle_pairs == expected_capacity
     assert proxy_pipeline.max_triangle_pairs == expected_capacity
+
+
+def test_shoelace_runtime_selects_symmetric_admm_coupling():
+    """The ADMM mode must retain ownership entries and couple their contacts symmetrically."""
+    cfg = ShoelaceEnvCfg()
+    cfg.coupling_mode = "admm"
+    cfg.admm_iterations = 7
+    cfg.admm_rho = 2.5
+    cfg.scene.num_envs = 2
+    env = _runtime_config_env()
+
+    env._configure_runtime_cfg(cfg, Path("collider.usd"))
+
+    solver_cfg = cfg.sim.physics.solver_cfg
+    assert isinstance(solver_cfg, CouplerAdmmCfg)
+    assert [entry.name for entry in solver_cfg.entries] == ["robots", "shoelace"]
+    assert solver_cfg.contact_pairs == [("robots", "shoelace")]
+    assert solver_cfg.iterations == 7
+    assert solver_cfg.rho == pytest.approx(2.5)
+    assert cfg.sim.physics.collision_cfg.rigid_contact_max == cfg.contacts_per_env * cfg.scene.num_envs
+    assert cfg.sim.physics.collision_cfg.max_triangle_pairs == 1_000_000
+
+
+def test_shoelace_runtime_rejects_unknown_coupling_mode():
+    """Unknown coupling modes must fail before the Newton model is constructed."""
+    cfg = ShoelaceEnvCfg()
+    cfg.coupling_mode = "unknown"
+    env = _runtime_config_env()
+
+    with pytest.raises(ValueError, match="Unsupported shoelace coupling mode"):
+        env._configure_runtime_cfg(cfg, Path("collider.usd"))
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "message"),
+    (("admm_iterations", 0, "at least one"), ("admm_rho", 0.0, "finite and positive")),
+)
+def test_shoelace_runtime_rejects_invalid_admm_parameters(field_name, value, message):
+    """Invalid ADMM tuning parameters must fail before the Newton model is constructed."""
+    cfg = ShoelaceEnvCfg()
+    cfg.coupling_mode = "admm"
+    setattr(cfg, field_name, value)
+    env = _runtime_config_env()
+
+    with pytest.raises(ValueError, match=message):
+        env._configure_runtime_cfg(cfg, Path("collider.usd"))
 
 
 def test_shoelace_agent_uses_asymmetric_observations():

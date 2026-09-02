@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+from typing import Literal
 
 from isaaclab_newton.physics import (
     MJWarpSolverCfg,
@@ -614,6 +615,12 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
 
     contacts_per_env = 512
     triangle_pairs_per_env = 8192
+    coupling_mode: Literal["proxy", "admm"] = "proxy"
+    """Coupled-solver mode selected when the environment is constructed."""
+    admm_iterations: int = 5
+    """Number of ADMM interface iterations per coupled step."""
+    admm_rho: float = 1.0
+    """ADMM penalty parameter [dimensionless]."""
     grasp_assist_enabled = True
     grasp_assist_acquisition_distance = _GRASP_ACQUISITION_DISTANCE
     grasp_assist_release_distance = _MAXIMUM_GRASP_DISTANCE

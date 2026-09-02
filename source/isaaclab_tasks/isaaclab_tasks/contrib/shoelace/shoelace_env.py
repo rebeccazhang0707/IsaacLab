@@ -21,7 +21,7 @@ from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.physics import PhysicsEvent
 from isaaclab.sim.spawners.from_files import spawn_from_usd
 
-from isaaclab_contrib.coupling import CouplerProxyCfg
+from isaaclab_contrib.coupling import CouplerAdmmCfg, CouplerProxyCfg
 
 from .mdp.constants import (
     PINNED_FIRST,
@@ -541,7 +541,7 @@ class _ShoelacePhysics:
 
     def _apply_grasp_assist(self, state: newton.State) -> None:
         """Apply the graph-safe compliant grasp force before each solver substep."""
-        # Proxy contact is one-way, so transport the acquired cable tail on the cable side.
+        # Keep assist transport on the cable side so it is independent of the selected coupler.
         wp.launch(
             _apply_grasp_assist_kernel,
             dim=2 * self.num_envs,
@@ -671,19 +671,43 @@ class ShoelaceEnv(ManagerBasedRLEnv):
         cfg.scene.ground.spawn.size = (ground_size, ground_size)
 
         physics_cfg = cfg.sim.physics
-        if not isinstance(physics_cfg, NewtonCfg) or not isinstance(physics_cfg.solver_cfg, CouplerProxyCfg):
-            raise TypeError("The dual-Franka shoelace task requires Newton proxy coupling")
-        vbd_entries = [entry for entry in physics_cfg.solver_cfg.entries if entry.name == "shoelace"]
+        if not isinstance(physics_cfg, NewtonCfg):
+            raise TypeError("The dual-Franka shoelace task requires Newton physics")
+        solver_cfg = physics_cfg.solver_cfg
+        if cfg.coupling_mode == "admm":
+            if cfg.admm_iterations < 1:
+                raise ValueError("admm_iterations must be at least one")
+            if not math.isfinite(cfg.admm_rho) or cfg.admm_rho <= 0.0:
+                raise ValueError("admm_rho must be finite and positive")
+            if isinstance(solver_cfg, CouplerProxyCfg):
+                solver_cfg = CouplerAdmmCfg(
+                    entries=solver_cfg.entries,
+                    contact_pairs=[("robots", "shoelace")],
+                    iterations=cfg.admm_iterations,
+                    rho=cfg.admm_rho,
+                )
+                physics_cfg.solver_cfg = solver_cfg
+            elif isinstance(solver_cfg, CouplerAdmmCfg):
+                solver_cfg.iterations = cfg.admm_iterations
+                solver_cfg.rho = cfg.admm_rho
+            else:
+                raise TypeError("ADMM coupling requires a CouplerProxyCfg or CouplerAdmmCfg solver template")
+        elif cfg.coupling_mode != "proxy":
+            raise ValueError(f"Unsupported shoelace coupling mode: {cfg.coupling_mode!r}")
+        if cfg.coupling_mode == "proxy" and not isinstance(solver_cfg, CouplerProxyCfg):
+            raise TypeError("Proxy coupling requires a CouplerProxyCfg solver")
+
+        vbd_entries = [entry for entry in solver_cfg.entries if entry.name == "shoelace"]
         if len(vbd_entries) != 1 or not isinstance(vbd_entries[0].solver_cfg, VBDSolverCfg):
             raise TypeError("The shoelace coupler entry requires one VBD solver")
-        proxy_pipelines = [proxy.collision_pipeline for proxy in physics_cfg.solver_cfg.proxies]
-        if len(proxy_pipelines) != 1 or not isinstance(proxy_pipelines[0], NewtonCollisionPipelineCfg):
-            raise TypeError("The shoelace coupler proxy requires one configured Newton collision pipeline")
-        proxy_collision_cfg = proxy_pipelines[0]
         triangle_pair_capacity = max(1_000_000, cfg.triangle_pairs_per_env * cfg.scene.num_envs)
         physics_cfg.collision_cfg.rigid_contact_max = cfg.contacts_per_env * cfg.scene.num_envs
         physics_cfg.collision_cfg.max_triangle_pairs = triangle_pair_capacity
-        proxy_collision_cfg.max_triangle_pairs = triangle_pair_capacity
+        if isinstance(solver_cfg, CouplerProxyCfg):
+            proxy_pipelines = [proxy.collision_pipeline for proxy in solver_cfg.proxies]
+            if len(proxy_pipelines) != 1 or not isinstance(proxy_pipelines[0], NewtonCollisionPipelineCfg):
+                raise TypeError("The shoelace coupler proxy requires one configured Newton collision pipeline")
+            proxy_pipelines[0].max_triangle_pairs = triangle_pair_capacity
 
     def _init_sim(self) -> None:
         """Register Newton lifecycle callbacks before the scene's first reset."""
