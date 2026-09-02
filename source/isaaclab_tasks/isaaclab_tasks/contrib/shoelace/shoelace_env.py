@@ -679,17 +679,29 @@ class ShoelaceEnv(ManagerBasedRLEnv):
                 raise ValueError("admm_iterations must be at least one")
             if not math.isfinite(cfg.admm_rho) or cfg.admm_rho <= 0.0:
                 raise ValueError("admm_rho must be finite and positive")
+            if not math.isfinite(cfg.admm_gamma) or cfg.admm_gamma < 0.0:
+                raise ValueError("admm_gamma must be finite and nonnegative")
+            if not math.isfinite(cfg.admm_baumgarte) or cfg.admm_baumgarte < 0.0:
+                raise ValueError("admm_baumgarte must be finite and nonnegative")
+            if cfg.admm_contact_matching not in ("disabled", "latest", "sticky"):
+                raise ValueError(f"Unsupported ADMM rigid contact matching mode: {cfg.admm_contact_matching!r}")
             if isinstance(solver_cfg, CouplerProxyCfg):
                 solver_cfg = CouplerAdmmCfg(
                     entries=solver_cfg.entries,
                     contact_pairs=[("robots", "shoelace")],
                     iterations=cfg.admm_iterations,
                     rho=cfg.admm_rho,
+                    gamma=cfg.admm_gamma,
+                    baumgarte=cfg.admm_baumgarte,
+                    rigid_contact_matching=cfg.admm_contact_matching,
                 )
                 physics_cfg.solver_cfg = solver_cfg
             elif isinstance(solver_cfg, CouplerAdmmCfg):
                 solver_cfg.iterations = cfg.admm_iterations
                 solver_cfg.rho = cfg.admm_rho
+                solver_cfg.gamma = cfg.admm_gamma
+                solver_cfg.baumgarte = cfg.admm_baumgarte
+                solver_cfg.rigid_contact_matching = cfg.admm_contact_matching
             else:
                 raise TypeError("ADMM coupling requires a CouplerProxyCfg or CouplerAdmmCfg solver template")
         elif cfg.coupling_mode != "proxy":

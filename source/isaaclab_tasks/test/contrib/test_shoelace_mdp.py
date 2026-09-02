@@ -104,6 +104,11 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
 
     assert isinstance(cfg, ManagerBasedRLEnvCfg)
     assert cfg.coupling_mode == "proxy"
+    assert cfg.admm_iterations == 5
+    assert cfg.admm_rho == pytest.approx(200.0)
+    assert cfg.admm_gamma == pytest.approx(0.0)
+    assert cfg.admm_baumgarte == pytest.approx(0.5)
+    assert cfg.admm_contact_matching == "latest"
     assert isinstance(cfg.sim.physics.solver_cfg, CouplerProxyCfg)
     assert isinstance(cfg.actions.left_arm, DifferentialInverseKinematicsActionCfg)
     assert isinstance(cfg.actions.right_arm, DifferentialInverseKinematicsActionCfg)
@@ -707,6 +712,9 @@ def test_shoelace_runtime_selects_symmetric_admm_coupling():
     cfg.coupling_mode = "admm"
     cfg.admm_iterations = 7
     cfg.admm_rho = 2.5
+    cfg.admm_gamma = 0.25
+    cfg.admm_baumgarte = 0.75
+    cfg.admm_contact_matching = "sticky"
     cfg.scene.num_envs = 2
     env = _runtime_config_env()
 
@@ -718,6 +726,9 @@ def test_shoelace_runtime_selects_symmetric_admm_coupling():
     assert solver_cfg.contact_pairs == [("robots", "shoelace")]
     assert solver_cfg.iterations == 7
     assert solver_cfg.rho == pytest.approx(2.5)
+    assert solver_cfg.gamma == pytest.approx(0.25)
+    assert solver_cfg.baumgarte == pytest.approx(0.75)
+    assert solver_cfg.rigid_contact_matching == "sticky"
     assert cfg.sim.physics.collision_cfg.rigid_contact_max == cfg.contacts_per_env * cfg.scene.num_envs
     assert cfg.sim.physics.collision_cfg.max_triangle_pairs == 1_000_000
 
@@ -734,7 +745,13 @@ def test_shoelace_runtime_rejects_unknown_coupling_mode():
 
 @pytest.mark.parametrize(
     ("field_name", "value", "message"),
-    (("admm_iterations", 0, "at least one"), ("admm_rho", 0.0, "finite and positive")),
+    (
+        ("admm_iterations", 0, "at least one"),
+        ("admm_rho", 0.0, "finite and positive"),
+        ("admm_gamma", -1.0, "finite and nonnegative"),
+        ("admm_baumgarte", float("nan"), "finite and nonnegative"),
+        ("admm_contact_matching", "unknown", "Unsupported ADMM rigid contact matching mode"),
+    ),
 )
 def test_shoelace_runtime_rejects_invalid_admm_parameters(field_name, value, message):
     """Invalid ADMM tuning parameters must fail before the Newton model is constructed."""

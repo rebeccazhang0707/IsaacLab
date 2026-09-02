@@ -619,8 +619,14 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
     """Coupled-solver mode selected when the environment is constructed."""
     admm_iterations: int = 5
     """Number of ADMM interface iterations per coupled step."""
-    admm_rho: float = 1.0
+    admm_rho: float = 200.0
     """ADMM penalty parameter [dimensionless]."""
+    admm_gamma: float = 0.0
+    """ADMM proximal mass scaling parameter [dimensionless]."""
+    admm_baumgarte: float = 0.5
+    """ADMM position-error correction fraction [dimensionless]."""
+    admm_contact_matching: Literal["disabled", "latest", "sticky"] = "latest"
+    """Frame-to-frame matching mode for ADMM rigid contacts."""
     grasp_assist_enabled = True
     grasp_assist_acquisition_distance = _GRASP_ACQUISITION_DISTANCE
     grasp_assist_release_distance = _MAXIMUM_GRASP_DISTANCE
