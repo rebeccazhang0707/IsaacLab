@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -32,24 +33,30 @@ class PullToGraspCurriculum(ManagerTermBase):
     def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRLEnv) -> None:
         super().__init__(cfg, env)
         level_count = int(cfg.params["level_count"])
+        legacy_approach_level_count = cfg.params.get("approach_level_count")
+        if legacy_approach_level_count is not None or "grasp_assist_strengths" in cfg.params:
+            warnings.warn(
+                "approach_level_count and grasp_assist_strengths are deprecated; use level_count for the reset "
+                "curriculum and grasp_assist_enabled to enable or disable grasp assistance.",
+                FutureWarning,
+                stacklevel=2,
+            )
+        if legacy_approach_level_count is not None:
+            legacy_approach_level_count = int(legacy_approach_level_count)
+            if not 2 <= legacy_approach_level_count <= level_count:
+                raise ValueError("approach_level_count must lie between two and level_count.")
+            level_count = legacy_approach_level_count
         initial_level = int(cfg.params.get("initial_level", 0))
+        if legacy_approach_level_count is not None and initial_level >= level_count:
+            initial_level = level_count - 1
         if level_count < 2:
             raise ValueError("level_count must be at least two.")
         if not 0 <= initial_level < level_count:
             raise ValueError("initial_level must lie within the curriculum levels.")
 
         self._level_count = level_count
-        self._approach_level_count = int(cfg.params.get("approach_level_count", level_count))
-        grasp_assist_strengths = tuple(float(strength) for strength in cfg.params.get("grasp_assist_strengths", (1.0,)))
-        if not 2 <= self._approach_level_count <= level_count:
-            raise ValueError("approach_level_count must lie between two and level_count.")
-        if level_count != self._approach_level_count + len(grasp_assist_strengths) - 1:
-            raise ValueError("level_count must include every approach and grasp-assist level.")
-        if any(not math.isfinite(strength) or not 0.0 <= strength <= 1.0 for strength in grasp_assist_strengths):
-            raise ValueError("grasp_assist_strengths must contain finite values in [0, 1].")
-        if any(left < right for left, right in zip(grasp_assist_strengths, grasp_assist_strengths[1:], strict=False)):
-            raise ValueError("grasp_assist_strengths must be non-increasing.")
-        self._grasp_assist_strengths = torch.tensor(grasp_assist_strengths, device=env.device)
+        physics = getattr(env, "_physics", None)
+        self._grasp_assist_enabled = bool(getattr(physics, "grasp_assist_enabled", False))
         self._current_level = initial_level
         self._levels = torch.full((env.num_envs,), initial_level, dtype=torch.long, device=env.device)
         self._slot_quantiles = (torch.arange(env.num_envs, device=env.device, dtype=torch.float32) + 0.5) / max(
@@ -71,15 +78,20 @@ class PullToGraspCurriculum(ManagerTermBase):
     @property
     def difficulty(self) -> torch.Tensor:
         """Per-environment reset difficulty in ``[0, 1]``."""
-        return self._levels.clamp(max=self._approach_level_count - 1).float() / (self._approach_level_count - 1)
+        return self._levels.float() / (self._level_count - 1)
 
     @property
     def grasp_assist_scale(self) -> torch.Tensor:
-        """Per-environment fraction of the configured grasp-assist force."""
-        assist_levels = (self._levels - self._approach_level_count + 1).clamp(
-            min=0, max=len(self._grasp_assist_strengths) - 1
+        """Per-environment indicator that fixed-strength grasp assistance is enabled.
+
+        This compatibility property no longer varies by curriculum level.
+        """
+        return torch.full(
+            self._levels.shape,
+            float(self._grasp_assist_enabled),
+            dtype=torch.float32,
+            device=self._env.device,
         )
-        return self._grasp_assist_strengths[assist_levels]
 
     @property
     def levels(self) -> torch.Tensor:
@@ -125,9 +137,8 @@ class PullToGraspCurriculum(ManagerTermBase):
             fraction_increase_success_rate: Window success rate required to increase current-level exposure.
             fraction_backoff_success_rate: Success rate below which current-level exposure decreases one stage.
             promotion_window_count: Consecutive successful windows required for promotion at maximum exposure.
-            approach_level_count: Number of levels used to increase reset difficulty. Later levels retain maximum
-                reset difficulty while annealing grasp assistance.
-            grasp_assist_strengths: Non-increasing assistant force fractions beginning at the final approach level.
+            approach_level_count: Deprecated legacy reset-level count. New configurations should omit it.
+            grasp_assist_strengths: Deprecated and ignored. Configure grasp assistance through the environment.
             terminal_level_fraction: Maximum current-level fraction at the final curriculum level.
             terminal_level_fraction_schedule: Increasing current-level fractions used only at the final level.
 
@@ -200,10 +211,6 @@ class PullToGraspCurriculum(ManagerTermBase):
             self._levels[env_ids] = self._sample_levels(
                 env_ids, active_fractions[self._current_level_fraction_index], replay_level_weights
             )
-            physics = getattr(env, "_physics", None)
-            set_grasp_assist_scale = getattr(physics, "set_grasp_assist_scale", None)
-            if set_grasp_assist_scale is not None:
-                set_grasp_assist_scale(env_ids, self.grasp_assist_scale[env_ids])
 
         active_fractions = self._active_fraction_schedule()
         return {
@@ -211,7 +218,7 @@ class PullToGraspCurriculum(ManagerTermBase):
             "current_level_fraction": active_fractions[self._current_level_fraction_index],
             "mean_sampled_level": self._levels.float().mean(),
             "mean_difficulty": self.difficulty.mean(),
-            "full_task_fraction": (self._levels >= self._approach_level_count - 1).float().mean(),
+            "full_task_fraction": (self._levels == self._level_count - 1).float().mean(),
             "mean_grasp_assist_scale": self.grasp_assist_scale.mean(),
             "unassisted_fraction": (self.grasp_assist_scale == 0.0).float().mean(),
             "last_window_success_rate": self._last_success_rate,

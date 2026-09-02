@@ -110,8 +110,8 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.events.reset_shoelace.func is shoelace_events.ResetShoelaceCurriculum
     assert cfg.curriculum.pull_to_grasp.func is shoelace_curriculums.PullToGraspCurriculum
     assert cfg.curriculum.pull_to_grasp.params["level_count"] == 11
-    assert cfg.curriculum.pull_to_grasp.params["approach_level_count"] == 11
-    assert cfg.curriculum.pull_to_grasp.params["grasp_assist_strengths"] == pytest.approx((1.0,))
+    assert "approach_level_count" not in cfg.curriculum.pull_to_grasp.params
+    assert "grasp_assist_strengths" not in cfg.curriculum.pull_to_grasp.params
     assert cfg.curriculum.pull_to_grasp.params["current_level_fraction"] == pytest.approx(0.5)
     assert cfg.curriculum.pull_to_grasp.params["current_level_fraction_schedule"] == pytest.approx((0.2, 0.35, 0.5))
     assert cfg.curriculum.pull_to_grasp.params["terminal_level_fraction"] == pytest.approx(1.0)
@@ -164,6 +164,7 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.grasp_assist_release_distance == pytest.approx(0.035)
     assert cfg.grasp_assist_acquisition_closed_separation == pytest.approx(0.0805)
     assert cfg.grasp_assist_release_open_separation == pytest.approx(0.081)
+    assert cfg.grasp_assist_enabled is True
     assert cfg.grasp_assist_maximum_force == pytest.approx(2.0)
     assert SHOELACE_SEGMENT_COUNT == 360
     assert (PINNED_FIRST, PINNED_LAST) == (78, 281)
@@ -246,7 +247,6 @@ def test_grasp_assist_requires_close_geometry_and_releases_at_bounded_distance()
     tail_ids = wp.array([3, 4, 5], dtype=wp.int32, device="cpu")
     active = wp.zeros(1, dtype=wp.int32, device="cpu")
     local_anchors = wp.zeros(1, dtype=wp.vec3f, device="cpu")
-    assist_scale = wp.ones(1, dtype=wp.float32, device="cpu")
 
     def apply(tail_distance: float, finger_separation: float = 0.01) -> np.ndarray:
         body_f = wp.zeros(6, dtype=wp.spatial_vectorf, device="cpu")
@@ -262,7 +262,6 @@ def test_grasp_assist_requires_close_geometry_and_releases_at_bounded_distance()
                 tail_ids,
                 active,
                 local_anchors,
-                assist_scale,
                 wp.vec3f(0.0),
                 0.018,
                 0.035,
@@ -301,27 +300,115 @@ def test_grasp_assist_requires_close_geometry_and_releases_at_bounded_distance()
 
 
 @pytest.mark.parametrize(
-    ("initial_level", "expected_difficulty", "expected_assist_scale"),
+    ("enabled", "maximum_force", "expected_assist_scale"),
     [
-        (10, 1.0, 1.0),
-        (11, 1.0, 0.75),
-        (12, 1.0, 0.5),
-        (13, 1.0, 0.25),
-        (14, 1.0, 0.0),
+        (True, 2.0, 1.0),
+        (False, 2.0, 0.0),
+        (True, 0.0, 0.0),
     ],
 )
-def test_pull_to_grasp_curriculum_anneals_assistance_after_full_approach(
-    initial_level: int, expected_difficulty: float, expected_assist_scale: float
+def test_pull_to_grasp_curriculum_uses_same_levels_with_or_without_assistance(
+    enabled: bool, maximum_force: float, expected_assist_scale: float
 ):
-    """Levels after the complete approach must reduce only the compliant grasp force."""
+    """Grasp assistance must not change reset difficulty or the number of levels."""
 
     class Physics:
-        scale = torch.full((4, 2), torch.nan)
+        grasp_assist_enabled = enabled and maximum_force > 0.0
+        grasp_assist_maximum_force = maximum_force
 
         def set_grasp_assist_scale(self, env_ids: torch.Tensor, scale: torch.Tensor) -> None:
-            self.scale[env_ids] = scale.unsqueeze(-1)
+            pytest.fail("The reset curriculum must not control grasp-assist strength.")
 
     env = SimpleNamespace(num_envs=4, device="cpu", common_step_counter=0, _physics=Physics())
+    params = {
+        "level_count": 11,
+        "success_term_name": "success",
+        "promotion_success_rate": 0.7,
+        "minimum_episodes": 4,
+        "current_level_fraction": 1.0,
+        "initial_level": 10,
+    }
+    term = shoelace_curriculums.PullToGraspCurriculum(
+        CurriculumTermCfg(func=shoelace_curriculums.PullToGraspCurriculum, params=params), env
+    )
+
+    state = term(env, slice(None), **params)
+
+    torch.testing.assert_close(term.levels, torch.full((4,), 10, dtype=torch.long))
+    torch.testing.assert_close(term.difficulty, torch.ones(4))
+    torch.testing.assert_close(term.grasp_assist_scale, torch.full((4,), expected_assist_scale))
+    assert state["full_task_fraction"] == pytest.approx(1.0)
+    assert state["mean_grasp_assist_scale"] == pytest.approx(expected_assist_scale)
+    assert state["unassisted_fraction"] == pytest.approx(float(expected_assist_scale == 0.0))
+
+
+@pytest.mark.parametrize(
+    ("enabled", "maximum_force", "expected_enabled"),
+    [
+        (True, 2.0, True),
+        (False, 2.0, False),
+        (True, 0.0, False),
+    ],
+)
+def test_grasp_assist_flag_controls_spring_latch_lifecycle(
+    monkeypatch, enabled: bool, maximum_force: float, expected_enabled: bool
+):
+    """Disabled assistance must not allocate latch state or register its force callback."""
+
+    class Buffer:
+        def assign(self, value) -> None:
+            self.value = np.asarray(value)
+
+    model = SimpleNamespace(
+        joint_count=1,
+        device="cpu",
+        vbd=SimpleNamespace(dahl_eps_max=Buffer(), dahl_tau=Buffer()),
+    )
+    callbacks = []
+    monkeypatch.setattr(shoelace_env_module.NewtonManager, "get_model", staticmethod(lambda: model))
+    monkeypatch.setattr(
+        shoelace_env_module.NewtonManager,
+        "register_state_force_callback",
+        staticmethod(lambda callback: callbacks.append(callback)),
+    )
+    physics = shoelace_env_module._ShoelacePhysics(
+        centerline=np.zeros((2, 3)),
+        cable_radius=0.001,
+        num_envs=1,
+        joint_stiffness_scale=1.0,
+        grasp_assist_enabled=enabled,
+        grasp_assist_acquisition_distance=0.018,
+        grasp_assist_release_distance=0.035,
+        grasp_assist_acquisition_closed_separation=0.0805,
+        grasp_assist_release_open_separation=0.081,
+        grasp_assist_stiffness=20.0,
+        grasp_assist_damping=0.04,
+        grasp_assist_maximum_force=maximum_force,
+    )
+    physics.cable_joints = [[0]]
+    physics._grasp_assist_hand_ids = [0, 1]
+    physics._grasp_assist_finger_ids = [0, 1, 2, 3]
+    physics._grasp_assist_tail_ids = [0, 1, 2, 3, 4, 5]
+
+    physics._configure_model(None)
+
+    assert physics.grasp_assist_enabled is expected_enabled
+    assert len(callbacks) == int(expected_enabled)
+    if expected_enabled:
+        assert physics.grasp_assist_active is not None
+        assert physics.grasp_assist_active.shape == (1, 2)
+    else:
+        assert physics.grasp_assist_active is None
+
+
+def test_pull_to_grasp_curriculum_accepts_legacy_annealing_config_as_eleven_levels():
+    """Historical annealing configs must collapse to their eleven reset-difficulty levels."""
+    env = SimpleNamespace(
+        num_envs=4,
+        device="cpu",
+        common_step_counter=0,
+        _physics=SimpleNamespace(grasp_assist_enabled=True, grasp_assist_maximum_force=2.0),
+    )
     params = {
         "level_count": 15,
         "approach_level_count": 11,
@@ -330,23 +417,24 @@ def test_pull_to_grasp_curriculum_anneals_assistance_after_full_approach(
         "promotion_success_rate": 0.7,
         "minimum_episodes": 4,
         "current_level_fraction": 1.0,
-        "initial_level": initial_level,
+        "initial_level": 14,
     }
-    term = shoelace_curriculums.PullToGraspCurriculum(
-        CurriculumTermCfg(func=shoelace_curriculums.PullToGraspCurriculum, params=params), env
-    )
+
+    with pytest.warns(FutureWarning, match="grasp_assist_enabled"):
+        term = shoelace_curriculums.PullToGraspCurriculum(
+            CurriculumTermCfg(func=shoelace_curriculums.PullToGraspCurriculum, params=params), env
+        )
 
     state = term(env, slice(None), **params)
 
-    torch.testing.assert_close(term.difficulty, torch.full((4,), expected_difficulty))
-    torch.testing.assert_close(term.grasp_assist_scale, torch.full((4,), expected_assist_scale))
-    torch.testing.assert_close(env._physics.scale, torch.full((4, 2), expected_assist_scale))
-    assert state["mean_grasp_assist_scale"] == pytest.approx(expected_assist_scale)
-    assert state["unassisted_fraction"] == pytest.approx(float(expected_assist_scale == 0.0))
+    torch.testing.assert_close(term.levels, torch.full((4,), 10, dtype=torch.long))
+    torch.testing.assert_close(term.difficulty, torch.ones(4))
+    assert state["current_level"] == pytest.approx(10.0)
+    assert state["full_task_fraction"] == pytest.approx(1.0)
 
 
-def test_pull_to_grasp_curriculum_expands_terminal_unassisted_exposure():
-    """The final unassisted level must grow beyond the replay ceiling only after successful windows."""
+def test_pull_to_grasp_curriculum_expands_final_level_exposure():
+    """The final reset level must grow beyond the replay ceiling only after successful windows."""
 
     class TerminationManager:
         successes = torch.ones(10, dtype=torch.bool)
@@ -362,9 +450,7 @@ def test_pull_to_grasp_curriculum_expands_terminal_unassisted_exposure():
         termination_manager=TerminationManager(),
     )
     params = {
-        "level_count": 15,
-        "approach_level_count": 11,
-        "grasp_assist_strengths": (1.0, 0.75, 0.5, 0.25, 0.0),
+        "level_count": 11,
         "success_term_name": "success",
         "promotion_success_rate": 0.7,
         "minimum_episodes": 2,
@@ -374,7 +460,7 @@ def test_pull_to_grasp_curriculum_expands_terminal_unassisted_exposure():
         "terminal_level_fraction_schedule": (0.2, 0.5, 1.0),
         "fraction_increase_success_rate": 0.5,
         "promotion_window_count": 1,
-        "initial_level": 13,
+        "initial_level": 9,
     }
     term = shoelace_curriculums.PullToGraspCurriculum(
         CurriculumTermCfg(func=shoelace_curriculums.PullToGraspCurriculum, params=params), env
@@ -386,7 +472,7 @@ def test_pull_to_grasp_curriculum_expands_terminal_unassisted_exposure():
     second_terminal_window = term(env, slice(None), **params)
     third_terminal_window = term(env, slice(None), **params)
 
-    assert first_terminal_window["current_level"] == pytest.approx(14.0)
+    assert first_terminal_window["current_level"] == pytest.approx(10.0)
     assert first_terminal_window["current_level_fraction"] == pytest.approx(0.2)
     assert second_terminal_window["current_level_fraction"] == pytest.approx(0.5)
     assert third_terminal_window["current_level_fraction"] == pytest.approx(1.0)
@@ -1171,7 +1257,7 @@ def test_lost_grasp_uses_compliant_latch_when_available(monkeypatch):
     env = SimpleNamespace(
         num_envs=1,
         device="cpu",
-        _physics=SimpleNamespace(grasp_assist_active=active),
+        _physics=SimpleNamespace(grasp_assist_enabled=True, grasp_assist_active=active),
     )
     term = shoelace_terminations.lost_grasp(None, env)
 
@@ -1181,6 +1267,30 @@ def test_lost_grasp_uses_compliant_latch_when_available(monkeypatch):
     active[0, 1] = 0
     result = term(env, 0.01, 0.01, 0.025, None, None, None)
     torch.testing.assert_close(result, torch.tensor([True]))
+
+
+def test_lost_grasp_uses_geometry_when_assistance_is_disabled(monkeypatch):
+    """Disabled assistance must ignore stale latch state and use physical grasp geometry."""
+    distances = torch.zeros((1, 2))
+    active = torch.zeros((1, 2), dtype=torch.int32)
+    acquired = torch.ones((1, 2), dtype=torch.bool)
+    retained = torch.ones((1, 2), dtype=torch.bool)
+    monkeypatch.setattr(shoelace_terminations, "grasp_distances", lambda *args: distances)
+    monkeypatch.setattr(
+        shoelace_terminations,
+        "grasp_state",
+        lambda env, maximum_distance, *args: acquired if maximum_distance == 0.01 else retained,
+    )
+    env = SimpleNamespace(
+        num_envs=1,
+        device="cpu",
+        _physics=SimpleNamespace(grasp_assist_enabled=False, grasp_assist_active=active),
+    )
+    term = shoelace_terminations.lost_grasp(None, env)
+
+    torch.testing.assert_close(term(env, 0.01, 0.01, 0.025, None, None, None), torch.tensor([False]))
+    retained[0, 1] = False
+    torch.testing.assert_close(term(env, 0.01, 0.01, 0.025, None, None, None), torch.tensor([True]))
 
 
 def test_lost_grasp_allows_recovery_before_bilateral_acquisition(monkeypatch):

@@ -56,9 +56,7 @@ _GRIPPER_CLOSED_THRESHOLD = 0.02
 _TARGET_PULL_SPEED = 0.04
 _MINIMUM_LACE_HEIGHT = -0.003
 _MAXIMUM_LACE_SPREAD = 0.6
-_APPROACH_CURRICULUM_LEVEL_COUNT = 11
-_GRASP_ASSIST_STRENGTHS = (1.0,)
-_CURRICULUM_LEVEL_COUNT = _APPROACH_CURRICULUM_LEVEL_COUNT + len(_GRASP_ASSIST_STRENGTHS) - 1
+_CURRICULUM_LEVEL_COUNT = 11
 _GRIPPER_OPEN_PHASE_FRACTION = 0.4
 _APPROACH_PHASE_EXPONENT = 2.0
 
@@ -436,8 +434,6 @@ class CurriculumCfg:
             "fraction_backoff_success_rate": 0.1,
             "promotion_window_count": 2,
             "replay_level_weights": (0.5, 0.3, 0.2),
-            "approach_level_count": _APPROACH_CURRICULUM_LEVEL_COUNT,
-            "grasp_assist_strengths": _GRASP_ASSIST_STRENGTHS,
             "initial_level": 0,
         },
     )
@@ -618,6 +614,7 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
 
     contacts_per_env = 512
     triangle_pairs_per_env = 8192
+    grasp_assist_enabled = True
     grasp_assist_acquisition_distance = _GRASP_ACQUISITION_DISTANCE
     grasp_assist_release_distance = _MAXIMUM_GRASP_DISTANCE
     grasp_assist_acquisition_closed_separation = 0.0805

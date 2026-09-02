@@ -41,7 +41,7 @@ def shoelace_unsafe(
 
 
 class lost_grasp(ManagerTermBase):
-    """Terminate when either grasp latch releases after bilateral acquisition."""
+    """Terminate when either retained grasp is lost after bilateral acquisition."""
 
     def __init__(self, cfg, env) -> None:
         super().__init__(cfg, env)
@@ -67,6 +67,8 @@ class lost_grasp(ManagerTermBase):
         distances = grasp_distances(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
         physics = getattr(env, "_physics", None)
         retained = getattr(physics, "grasp_assist_active", None)
+        if not getattr(physics, "grasp_assist_enabled", retained is not None):
+            retained = None
         if retained is None:
             acquired = grasp_state(
                 env,
