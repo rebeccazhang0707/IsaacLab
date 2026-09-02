@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import newton
-import newton.examples
 import numpy as np
 import warp as wp
 from isaaclab_newton.physics import NewtonCfg, NewtonCollisionPipelineCfg, NewtonManager, VBDSolverCfg
@@ -58,21 +57,8 @@ SHOE_MU = 0.2
 GROUND_MU = 0.8
 COLLISION_GROUP = 1
 PINNED_TUBE_SIDES = 6
-SHOELACE_COLLIDER_ASSET = Path(__file__).resolve().parents[5] / "scripts/demos/assets/shoelace/collider_simplified.usd"
-
-
-def _resolve_asset_dir() -> Path:
-    """Return a shoelace asset directory containing curve, collision, and visual USDs."""
-    repository_assets = Path(__file__).resolve().parents[5] / ".newton/newton/examples/assets/shoelace"
-    package_assets = Path(newton.examples.__file__).resolve().parent / "assets/shoelace"
-    required = ("curve.usd", "collider.usd", "model.usd")
-    for directory in (repository_assets, package_assets):
-        if all((directory / name).is_file() for name in required):
-            return directory
-    raise FileNotFoundError(
-        "Shoelace assets were not found in the source checkout or installed Newton package. "
-        "Initialize the repository's .newton checkout before running this task."
-    )
+SHOELACE_ASSET_DIR = Path(__file__).resolve().parents[5] / "scripts/demos/assets/shoelace"
+SHOELACE_COLLIDER_ASSET = SHOELACE_ASSET_DIR / "collider_simplified.usd"
 
 
 def _load_usd_curve(path: Path, prim_path: str) -> tuple[np.ndarray, float]:
@@ -188,7 +174,9 @@ def _pinned_shoelace_spawner(centerline: np.ndarray, cable_radius: float) -> sim
         mesh.CreateDisplayColorAttr([Gf.Vec3f(112.0 / 255.0, 65.0 / 255.0, 39.0 / 255.0)])
         collision_prim = mesh.GetPrim()
         if not sim_utils.apply_collision_properties(
-            str(collision_prim.GetPath()), [sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)]
+            str(collision_prim.GetPath()),
+            [sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)],
+            create_if_missing=True,
         ):
             raise RuntimeError(f"Failed to enable pinned collision mesh at {collision_prim.GetPath()}")
         return root
@@ -615,9 +603,8 @@ class ShoelaceEnv(ManagerBasedRLEnv):
     cfg: ShoelaceEnvCfg
 
     def __init__(self, cfg: ShoelaceEnvCfg, render_mode: str | None = None, **kwargs):
-        asset_dir = _resolve_asset_dir()
-        curve_asset = asset_dir / "curve.usd"
-        self._model_asset = asset_dir / "model.usd"
+        curve_asset = SHOELACE_ASSET_DIR / "curve.usd"
+        self._model_asset = SHOELACE_ASSET_DIR / "model.usd"
         authored_centerline, self._cable_radius = _load_usd_curve(curve_asset, "/World/Curve")
         authored_segment_lengths = np.linalg.norm(np.diff(authored_centerline, axis=0), axis=1)
         if len(authored_segment_lengths) != 450:
