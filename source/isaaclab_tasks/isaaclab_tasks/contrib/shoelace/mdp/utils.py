@@ -136,11 +136,26 @@ def grasp_state(
     asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
     left_robot_cfg: SceneEntityCfg,
     right_robot_cfg: SceneEntityCfg,
+    minimum_finger_position: float = 0.0,
 ) -> torch.Tensor:
-    """Infer per-tail grasp state from proximity and driven-finger closure."""
+    """Infer per-tail grasp state from proximity and contact-sized finger aperture.
+
+    Args:
+        env: The task environment.
+        maximum_distance: Maximum tail-to-TCP distance [m].
+        maximum_finger_position: Maximum driven finger-joint position [m].
+        asset_cfgs: Scene entities for the left and right cable chains.
+        left_robot_cfg: Left robot hand and finger scene entity.
+        right_robot_cfg: Right robot hand and finger scene entity.
+        minimum_finger_position: Minimum driven finger-joint position [m].
+
+    Returns:
+        Per-tail inferred grasp flags, shape ``(num_envs, 2)``.
+    """
     distances = grasp_distances(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
     finger_positions = gripper_positions(env, left_robot_cfg, right_robot_cfg)
-    return (distances <= maximum_distance) & (finger_positions <= maximum_finger_position)
+    valid_aperture = (finger_positions >= minimum_finger_position) & (finger_positions <= maximum_finger_position)
+    return (distances <= maximum_distance) & valid_aperture
 
 
 def pull_directions(reference: torch.Tensor) -> torch.Tensor:

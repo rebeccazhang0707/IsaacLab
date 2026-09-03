@@ -48,12 +48,14 @@ _THROAT_RADIUS = 0.025
 _MAXIMUM_THROAT_SEGMENTS = 52
 _TAIL_SUCCESS_DISTANCE = 0.09
 _TAIL_SUCCESS_SEPARATION = 0.18
-_MAXIMUM_SUCCESS_GRASP_DISTANCE = 0.03
-_GRASP_ACQUISITION_DISTANCE = 0.018
-_MAXIMUM_GRASP_DISTANCE = 0.035
+_MAXIMUM_SUCCESS_GRASP_DISTANCE = 0.015
+_GRASP_ACQUISITION_DISTANCE = 0.012
+_MAXIMUM_GRASP_DISTANCE = 0.015
 _GRIPPER_OPEN_POSITION = 0.01
 _GRIPPER_CLOSED_POSITION = 0.0
-_GRIPPER_CLOSED_THRESHOLD = 0.005
+_GRIPPER_MINIMUM_GRASP_POSITION = 0.0003
+_GRIPPER_CLOSED_THRESHOLD = 0.0025
+_GRASP_CONFIRMATION_STEPS = 3
 _TARGET_PULL_SPEED = 0.04
 _MINIMUM_LACE_HEIGHT = -0.003
 _MAXIMUM_LACE_SPREAD = 0.6
@@ -504,7 +506,9 @@ class RewardsCfg:
         params={
             **_ROBOT_TERM_PARAMS,
             "maximum_grasp_distance": _GRASP_ACQUISITION_DISTANCE,
+            "minimum_finger_position": _GRIPPER_MINIMUM_GRASP_POSITION,
             "maximum_finger_position": _GRIPPER_CLOSED_THRESHOLD,
+            "confirmation_steps": _GRASP_CONFIRMATION_STEPS,
             "side_weights": (1.0, 1.0),
         },
     )
@@ -550,6 +554,7 @@ class TerminationsCfg:
             "tail_success_distance": _TAIL_SUCCESS_DISTANCE,
             "tail_success_separation": _TAIL_SUCCESS_SEPARATION,
             "maximum_success_grasp_distance": _MAXIMUM_SUCCESS_GRASP_DISTANCE,
+            "minimum_finger_position": _GRIPPER_MINIMUM_GRASP_POSITION,
             "maximum_finger_position": _GRIPPER_CLOSED_THRESHOLD,
             "minimum_lace_height": _MINIMUM_LACE_HEIGHT,
             "maximum_lace_spread": _MAXIMUM_LACE_SPREAD,
@@ -568,8 +573,10 @@ class TerminationsCfg:
         params={
             **_ROBOT_TERM_PARAMS,
             "acquisition_distance": _GRASP_ACQUISITION_DISTANCE,
+            "minimum_finger_position": _GRIPPER_MINIMUM_GRASP_POSITION,
             "maximum_finger_position": _GRIPPER_CLOSED_THRESHOLD,
             "maximum_grasp_distance": _MAXIMUM_GRASP_DISTANCE,
+            "confirmation_steps": _GRASP_CONFIRMATION_STEPS,
         },
     )
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
@@ -661,7 +668,7 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
     """ADMM position-error correction fraction [dimensionless]."""
     admm_contact_matching: Literal["disabled", "latest", "sticky"] = "latest"
     """Frame-to-frame matching mode for ADMM rigid contacts."""
-    grasp_assist_enabled = True
+    grasp_assist_enabled = False
     grasp_assist_acquisition_distance = _GRASP_ACQUISITION_DISTANCE
     grasp_assist_release_distance = _MAXIMUM_GRASP_DISTANCE
     grasp_assist_acquisition_closed_separation = 0.0805

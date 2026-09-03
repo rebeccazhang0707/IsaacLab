@@ -614,7 +614,11 @@ def main() -> None:  # noqa: C901
     open_position = env_cfg.actions.left_gripper.open_command_expr["panda_finger_joint1"]
     if open_position <= closed_position:
         raise ValueError("Open position must be greater than closed position.")
-    closed_threshold = env_cfg.rewards.grasp_acquisition.params["maximum_finger_position"]
+    grasp_params = env_cfg.rewards.grasp_acquisition.params
+    acquisition_distance = grasp_params["maximum_grasp_distance"]
+    minimum_finger_position = grasp_params["minimum_finger_position"]
+    maximum_finger_position = grasp_params["maximum_finger_position"]
+    retention_distance = env_cfg.terminations.lost_grasp.params["maximum_grasp_distance"]
     physics_cfg = env_cfg.sim.physics
     physics_cfg.num_substeps = args_cli.num_substeps
     if args_cli.disable_cuda_graph:
@@ -695,7 +699,11 @@ def main() -> None:  # noqa: C901
             reset_state = _state(env)
             initial_tcp_to_tail_w = reset_state["tail"] - reset_state["tcp"]
             initial_tcp_to_tail_hand = torch.sum(reset_state["hand_axes"] * initial_tcp_to_tail_w.unsqueeze(-2), dim=-1)
-            acquired_at_reset = (reset_state["distance"][0] <= 0.018) & (reset_state["finger"][0] <= closed_threshold)
+            acquired_at_reset = (
+                (reset_state["distance"][0] <= acquisition_distance)
+                & (reset_state["finger"][0] >= minimum_finger_position)
+                & (reset_state["finger"][0] <= maximum_finger_position)
+            )
 
             policy_dt = env_cfg.sim.dt * env_cfg.decimation
             arm_action_scale = float(env_cfg.actions.left_arm.scale[0])
@@ -899,11 +907,21 @@ def main() -> None:  # noqa: C901
             hold_relative_slip = torch.linalg.vector_norm(
                 (pull_start["tail"] - pull_start["tcp"]) - (after_close["tail"] - after_close["tcp"]), dim=-1
             )[0]
-            acquired_after_close = (after_close["distance"][0] <= 0.018) & (
-                after_close["finger"][0] <= closed_threshold
+            acquired_after_close = (
+                (after_close["distance"][0] <= acquisition_distance)
+                & (after_close["finger"][0] >= minimum_finger_position)
+                & (after_close["finger"][0] <= maximum_finger_position)
             )
-            retained_after_hold = (pull_start["distance"][0] <= 0.035) & (pull_start["finger"][0] <= closed_threshold)
-            retained = (pull_end["distance"][0] <= 0.035) & (pull_end["finger"][0] <= closed_threshold)
+            retained_after_hold = (
+                (pull_start["distance"][0] <= retention_distance)
+                & (pull_start["finger"][0] >= minimum_finger_position)
+                & (pull_start["finger"][0] <= maximum_finger_position)
+            )
+            retained = (
+                (pull_end["distance"][0] <= retention_distance)
+                & (pull_end["finger"][0] >= minimum_finger_position)
+                & (pull_end["finger"][0] <= maximum_finger_position)
+            )
             curriculum_states = _calibrated_curriculum_states(
                 approach_trace=approach_trace,
                 reference_tail=reset_state["tail"],
@@ -954,7 +972,10 @@ def main() -> None:  # noqa: C901
                 "cable_damping_scale": args_cli.cable_damping_scale,
                 "closed_position_m_per_finger": closed_position,
                 "open_position_m_per_finger": open_position,
-                "closed_threshold_m_per_finger": closed_threshold,
+                "acquisition_distance_m": acquisition_distance,
+                "retention_distance_m": retention_distance,
+                "minimum_grasp_position_m_per_finger": minimum_finger_position,
+                "closed_threshold_m_per_finger": maximum_finger_position,
                 "requested_lace_mu": args_cli.lace_mu,
                 "requested_finger_mu": args_cli.finger_mu,
                 "shape_materials": shape_materials,

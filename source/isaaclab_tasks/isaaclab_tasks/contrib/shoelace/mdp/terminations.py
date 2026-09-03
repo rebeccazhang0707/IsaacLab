@@ -47,11 +47,13 @@ class lost_grasp(ManagerTermBase):
         super().__init__(cfg, env)
         self._acquired = torch.zeros((env.num_envs, 2), dtype=torch.bool, device=env.device)
         self._bilaterally_acquired = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self._candidate_steps = torch.zeros((env.num_envs, 2), dtype=torch.int64, device=env.device)
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         selected = slice(None) if env_ids is None else env_ids
         self._acquired[selected] = False
         self._bilaterally_acquired[selected] = False
+        self._candidate_steps[selected] = 0
 
     def __call__(
         self,
@@ -62,6 +64,8 @@ class lost_grasp(ManagerTermBase):
         asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
         left_robot_cfg: SceneEntityCfg,
         right_robot_cfg: SceneEntityCfg,
+        minimum_finger_position: float = 0.0,
+        confirmation_steps: int = 1,
     ) -> torch.Tensor:
         """Return per-environment grasp-loss flags after acquisition."""
         distances = grasp_distances(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
@@ -77,7 +81,12 @@ class lost_grasp(ManagerTermBase):
                 asset_cfgs,
                 left_robot_cfg,
                 right_robot_cfg,
+                minimum_finger_position,
             )
+            self._candidate_steps.copy_(
+                torch.where(acquired, self._candidate_steps + 1, torch.zeros_like(self._candidate_steps))
+            )
+            acquired = self._candidate_steps >= max(int(confirmation_steps), 1)
             retained = grasp_state(
                 env,
                 maximum_grasp_distance,
@@ -85,6 +94,7 @@ class lost_grasp(ManagerTermBase):
                 asset_cfgs,
                 left_robot_cfg,
                 right_robot_cfg,
+                minimum_finger_position,
             )
         else:
             acquired = retained = retained.bool()
@@ -107,6 +117,7 @@ def shoelace_success(
     asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
     left_robot_cfg: SceneEntityCfg,
     right_robot_cfg: SceneEntityCfg,
+    minimum_finger_position: float = 0.0,
 ) -> torch.Tensor:
     """Detect a cleared knot throat while both robots retain and separate the free tails."""
     positions, _, knot, tail_positions, _ = task_state(env, asset_cfgs)
@@ -123,6 +134,7 @@ def shoelace_success(
         asset_cfgs,
         left_robot_cfg,
         right_robot_cfg,
+        minimum_finger_position,
     ).all(dim=1)
     unsafe = shoelace_unsafe(
         env,

@@ -25,6 +25,7 @@ import isaaclab_tasks.contrib.shoelace.mdp.curriculums as shoelace_curriculums
 import isaaclab_tasks.contrib.shoelace.mdp.events as shoelace_events
 import isaaclab_tasks.contrib.shoelace.mdp.rewards as shoelace_rewards
 import isaaclab_tasks.contrib.shoelace.mdp.terminations as shoelace_terminations
+import isaaclab_tasks.contrib.shoelace.mdp.utils as shoelace_utils
 import isaaclab_tasks.contrib.shoelace.shoelace_env as shoelace_env_module
 from isaaclab_tasks.contrib.shoelace.agents.rsl_rl_ppo_cfg import ShoelacePPORunnerCfg
 from isaaclab_tasks.contrib.shoelace.mdp.constants import (
@@ -203,11 +204,11 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.grasp_assist_release_distance == pytest.approx(
         cfg.terminations.lost_grasp.params["maximum_grasp_distance"]
     )
-    assert cfg.grasp_assist_acquisition_distance == pytest.approx(0.018)
-    assert cfg.grasp_assist_release_distance == pytest.approx(0.035)
+    assert cfg.grasp_assist_acquisition_distance == pytest.approx(0.012)
+    assert cfg.grasp_assist_release_distance == pytest.approx(0.015)
     assert cfg.grasp_assist_acquisition_closed_separation == pytest.approx(0.0805)
     assert cfg.grasp_assist_release_open_separation == pytest.approx(0.081)
-    assert cfg.grasp_assist_enabled is True
+    assert cfg.grasp_assist_enabled is False
     assert cfg.grasp_assist_maximum_force == pytest.approx(2.0)
     assert SHOELACE_SEGMENT_COUNT == 360
     assert (PINNED_FIRST, PINNED_LAST) == (78, 281)
@@ -231,8 +232,10 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.rewards.dense_task.params["pull_weight"] == pytest.approx(0.25)
     assert cfg.rewards.grasp_acquisition.func is shoelace_rewards.grasp_acquisition_event
     assert cfg.rewards.grasp_acquisition.weight == pytest.approx(10.0)
-    assert cfg.rewards.grasp_acquisition.params["maximum_grasp_distance"] == pytest.approx(0.018)
-    assert cfg.rewards.grasp_acquisition.params["maximum_finger_position"] == pytest.approx(0.005)
+    assert cfg.rewards.grasp_acquisition.params["maximum_grasp_distance"] == pytest.approx(0.012)
+    assert cfg.rewards.grasp_acquisition.params["minimum_finger_position"] == pytest.approx(0.0003)
+    assert cfg.rewards.grasp_acquisition.params["maximum_finger_position"] == pytest.approx(0.0025)
+    assert cfg.rewards.grasp_acquisition.params["confirmation_steps"] == 3
     assert cfg.rewards.grasp_acquisition.params["side_weights"] == pytest.approx((1.0, 1.0))
     assert not hasattr(cfg.rewards, "approach_progress")
     assert not hasattr(cfg.rewards, "coordination")
@@ -1045,6 +1048,29 @@ def test_premature_close_penalizes_only_first_pre_acquisition_closure(monkeypatc
     torch.testing.assert_close(compute_penalty(), torch.zeros(1))
 
 
+def test_grasp_state_requires_contact_sized_finger_aperture(monkeypatch):
+    """A nearby tail must not count as grasped when the fingers are empty or too open."""
+    distances = torch.tensor([[0.006, 0.006], [0.013, 0.006], [0.006, 0.006]])
+    finger_positions = torch.tensor([[0.001, 0.0025], [0.001, 0.001], [0.0002, 0.0026]])
+    monkeypatch.setattr(shoelace_utils, "grasp_distances", lambda *args: distances)
+    monkeypatch.setattr(shoelace_utils, "gripper_positions", lambda *args: finger_positions)
+
+    grasped = shoelace_utils.grasp_state(
+        SimpleNamespace(),
+        maximum_distance=0.012,
+        maximum_finger_position=0.0025,
+        asset_cfgs=None,
+        left_robot_cfg=None,
+        right_robot_cfg=None,
+        minimum_finger_position=0.0003,
+    )
+
+    torch.testing.assert_close(
+        grasped,
+        torch.tensor([[True, True], [False, True], [False, False]]),
+    )
+
+
 def test_grasp_acquisition_rewards_each_side_only_once(monkeypatch):
     """Strict acquisition emits one per-side event and does not reward regrasping."""
     grasped = torch.zeros((2, 2), dtype=torch.bool)
@@ -1076,6 +1102,36 @@ def test_grasp_acquisition_rewards_each_side_only_once(monkeypatch):
 
     term.reset([0])
     torch.testing.assert_close(compute_reward(), torch.tensor([5.0, 0.0]))
+
+
+def test_grasp_acquisition_requires_consecutive_confirmation_steps(monkeypatch):
+    """Transient grasp geometry must not emit an acquisition event."""
+    grasped = torch.tensor([[True, False]])
+    monkeypatch.setattr(shoelace_rewards, "grasp_state", lambda *args, **kwargs: grasped)
+    env = SimpleNamespace(num_envs=1, device="cpu", step_dt=0.2)
+    term = shoelace_rewards.grasp_acquisition_event(None, env)
+
+    def compute_reward() -> torch.Tensor:
+        return term(
+            env,
+            maximum_grasp_distance=0.012,
+            maximum_finger_position=0.0025,
+            side_weights=(1.0, 1.0),
+            asset_cfgs=None,
+            left_robot_cfg=None,
+            right_robot_cfg=None,
+            minimum_finger_position=0.0003,
+            confirmation_steps=3,
+        )
+
+    torch.testing.assert_close(compute_reward(), torch.zeros(1))
+    torch.testing.assert_close(compute_reward(), torch.zeros(1))
+    grasped[:] = False
+    torch.testing.assert_close(compute_reward(), torch.zeros(1))
+    grasped[0, 0] = True
+    torch.testing.assert_close(compute_reward(), torch.zeros(1))
+    torch.testing.assert_close(compute_reward(), torch.zeros(1))
+    torch.testing.assert_close(compute_reward(), torch.tensor([2.5]))
 
 
 def test_tail_approach_progress_is_side_weighted_and_finite(monkeypatch):
@@ -1411,6 +1467,47 @@ def test_lost_grasp_uses_geometry_when_assistance_is_disabled(monkeypatch):
     torch.testing.assert_close(term(env, 0.01, 0.01, 0.025, None, None, None), torch.tensor([False]))
     retained[0, 1] = False
     torch.testing.assert_close(term(env, 0.01, 0.01, 0.025, None, None, None), torch.tensor([True]))
+
+
+def test_lost_grasp_requires_consecutive_unassisted_acquisition(monkeypatch):
+    """A transient geometric match must not arm the unassisted loss termination."""
+    distances = torch.zeros((1, 2))
+    acquired = torch.ones((1, 2), dtype=torch.bool)
+    retained = torch.ones((1, 2), dtype=torch.bool)
+    monkeypatch.setattr(shoelace_terminations, "grasp_distances", lambda *args: distances)
+    monkeypatch.setattr(
+        shoelace_terminations,
+        "grasp_state",
+        lambda _env, maximum_distance, *args, **kwargs: acquired if maximum_distance == 0.012 else retained,
+    )
+    env = SimpleNamespace(num_envs=1, device="cpu")
+    term = shoelace_terminations.lost_grasp(None, env)
+
+    def compute_termination() -> torch.Tensor:
+        return term(
+            env,
+            acquisition_distance=0.012,
+            maximum_finger_position=0.0025,
+            maximum_grasp_distance=0.015,
+            asset_cfgs=None,
+            left_robot_cfg=None,
+            right_robot_cfg=None,
+            minimum_finger_position=0.0003,
+            confirmation_steps=3,
+        )
+
+    torch.testing.assert_close(compute_termination(), torch.tensor([False]))
+    torch.testing.assert_close(compute_termination(), torch.tensor([False]))
+    acquired[:] = False
+    retained[:] = False
+    torch.testing.assert_close(compute_termination(), torch.tensor([False]))
+    acquired[:] = True
+    retained[:] = True
+    torch.testing.assert_close(compute_termination(), torch.tensor([False]))
+    torch.testing.assert_close(compute_termination(), torch.tensor([False]))
+    torch.testing.assert_close(compute_termination(), torch.tensor([False]))
+    retained[0, 1] = False
+    torch.testing.assert_close(compute_termination(), torch.tensor([True]))
 
 
 def test_lost_grasp_allows_recovery_before_bilateral_acquisition(monkeypatch):

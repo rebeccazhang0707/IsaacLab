@@ -35,10 +35,12 @@ class grasp_acquisition_event(ManagerTermBase):
     def __init__(self, cfg, env) -> None:
         super().__init__(cfg, env)
         self._acquired = torch.zeros((env.num_envs, 2), dtype=torch.bool, device=env.device)
+        self._candidate_steps = torch.zeros((env.num_envs, 2), dtype=torch.int64, device=env.device)
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         selected = slice(None) if env_ids is None else env_ids
         self._acquired[selected] = False
+        self._candidate_steps[selected] = 0
 
     def __call__(
         self,
@@ -49,6 +51,8 @@ class grasp_acquisition_event(ManagerTermBase):
         asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
         left_robot_cfg: SceneEntityCfg,
         right_robot_cfg: SceneEntityCfg,
+        minimum_finger_position: float = 0.0,
+        confirmation_steps: int = 1,
     ) -> torch.Tensor:
         """Return the weighted rate of first-time strict tail acquisitions.
 
@@ -60,6 +64,8 @@ class grasp_acquisition_event(ManagerTermBase):
             asset_cfgs: Scene entities for the left and right cable chains.
             left_robot_cfg: Left robot hand and finger scene entity.
             right_robot_cfg: Right robot hand and finger scene entity.
+            minimum_finger_position: Minimum driven finger-joint position for acquisition [m].
+            confirmation_steps: Consecutive control steps required to confirm acquisition.
 
         Returns:
             Per-environment weighted acquisition-event rate.
@@ -71,9 +77,14 @@ class grasp_acquisition_event(ManagerTermBase):
             asset_cfgs,
             left_robot_cfg,
             right_robot_cfg,
+            minimum_finger_position,
         )
-        newly_acquired = grasped & (~self._acquired)
-        self._acquired |= grasped
+        self._candidate_steps.copy_(
+            torch.where(grasped, self._candidate_steps + 1, torch.zeros_like(self._candidate_steps))
+        )
+        confirmed = self._candidate_steps >= max(int(confirmation_steps), 1)
+        newly_acquired = confirmed & (~self._acquired)
+        self._acquired |= confirmed
         weights = newly_acquired.new_tensor(side_weights, dtype=torch.float)
         return (
             torch.sum(newly_acquired.float() * weights, dim=1)
