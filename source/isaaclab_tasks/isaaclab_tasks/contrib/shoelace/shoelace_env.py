@@ -41,8 +41,13 @@ if TYPE_CHECKING:
 CABLE_DENSITY = 1150.0
 STRETCH_STIFFNESS = 1.0e7
 STRETCH_DAMPING = 2.0e2
-BEND_STIFFNESS = 0.50
-BEND_DAMPING = 0.45
+BEND_STIFFNESS = 5.0
+BEND_DAMPING = 1.0
+# Keep the bow material unchanged while the distal free tails resist gravity sag.
+TAIL_BEND_STIFFNESS = 100.0
+TAIL_BEND_DAMPING = 2.0
+TAIL_STIFF_CORE_LENGTH = 0.050
+TAIL_STIFF_TRANSITION_LENGTH = 0.012
 DAHL_MAX_STRAIN = 0.20
 DAHL_DECAY = 0.35
 
@@ -59,6 +64,7 @@ COLLISION_GROUP = 1
 PINNED_TUBE_SIDES = 6
 SHOELACE_ASSET_DIR = Path(__file__).resolve().parents[5] / "scripts/demos/assets/shoelace"
 SHOELACE_COLLIDER_ASSET = SHOELACE_ASSET_DIR / "collider_simplified.usd"
+SHOELACE_SETTLED_STATE_ASSET = SHOELACE_ASSET_DIR / "settled_tail_clear_segment_poses.npz"
 
 
 def _load_usd_curve(path: Path, prim_path: str) -> tuple[np.ndarray, float]:
@@ -78,6 +84,29 @@ def _load_usd_curve(path: Path, prim_path: str) -> tuple[np.ndarray, float]:
     if not widths:
         raise ValueError(f"Curve in {path} has no widths attribute")
     return centerline, 0.5 * float(min(widths))
+
+
+def _load_settled_segment_poses(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Load validated gravity-settled cable segment poses [m, quaternion x-y-z-w]."""
+    with np.load(path, allow_pickle=False) as state:
+        expected_names = ("shoelace_left", "shoelace_right")
+        if tuple(state.files) != expected_names:
+            raise ValueError(f"Expected settled shoelace arrays {expected_names}, got {tuple(state.files)}")
+        poses = tuple(np.asarray(state[name], dtype=np.float32) for name in expected_names)
+
+    expected_shapes = (
+        (PINNED_FIRST + 1, 7),
+        (SHOELACE_SEGMENT_COUNT - PINNED_LAST, 7),
+    )
+    for name, pose, expected_shape in zip(expected_names, poses, expected_shapes, strict=True):
+        if pose.shape != expected_shape:
+            raise ValueError(f"Expected settled {name} poses with shape {expected_shape}, got {pose.shape}")
+        if not np.isfinite(pose).all():
+            raise ValueError(f"Settled {name} poses must contain only finite values")
+        quaternion_norms = np.linalg.norm(pose[:, 3:], axis=1)
+        if not np.allclose(quaternion_norms, 1.0, atol=2.0e-5):
+            raise ValueError(f"Settled {name} poses contain non-unit quaternions")
+    return poses
 
 
 def _spawn_collision_mesh_usd(
@@ -189,6 +218,34 @@ def _neighbor_filter_window(points: np.ndarray, radius: float) -> int:
     minimum_length = float(np.linalg.norm(np.diff(points, axis=0), axis=1).min())
     contact_reach = 2.0 * radius + CONTACT_GAP
     return max(1, int(np.floor(contact_reach / minimum_length + 1.0e-9)) + 1)
+
+
+def _tail_joint_blend_weights(
+    joint_count: int,
+    segment_length: float,
+    free_end_at_start: bool,
+) -> np.ndarray:
+    """Return smooth per-joint weights for the stiff free-tail span.
+
+    Args:
+        joint_count: Number of joints in the dynamic cable chain.
+        segment_length: Uniform segment length [m].
+        free_end_at_start: Whether the free tail is at the first chain segment.
+
+    Returns:
+        Blend weights from the bow baseline to the tail material, shape ``(joint_count,)``.
+    """
+    distances = segment_length * np.arange(1, joint_count + 1, dtype=np.float64)
+    if TAIL_STIFF_TRANSITION_LENGTH > 0.0:
+        weights = np.clip(
+            (TAIL_STIFF_CORE_LENGTH + TAIL_STIFF_TRANSITION_LENGTH - distances) / TAIL_STIFF_TRANSITION_LENGTH,
+            0.0,
+            1.0,
+        )
+        weights = weights * weights * (3.0 - 2.0 * weights)
+    else:
+        weights = (distances <= TAIL_STIFF_CORE_LENGTH).astype(np.float64)
+    return weights if free_end_at_start else weights[::-1].copy()
 
 
 def _filter_rod_neighbors(builder: ModelBuilder, shapes: list[int], window: int) -> None:
@@ -366,15 +423,6 @@ class _ShoelacePhysics:
         NewtonManager.register_callback(self._configure_builder, PhysicsEvent.MODEL_INIT, name="shoelace_task_builder")
         NewtonManager.register_callback(self._configure_model, PhysicsEvent.PHYSICS_READY, name="shoelace_task_model")
 
-    def set_straight_rest_state(self) -> None:
-        """Use a straight untwisted bend reference while retaining the authored state."""
-        model = NewtonManager.get_model()
-        rest = model.body_q.numpy()
-        for bodies in self.cable_bodies:
-            for chain in (bodies[: PINNED_FIRST + 1], bodies[PINNED_FIRST + 1 :]):
-                rest[np.asarray(chain), 3:7] = rest[chain[0], 3:7]
-        model.body_q.assign(rest)
-
     def _configure_builder(self, _: object) -> None:
         """Apply cable properties that must exist before model finalization."""
         builder = NewtonManager.get_builder()
@@ -452,6 +500,7 @@ class _ShoelacePhysics:
         exact_quaternions = newton.utils.create_parallel_transport_cable_quaternions(
             [wp.vec3(*point) for point in self.centerline]
         )
+        mean_segment_length = float(np.linalg.norm(np.diff(self.centerline, axis=0), axis=1).mean())
         neighbor_window = _neighbor_filter_window(self.centerline, self.cable_radius)
         segment_ranges = (range(0, PINNED_FIRST + 1), range(PINNED_LAST, len(self.centerline) - 1))
         for world, (world_bodies, world_joints, shoe) in enumerate(
@@ -459,7 +508,13 @@ class _ShoelacePhysics:
         ):
             shoe_collider, tongue_collider, pinned_shape = shoe
             chain_shapes: list[list[int]] = []
-            for bodies, joints, segment_indices in zip(world_bodies, world_joints, segment_ranges, strict=True):
+            for bodies, joints, segment_indices, free_end_at_start in zip(
+                world_bodies,
+                world_joints,
+                segment_ranges,
+                (True, False),
+                strict=True,
+            ):
                 shapes: list[int] = []
                 for body, segment in zip(bodies, segment_indices, strict=True):
                     quaternion = exact_quaternions[segment]
@@ -487,18 +542,20 @@ class _ShoelacePhysics:
                 dof_end = int(builder.joint_qd_start[joints[-1]]) + 4
                 if dof_end - dof_start != 4 * len(joints):
                     raise RuntimeError("Cable joint DOFs must be contiguous")
-                builder.joint_target_ke[dof_start:dof_end] = (
-                    STRETCH_STIFFNESS * self.joint_stiffness_scale,
-                    STRETCH_STIFFNESS * self.joint_stiffness_scale,
-                    BEND_STIFFNESS * self.joint_stiffness_scale,
-                    BEND_STIFFNESS * self.joint_stiffness_scale,
-                ) * len(joints)
-                builder.joint_target_kd[dof_start:dof_end] = (
-                    STRETCH_DAMPING * self.joint_stiffness_scale,
-                    STRETCH_DAMPING * self.joint_stiffness_scale,
-                    BEND_DAMPING * self.joint_stiffness_scale,
-                    BEND_DAMPING * self.joint_stiffness_scale,
-                ) * len(joints)
+                tail_weights = _tail_joint_blend_weights(len(joints), mean_segment_length, free_end_at_start)
+                stiffness: list[float] = []
+                damping: list[float] = []
+                for tail_weight in tail_weights:
+                    bend_stiffness = BEND_STIFFNESS + tail_weight * (TAIL_BEND_STIFFNESS - BEND_STIFFNESS)
+                    bend_damping = BEND_DAMPING + tail_weight * (TAIL_BEND_DAMPING - BEND_DAMPING)
+                    stiffness.extend((STRETCH_STIFFNESS, STRETCH_STIFFNESS, bend_stiffness, bend_stiffness))
+                    damping.extend((STRETCH_DAMPING, STRETCH_DAMPING, bend_damping, bend_damping))
+                builder.joint_target_ke[dof_start:dof_end] = tuple(
+                    value * self.joint_stiffness_scale for value in stiffness
+                )
+                builder.joint_target_kd[dof_start:dof_end] = tuple(
+                    value * self.joint_stiffness_scale for value in damping
+                )
 
             for body, shape in ((world_bodies[0][-1], chain_shapes[0][-1]), (world_bodies[1][0], chain_shapes[1][0])):
                 builder.body_mass[body] = 0.0
@@ -611,6 +668,7 @@ class ShoelaceEnv(ManagerBasedRLEnv):
             raise ValueError(f"Expected 450 authored shoelace segments, got {len(authored_segment_lengths)}")
         self._authored_mean_segment_length = float(authored_segment_lengths.mean())
         self._centerline = _resample_centerline(authored_centerline, SHOELACE_SEGMENT_COUNT)
+        self._settled_segment_poses = _load_settled_segment_poses(SHOELACE_SETTLED_STATE_ASSET)
         mean_segment_length = float(np.linalg.norm(np.diff(self._centerline, axis=0), axis=1).mean())
         self._configure_runtime_cfg(cfg, SHOELACE_COLLIDER_ASSET)
         self._physics = _ShoelacePhysics(
@@ -629,7 +687,24 @@ class ShoelaceEnv(ManagerBasedRLEnv):
         )
 
         super().__init__(cfg, render_mode, **kwargs)
-        self._physics.set_straight_rest_state()
+        self._install_settled_default_state()
+
+    def _install_settled_default_state(self) -> None:
+        """Install the offline gravity-settled cable pose as the zero-velocity reset state."""
+        for cable_name, local_pose in zip(
+            ("shoelace_left", "shoelace_right"), self._settled_segment_poses, strict=True
+        ):
+            cable = self.scene[cable_name]
+            default_pose = cable.data.default_segment_pose_w.torch
+            segment_pose = default_pose.new_tensor(local_pose).unsqueeze(0).expand_as(default_pose).clone()
+            segment_pose[..., :3] += self.scene.env_origins.unsqueeze(1)
+            segment_velocity = cable.data.default_segment_velocity_w.torch.new_zeros(
+                cable.data.default_segment_velocity_w.torch.shape
+            )
+            default_pose.copy_(segment_pose)
+            cable.data.default_segment_velocity_w.torch.copy_(segment_velocity)
+            cable.write_segment_pose_to_sim_index(segment_pose=segment_pose)
+            cable.write_segment_velocity_to_sim_index(segment_velocity=segment_velocity)
 
     def _configure_runtime_cfg(self, cfg: ShoelaceEnvCfg, collider_asset: Path) -> None:
         """Fill asset- and world-count-dependent configuration before validation."""

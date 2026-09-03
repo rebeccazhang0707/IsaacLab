@@ -20,6 +20,9 @@ interior uses one visible static collision mesh.
     # Randomize shoe color, cable color, and cable radius once per environment.
     uv run python scripts/demos/newton_shoelace.py --num_envs 16 --randomize --randomization_seed 7
 
+    # Keep the authored shoelace pose by disabling gravity.
+    uv run python scripts/demos/newton_shoelace.py --disable_gravity
+
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ parser.add_argument(
     help="Randomize shoe color, cable color, and cable radius once per environment at startup.",
 )
 parser.add_argument("--randomization_seed", type=int, default=0, help="Seed for per-environment randomization.")
+parser.add_argument("--disable_gravity", action="store_true", help="Disable gravity for this demo.")
 add_launcher_args(parser)
 parser.set_defaults(physics="newton_vbd", visualizer=["newton_gl"])
 args_cli = parser.parse_args()
@@ -90,8 +94,8 @@ ENV_SPACING = 0.5
 CABLE_DENSITY = 1150.0
 STRETCH_STIFFNESS = 1.0e7
 STRETCH_DAMPING = 2.0e2
-BEND_STIFFNESS = 0.50
-BEND_DAMPING = 0.45
+BEND_STIFFNESS = 10.0
+BEND_DAMPING = 2.0
 DAHL_MAX_STRAIN = 0.20
 DAHL_DECAY = 0.35
 CABLE_JOINT_STIFFNESS = (STRETCH_STIFFNESS, STRETCH_STIFFNESS, BEND_STIFFNESS, BEND_STIFFNESS)
@@ -609,7 +613,7 @@ def _configure_shoe_collider(
     """Enable and hide the collider prim already provided by the shoe USD."""
     del translation, orientation, kwargs
     collision_cfg = [sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)]
-    if not sim_utils.apply_collision_properties(prim_path, collision_cfg):
+    if not sim_utils.apply_collision_properties(prim_path, collision_cfg, create_if_missing=True):
         raise RuntimeError(f"Failed to enable the shoe collider at {prim_path}")
     prim = sim_utils.get_current_stage().GetPrimAtPath(prim_path)
     sim_utils.set_prim_visibility(prim, False)
@@ -658,7 +662,7 @@ def create_scene_cfg(centerline: np.ndarray, cable_radius: float, randomize: boo
         mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
         mesh.CreateDisplayColorAttr([Gf.Vec3f(*CABLE_COLOR)])
         collision_cfg = [sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)]
-        if not sim_utils.apply_collision_properties(str(mesh.GetPath()), collision_cfg):
+        if not sim_utils.apply_collision_properties(str(mesh.GetPath()), collision_cfg, create_if_missing=True):
             raise RuntimeError(f"Failed to enable pinned collision mesh at {mesh.GetPath()}")
         return root
 
@@ -802,7 +806,7 @@ def main() -> None:
         sim_cfg = sim_utils.SimulationCfg(
             dt=FRAME_DT,
             device=args_cli.device,
-            gravity=(0.0, 0.0, GRAVITY),
+            gravity=(0.0, 0.0, 0.0 if args_cli.disable_gravity else GRAVITY),
             physics=physics_cfg,
             visualizer_cfgs=[
                 NewtonGLVisualizerCfg(

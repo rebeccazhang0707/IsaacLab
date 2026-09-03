@@ -52,6 +52,34 @@ def test_shoelace_task_uses_simplified_shoe_collider():
     assert len(collider_mesh.GetFaceVertexCountsAttr().Get()) == 8000
 
 
+def test_shoelace_task_uses_finite_gravity_settled_reset_poses():
+    """The cable reset asset must contain one valid pose for every dynamic segment."""
+    left_pose, right_pose = shoelace_env_module._load_settled_segment_poses(
+        shoelace_env_module.SHOELACE_SETTLED_STATE_ASSET
+    )
+
+    assert left_pose.shape == (LEFT_CABLE_SEGMENT_COUNT, 7)
+    assert right_pose.shape == (RIGHT_CABLE_SEGMENT_COUNT, 7)
+    assert np.isfinite(left_pose).all()
+    assert np.isfinite(right_pose).all()
+    np.testing.assert_allclose(np.linalg.norm(left_pose[:, 3:], axis=1), 1.0, atol=2.0e-5)
+    np.testing.assert_allclose(np.linalg.norm(right_pose[:, 3:], axis=1), 1.0, atol=2.0e-5)
+
+
+def test_tail_bend_weights_leave_the_bow_at_baseline_stiffness():
+    """Only the physical free ends should receive the tail material blend."""
+    segment_length = 0.003
+    joint_count = 30
+    start_weights = shoelace_env_module._tail_joint_blend_weights(joint_count, segment_length, True)
+    end_weights = shoelace_env_module._tail_joint_blend_weights(joint_count, segment_length, False)
+
+    np.testing.assert_allclose(end_weights, start_weights[::-1])
+    assert np.all(np.diff(start_weights) <= 0.0)
+    assert np.all(start_weights[:16] == 1.0)
+    assert np.all(start_weights[21:] == 0.0)
+    assert np.any((start_weights > 0.0) & (start_weights < 1.0))
+
+
 def test_shoe_collider_spawner_authors_collision_on_mesh(monkeypatch):
     """The collider mesh must remain physics geometry without visual-shape import."""
     stage = Usd.Stage.CreateInMemory()
@@ -105,7 +133,7 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert isinstance(cfg, ManagerBasedRLEnvCfg)
     assert cfg.coupling_mode == "proxy"
     assert cfg.admm_iterations == 5
-    assert cfg.admm_rho == pytest.approx(200.0)
+    assert cfg.admm_rho == pytest.approx(400.0)
     assert cfg.admm_gamma == pytest.approx(0.0)
     assert cfg.admm_baumgarte == pytest.approx(0.5)
     assert cfg.admm_contact_matching == "latest"
@@ -134,20 +162,27 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.events.reset_shoelace.params["gripper_open_phase_fraction"] == pytest.approx(0.4)
     assert cfg.events.reset_shoelace.params["approach_phase_exponent"] == pytest.approx(2.0)
     assert cfg.events.reset_shoelace.params["grasp_joint_positions"][0] == pytest.approx(
-        (0.306502, -0.108321, -0.457832, -2.629056, 1.130974, 2.579587, -0.254864)
+        (0.389244, 0.011088, -0.521930, -2.569779, 1.149809, 2.555253, -0.150486)
     )
     assert cfg.events.reset_shoelace.params["grasp_joint_positions"][1] == pytest.approx(
-        (-0.405931, -0.120616, 0.399613, -2.651660, -1.227738, 2.667932, 1.787070)
+        (-0.509291, -0.021903, 0.501640, -2.588014, -1.197501, 2.624648, 1.603688)
+    )
+    arm_states = cfg.events.reset_shoelace.params["arm_joint_positions_by_level"]
+    assert tuple(len(states) for states in arm_states) == (11, 11)
+    assert arm_states[0][7] == pytest.approx((0.374299, -0.059333, -0.531376, -2.610756, 1.098843, 2.563040, -0.152894))
+    assert arm_states[1][9] == pytest.approx((-0.439454, -0.223472, 0.486224, -2.694287, -1.023344, 2.657568, 1.607431))
+    assert cfg.events.reset_shoelace.params["gripper_joint_positions_by_level"] == pytest.approx(
+        (0.0, 0.0025, 0.005, 0.0075, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01)
     )
     assert cfg.events.reset_shoelace.params["closed_position"] == pytest.approx(0.0)
     assert cfg.actions.left_arm.scale == pytest.approx((0.005, 0.005, 0.005, 0.01, 0.01, 0.01))
     assert cfg.actions.left_arm.body_offset.pos == pytest.approx((0.0, 0.0, 0.1034))
-    assert cfg.actions.left_gripper.open_command_expr["panda_finger_joint1"] == pytest.approx(0.04)
+    assert cfg.actions.left_gripper.open_command_expr["panda_finger_joint1"] == pytest.approx(0.01)
     assert cfg.actions.left_gripper.close_command_expr["panda_finger_joint1"] == pytest.approx(0.0)
-    assert cfg.actions.right_gripper.open_command_expr["panda_finger_joint1"] == pytest.approx(0.04)
+    assert cfg.actions.right_gripper.open_command_expr["panda_finger_joint1"] == pytest.approx(0.01)
     assert cfg.actions.right_gripper.close_command_expr["panda_finger_joint1"] == pytest.approx(0.0)
-    assert cfg.scene.robot_left.init_state.joint_pos["panda_finger_joint.*"] == pytest.approx(0.04)
-    assert cfg.scene.robot_right.init_state.joint_pos["panda_finger_joint.*"] == pytest.approx(0.04)
+    assert cfg.scene.robot_left.init_state.joint_pos["panda_finger_joint.*"] == pytest.approx(0.01)
+    assert cfg.scene.robot_right.init_state.joint_pos["panda_finger_joint.*"] == pytest.approx(0.01)
     assert cfg.scene.robot_left.init_state.joint_pos["panda_joint4"] == pytest.approx(-2.681384)
     assert cfg.scene.robot_left.init_state.joint_pos["panda_joint5"] == pytest.approx(0.871062)
     assert cfg.scene.robot_left.init_state.joint_pos["panda_joint6"] == pytest.approx(2.543250)
@@ -197,7 +232,7 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.rewards.grasp_acquisition.func is shoelace_rewards.grasp_acquisition_event
     assert cfg.rewards.grasp_acquisition.weight == pytest.approx(10.0)
     assert cfg.rewards.grasp_acquisition.params["maximum_grasp_distance"] == pytest.approx(0.018)
-    assert cfg.rewards.grasp_acquisition.params["maximum_finger_position"] == pytest.approx(0.02)
+    assert cfg.rewards.grasp_acquisition.params["maximum_finger_position"] == pytest.approx(0.005)
     assert cfg.rewards.grasp_acquisition.params["side_weights"] == pytest.approx((1.0, 1.0))
     assert not hasattr(cfg.rewards, "approach_progress")
     assert not hasattr(cfg.rewards, "coordination")
@@ -667,6 +702,19 @@ def test_reset_curriculum_opens_gripper_before_increasing_approach_distance():
     torch.testing.assert_close(
         gripper_difficulty, torch.tensor(((0.0,), (0.5,), (1.0,), (1.0,), (1.0,), (1.0,), (1.0,)))
     )
+
+
+def test_reset_curriculum_selects_calibrated_states_by_discrete_level():
+    """Each environment must receive the measured state for its sampled curriculum level."""
+    cfg = ShoelaceEnvCfg()
+    left_states = cfg.events.reset_shoelace.params["arm_joint_positions_by_level"][0]
+    levels = torch.tensor((10, 7, 0), dtype=torch.long)
+
+    selected = shoelace_events.ResetShoelaceCurriculum._select_joint_positions(torch.zeros((3, 7)), left_states, levels)
+
+    torch.testing.assert_close(selected[0], torch.tensor(left_states[10]))
+    torch.testing.assert_close(selected[1], torch.tensor(left_states[7]))
+    torch.testing.assert_close(selected[2], torch.tensor(left_states[0]))
 
 
 def test_shoelace_coupler_solves_robot_shoe_contact_in_mjwarp():

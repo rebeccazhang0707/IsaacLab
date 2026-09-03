@@ -51,9 +51,9 @@ _TAIL_SUCCESS_SEPARATION = 0.18
 _MAXIMUM_SUCCESS_GRASP_DISTANCE = 0.03
 _GRASP_ACQUISITION_DISTANCE = 0.018
 _MAXIMUM_GRASP_DISTANCE = 0.035
-_GRIPPER_OPEN_POSITION = 0.04
+_GRIPPER_OPEN_POSITION = 0.01
 _GRIPPER_CLOSED_POSITION = 0.0
-_GRIPPER_CLOSED_THRESHOLD = 0.02
+_GRIPPER_CLOSED_THRESHOLD = 0.005
 _TARGET_PULL_SPEED = 0.04
 _MINIMUM_LACE_HEIGHT = -0.003
 _MAXIMUM_LACE_SPREAD = 0.6
@@ -81,15 +81,44 @@ _RIGHT_FRANKA_ARM_JOINT_POSITIONS = {
     "panda_joint6": 2.645580,
     "panda_joint7": 1.577059,
 }
-_LEFT_FRANKA_GRASP_JOINT_POSITIONS = (0.306502, -0.108321, -0.457832, -2.629056, 1.130974, 2.579587, -0.254864)
-_RIGHT_FRANKA_GRASP_JOINT_POSITIONS = (
-    -0.405931,
-    -0.120616,
-    0.399613,
-    -2.651660,
-    -1.227738,
-    2.667932,
-    1.787070,
+_LEFT_FRANKA_SETTLED_GRASP_JOINT_POSITIONS = (
+    0.389244,
+    0.011088,
+    -0.521930,
+    -2.569779,
+    1.149809,
+    2.555253,
+    -0.150486,
+)
+_RIGHT_FRANKA_SETTLED_GRASP_JOINT_POSITIONS = (
+    -0.509291,
+    -0.021903,
+    0.501640,
+    -2.588014,
+    -1.197501,
+    2.624648,
+    1.603688,
+)
+_LEFT_FRANKA_CURRICULUM_JOINT_POSITIONS = (_LEFT_FRANKA_SETTLED_GRASP_JOINT_POSITIONS,) * 6 + (
+    (0.383982, -0.016711, -0.526566, -2.592917, 1.140252, 2.562327, -0.165460),
+    (0.374299, -0.059333, -0.531376, -2.610756, 1.098843, 2.563040, -0.152894),
+    (0.354776, -0.120520, -0.533189, -2.634336, 1.037260, 2.562372, -0.133620),
+    (0.320544, -0.194545, -0.527101, -2.659350, 0.959992, 2.557317, -0.108805),
+    tuple(_LEFT_FRANKA_ARM_JOINT_POSITIONS.values()),
+)
+_RIGHT_FRANKA_CURRICULUM_JOINT_POSITIONS = (_RIGHT_FRANKA_SETTLED_GRASP_JOINT_POSITIONS,) * 6 + (
+    (-0.510776, -0.033617, 0.501523, -2.619221, -1.247455, 2.646284, 1.657949),
+    (-0.499383, -0.091087, 0.499334, -2.634953, -1.164799, 2.659881, 1.652890),
+    (-0.477853, -0.149894, 0.497408, -2.662283, -1.103112, 2.660680, 1.633300),
+    (-0.439454, -0.223472, 0.486224, -2.694287, -1.023344, 2.657568, 1.607431),
+    tuple(_RIGHT_FRANKA_ARM_JOINT_POSITIONS.values()),
+)
+_CURRICULUM_GRIPPER_JOINT_POSITIONS = (
+    tuple(
+        _GRIPPER_CLOSED_POSITION + fraction * (_GRIPPER_OPEN_POSITION - _GRIPPER_CLOSED_POSITION)
+        for fraction in (0.0, 0.25, 0.5, 0.75)
+    )
+    + (_GRIPPER_OPEN_POSITION,) * 7
 )
 
 
@@ -405,13 +434,18 @@ class EventCfg:
                 SceneEntityCfg("robot_right", joint_names=["panda_finger_joint.*"]),
             ),
             "grasp_joint_positions": (
-                _LEFT_FRANKA_GRASP_JOINT_POSITIONS,
-                _RIGHT_FRANKA_GRASP_JOINT_POSITIONS,
+                _LEFT_FRANKA_SETTLED_GRASP_JOINT_POSITIONS,
+                _RIGHT_FRANKA_SETTLED_GRASP_JOINT_POSITIONS,
             ),
             "open_position": _GRIPPER_OPEN_POSITION,
             "closed_position": _GRIPPER_CLOSED_POSITION,
             "gripper_open_phase_fraction": _GRIPPER_OPEN_PHASE_FRACTION,
             "approach_phase_exponent": _APPROACH_PHASE_EXPONENT,
+            "arm_joint_positions_by_level": (
+                _LEFT_FRANKA_CURRICULUM_JOINT_POSITIONS,
+                _RIGHT_FRANKA_CURRICULUM_JOINT_POSITIONS,
+            ),
+            "gripper_joint_positions_by_level": _CURRICULUM_GRIPPER_JOINT_POSITIONS,
         },
     )
 
@@ -619,7 +653,7 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
     """Coupled-solver mode selected when the environment is constructed."""
     admm_iterations: int = 5
     """Number of ADMM interface iterations per coupled step."""
-    admm_rho: float = 200.0
+    admm_rho: float = 400.0
     """ADMM penalty parameter [dimensionless]."""
     admm_gamma: float = 0.0
     """ADMM proximal mass scaling parameter [dimensionless]."""
