@@ -55,6 +55,7 @@ _GRIPPER_OPEN_POSITION = 0.01
 _GRIPPER_CLOSED_POSITION = 0.002
 _GRIPPER_MINIMUM_GRASP_POSITION = 0.0003
 _GRIPPER_CLOSED_THRESHOLD = 0.0025
+_GRIPPER_SUCCESS_THRESHOLD = 0.0035
 _GRASP_CONFIRMATION_STEPS = 1
 _GRASP_RELEASE_CONFIRMATION_STEPS = 6
 _TARGET_PULL_SPEED = 0.04
@@ -499,7 +500,7 @@ class RewardsCfg:
             "maximum_grasp_distance": _MAXIMUM_GRASP_DISTANCE,
             "maximum_progress_rate": 3.0,
             "soft_min_temperature": 0.05,
-            "soft_min_weight": 0.25,
+            "soft_min_weight": 0.75,
             "confirmation_steps": _GRASP_CONFIRMATION_STEPS,
             "approach_weight": 0.1,
             "acquisition_weight": 0.25,
@@ -561,7 +562,7 @@ class TerminationsCfg:
             "tail_success_separation": _TAIL_SUCCESS_SEPARATION,
             "maximum_success_grasp_distance": _MAXIMUM_SUCCESS_GRASP_DISTANCE,
             "minimum_finger_position": _GRIPPER_MINIMUM_GRASP_POSITION,
-            "maximum_finger_position": _GRIPPER_CLOSED_THRESHOLD,
+            "maximum_finger_position": _GRIPPER_SUCCESS_THRESHOLD,
             "minimum_lace_height": _MINIMUM_LACE_HEIGHT,
             "maximum_lace_spread": _MAXIMUM_LACE_SPREAD,
         },
