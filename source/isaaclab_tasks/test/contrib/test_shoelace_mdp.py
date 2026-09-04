@@ -146,7 +146,7 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert not hasattr(cfg.actions, "force")
     assert cfg.events.reset_shoelace.func is shoelace_events.ResetShoelaceCurriculum
     assert cfg.curriculum.pull_to_grasp.func is shoelace_curriculums.PullToGraspCurriculum
-    assert cfg.curriculum.pull_to_grasp.params["level_count"] == 11
+    assert cfg.curriculum.pull_to_grasp.params["level_count"] == 14
     assert "approach_level_count" not in cfg.curriculum.pull_to_grasp.params
     assert "grasp_assist_strengths" not in cfg.curriculum.pull_to_grasp.params
     assert cfg.curriculum.pull_to_grasp.params["current_level_fraction"] == pytest.approx(0.5)
@@ -169,11 +169,15 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
         (-0.509291, -0.021903, 0.501640, -2.588014, -1.197501, 2.624648, 1.603688)
     )
     arm_states = cfg.events.reset_shoelace.params["arm_joint_positions_by_level"]
-    assert tuple(len(states) for states in arm_states) == (11, 11)
-    assert arm_states[0][7] == pytest.approx((0.374299, -0.059333, -0.531376, -2.610756, 1.098843, 2.563040, -0.152894))
-    assert arm_states[1][9] == pytest.approx((-0.439454, -0.223472, 0.486224, -2.694287, -1.023344, 2.657568, 1.607431))
+    assert tuple(len(states) for states in arm_states) == (14, 14)
+    assert arm_states[0][10] == pytest.approx(
+        (0.374299, -0.059333, -0.531376, -2.610756, 1.098843, 2.563040, -0.152894)
+    )
+    assert arm_states[1][12] == pytest.approx(
+        (-0.439454, -0.223472, 0.486224, -2.694287, -1.023344, 2.657568, 1.607431)
+    )
     assert cfg.events.reset_shoelace.params["gripper_joint_positions_by_level"] == pytest.approx(
-        (0.002, 0.003, 0.004, 0.006, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01)
+        (0.002, 0.0025, 0.003, 0.0035, 0.004, 0.005, 0.006, 0.008, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01)
     )
     assert cfg.events.reset_shoelace.params["closed_position"] == pytest.approx(0.002)
     assert cfg.actions.left_arm.scale == pytest.approx((0.005, 0.005, 0.005, 0.01, 0.01, 0.01))
@@ -236,7 +240,6 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.rewards.dense_task.params["soft_min_temperature"] == pytest.approx(0.05)
     assert cfg.rewards.dense_task.params["soft_min_weight"] == pytest.approx(0.25)
     assert cfg.rewards.dense_task.params["confirmation_steps"] == 1
-    assert cfg.rewards.dense_task.params["retention_weight"] == pytest.approx(0.5)
     assert cfg.rewards.dense_task.params["pull_weight"] == pytest.approx(0.25)
     assert cfg.rewards.grasp_acquisition.func is shoelace_rewards.bilateral_grasp_acquisition_event
     assert cfg.rewards.grasp_acquisition.weight == pytest.approx(10.0)
@@ -273,7 +276,7 @@ def test_shoelace_play_mode_uses_complete_authored_reset():
 
     cfg.play_mode()
 
-    assert cfg.curriculum.pull_to_grasp.params["initial_level"] == 10
+    assert cfg.curriculum.pull_to_grasp.params["initial_level"] == 13
     assert cfg.curriculum.pull_to_grasp.params["current_level_fraction"] == pytest.approx(1.0)
     assert cfg.curriculum.pull_to_grasp.params["current_level_fraction_schedule"] == pytest.approx((1.0,))
     assert cfg.curriculum.pull_to_grasp.params["terminal_level_fraction"] == pytest.approx(1.0)
@@ -1076,7 +1079,6 @@ def test_reset_relative_dense_reward_requires_confirmed_grasp_for_task_progress(
             approach_weight=0.1,
             acquisition_weight=0.25,
             task_weight=1.0,
-            retention_weight=0.5,
             pull_weight=0.25,
             asset_cfgs=None,
             left_robot_cfg="left",
@@ -1094,9 +1096,9 @@ def test_reset_relative_dense_reward_requires_confirmed_grasp_for_task_progress(
     torch.testing.assert_close(compute_reward(), torch.zeros(1))
 
     tcp_positions[:, 0, 0] += 0.01
-    assert compute_reward().item() < 0.0
+    torch.testing.assert_close(compute_reward(), torch.zeros(1))
     tcp_positions.copy_(tail_positions)
-    assert compute_reward().item() > 0.0
+    torch.testing.assert_close(compute_reward(), torch.zeros(1))
 
     tail_positions.copy_(torch.tensor([[[-0.1, 0.0, 0.0], [0.1, 0.0, 0.0]]]))
     tcp_positions.copy_(tail_positions)
@@ -1106,19 +1108,17 @@ def test_reset_relative_dense_reward_requires_confirmed_grasp_for_task_progress(
     grasped[:] = False
     positions[..., 0] = 0.2
     torch.testing.assert_close(compute_reward(), torch.zeros(1))
-    grasped[:] = True
     positions.zero_()
     tail_positions.copy_(torch.tensor([[[-0.06, 0.0, 0.0], [0.06, 0.0, 0.0]]]))
     tcp_positions.copy_(tail_positions)
     tail_velocities.zero_()
+    grasped[:] = True
     assert compute_reward().item() < 0.0
 
     term.reset()
     torch.testing.assert_close(compute_reward(), torch.zeros(1))
     grasped[:] = False
     tcp_positions[..., 2] += 0.03
-    assert compute_reward().item() < 0.0
-    term.reset()
     torch.testing.assert_close(compute_reward(), torch.zeros(1))
 
 

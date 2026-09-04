@@ -618,7 +618,6 @@ class reset_relative_dense_reward(ManagerTermBase):
         super().__init__(cfg, env)
         self._previous_approach = torch.full((env.num_envs,), torch.nan, device=env.device)
         self._previous_acquisition = torch.full((env.num_envs,), torch.nan, device=env.device)
-        self._previous_retention = torch.full((env.num_envs,), torch.nan, device=env.device)
         self._baseline_throat_count = torch.full((env.num_envs,), torch.nan, device=env.device)
         self._baseline_tail_distances = torch.full((env.num_envs, 2), torch.nan, device=env.device)
         self._baseline_tail_separation = torch.full((env.num_envs,), torch.nan, device=env.device)
@@ -630,7 +629,6 @@ class reset_relative_dense_reward(ManagerTermBase):
         selected = slice(None) if env_ids is None else env_ids
         self._previous_approach[selected] = torch.nan
         self._previous_acquisition[selected] = torch.nan
-        self._previous_retention[selected] = torch.nan
         self._baseline_throat_count[selected] = torch.nan
         self._baseline_tail_distances[selected] = torch.nan
         self._baseline_tail_separation[selected] = torch.nan
@@ -663,18 +661,16 @@ class reset_relative_dense_reward(ManagerTermBase):
         approach_weight: float,
         acquisition_weight: float,
         task_weight: float,
-        retention_weight: float,
         pull_weight: float,
         asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
         left_robot_cfg: SceneEntityCfg,
         right_robot_cfg: SceneEntityCfg,
     ) -> torch.Tensor:
-        """Return bounded phase, retention, and strict-grasp directional pull credit.
+        """Return bounded phase progress and strict-grasp directional pull credit.
 
         The approach and acquisition potentials stop contributing after bilateral acquisition. The task
         potential is zero at the episode reset and reaches one only when every geometric success margin is
         met. Its soft minimum emphasizes the least-complete margin without creating a hard zero-gradient gate.
-        The retention potential penalizes tail-to-TCP slip without rewarding a static grasp.
 
         Args:
             env: The task environment.
@@ -696,7 +692,6 @@ class reset_relative_dense_reward(ManagerTermBase):
             approach_weight: Relative weight of approach progress.
             acquisition_weight: Relative weight of aperture-aligned acquisition progress.
             task_weight: Relative weight of reset-relative geometric progress.
-            retention_weight: Relative weight of post-acquisition tail-to-TCP retention progress.
             pull_weight: Relative weight of signed directional tail velocity.
             asset_cfgs: Scene entities for the left and right cable chains.
             left_robot_cfg: Left robot hand and finger scene entity.
@@ -735,7 +730,6 @@ class reset_relative_dense_reward(ManagerTermBase):
         approach_score = reach.mean(dim=1)
         per_tail_acquisition = _hamacher_product(reach, acquisition)
         acquisition_score = _hamacher_product(per_tail_acquisition[:, 0], per_tail_acquisition[:, 1])
-        retention_score = _tail_retention_score(distances, maximum_grasp_distance)
 
         throat_count, tail_distances, tail_separation = untying_metrics(
             positions,
@@ -800,12 +794,6 @@ class reset_relative_dense_reward(ManagerTermBase):
             env.step_dt,
             bounded_rate,
         )
-        retention_rate = _finite_difference_rate(
-            retention_score,
-            self._previous_retention,
-            env.step_dt,
-            bounded_rate,
-        )
         task_rate = _finite_difference_rate(
             task_progress,
             self._previous_task_progress,
@@ -814,7 +802,6 @@ class reset_relative_dense_reward(ManagerTermBase):
         )
         pre_acquisition = ~self._bilaterally_acquired
         task_active = self._bilaterally_acquired & bilateral_grasp & (~newly_acquired)
-        retention_active = self._bilaterally_acquired & (~newly_acquired)
 
         projected_speed = torch.sum(tail_velocities * pull_directions(tail_velocities), dim=-1)
         synchronized_speed = projected_speed.amin(dim=1)
@@ -824,13 +811,11 @@ class reset_relative_dense_reward(ManagerTermBase):
             approach_weight * approach_rate * pre_acquisition
             + acquisition_weight * acquisition_rate * pre_acquisition
             + task_weight * task_rate * task_active
-            + retention_weight * retention_rate * retention_active
             + pull_weight * pull_score * pull_active
         )
 
         self._previous_approach.copy_(torch.where(finite, approach_score, self._previous_approach))
         self._previous_acquisition.copy_(torch.where(finite, acquisition_score, self._previous_acquisition))
-        self._previous_retention.copy_(torch.where(finite, retention_score, self._previous_retention))
         self._previous_task_progress.copy_(torch.where(finite, task_progress, self._previous_task_progress))
         return torch.where(finite, reward, torch.zeros_like(reward))
 
@@ -1072,13 +1057,6 @@ def _grasp_aperture_score(
     upper_range = max(open_position - maximum_finger_position, 1.0e-6)
     upper_score = (open_position - finger_positions) / upper_range
     return torch.minimum(lower_score, upper_score).clamp(0.0, 1.0)
-
-
-def _tail_retention_score(distances: torch.Tensor, maximum_grasp_distance: float) -> torch.Tensor:
-    """Return a worst-tail retention potential that approaches zero at release."""
-    distance_fraction = distances / max(maximum_grasp_distance, 1.0e-6)
-    per_tail_retention = (1.0 - distance_fraction.square()).clamp(0.0, 1.0)
-    return per_tail_retention.amin(dim=1)
 
 
 def _reset_relative_task_progress(
