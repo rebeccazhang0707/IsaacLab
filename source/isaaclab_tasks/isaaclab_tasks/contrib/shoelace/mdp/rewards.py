@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from isaaclab.envs.mdp.rewards import is_terminated_term
-from isaaclab.managers import ManagerTermBase, SceneEntityCfg
+from isaaclab.managers import ManagerTermBase, RewardTermCfg, SceneEntityCfg
 
 from .utils import (
     grasp_distances,
@@ -580,11 +580,35 @@ class premature_close_event(ManagerTermBase):
 
 
 class termination_event_reward(is_terminated_term):
-    """Express selected non-timeout termination rewards as per-event impulses."""
+    """Express selected non-timeout termination rewards as optionally exclusive event impulses."""
 
-    def __call__(self, env: ManagerBasedRLEnv, term_keys: str | list[str] = ".*") -> torch.Tensor:
-        """Return selected event counts divided by the environment step interval."""
-        return super().__call__(env, term_keys) / env.step_dt
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv) -> None:
+        super().__init__(cfg, env)
+        exclude_term_keys = cfg.params.get("exclude_term_keys")
+        self._excluded_term_names = env.termination_manager.find_terms(exclude_term_keys) if exclude_term_keys else []
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        term_keys: str | list[str] = ".*",
+        exclude_term_keys: str | list[str] | None = None,
+    ) -> torch.Tensor:
+        """Return selected event counts unless an excluded event occurred on the same step.
+
+        Args:
+            env: The task environment.
+            term_keys: Termination terms whose events contribute to the reward.
+            exclude_term_keys: Termination terms that suppress the selected event reward when concurrent.
+
+        Returns:
+            Per-environment event counts divided by the environment step interval.
+        """
+        del exclude_term_keys
+        event_rate = super().__call__(env, term_keys) / env.step_dt
+        excluded = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        for term_name in getattr(self, "_excluded_term_names", ()):
+            excluded |= env.termination_manager.get_term(term_name).bool()
+        return event_rate * (~excluded)
 
 
 def finite_joint_vel_l2(

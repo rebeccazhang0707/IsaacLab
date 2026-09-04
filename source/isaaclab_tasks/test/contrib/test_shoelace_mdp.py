@@ -146,7 +146,7 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert not hasattr(cfg.actions, "force")
     assert cfg.events.reset_shoelace.func is shoelace_events.ResetShoelaceCurriculum
     assert cfg.curriculum.pull_to_grasp.func is shoelace_curriculums.PullToGraspCurriculum
-    assert cfg.curriculum.pull_to_grasp.params["level_count"] == 17
+    assert cfg.curriculum.pull_to_grasp.params["level_count"] == 19
     assert "approach_level_count" not in cfg.curriculum.pull_to_grasp.params
     assert "grasp_assist_strengths" not in cfg.curriculum.pull_to_grasp.params
     assert cfg.curriculum.pull_to_grasp.params["current_level_fraction"] == pytest.approx(0.5)
@@ -169,11 +169,11 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
         (-0.509291, -0.021903, 0.501640, -2.588014, -1.197501, 2.624648, 1.603688)
     )
     arm_states = cfg.events.reset_shoelace.params["arm_joint_positions_by_level"]
-    assert tuple(len(states) for states in arm_states) == (17, 17)
-    assert arm_states[0][13] == pytest.approx(
+    assert tuple(len(states) for states in arm_states) == (19, 19)
+    assert arm_states[0][15] == pytest.approx(
         (0.374299, -0.059333, -0.531376, -2.610756, 1.098843, 2.563040, -0.152894)
     )
-    assert arm_states[1][15] == pytest.approx(
+    assert arm_states[1][17] == pytest.approx(
         (-0.439454, -0.223472, 0.486224, -2.694287, -1.023344, 2.657568, 1.607431)
     )
     assert cfg.events.reset_shoelace.params["gripper_joint_positions_by_level"] == pytest.approx(
@@ -184,7 +184,9 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
             0.0035,
             0.003625,
             0.00375,
+            0.0038125,
             0.003875,
+            0.0039375,
             0.004,
             0.005,
             0.006,
@@ -215,6 +217,7 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert not hasattr(cfg.terminations, "left_joint_velocity")
     assert not hasattr(cfg.terminations, "right_joint_velocity")
     assert cfg.rewards.failure.params["term_keys"] == ["unsafe", "lost_grasp"]
+    assert cfg.rewards.failure.params["exclude_term_keys"] == ["success"]
     assert cfg.decimation == 4
     assert cfg.episode_length_s == pytest.approx(20.0)
     assert cfg.sim.physics.num_substeps == 5
@@ -294,7 +297,7 @@ def test_shoelace_play_mode_uses_complete_authored_reset():
 
     cfg.play_mode()
 
-    assert cfg.curriculum.pull_to_grasp.params["initial_level"] == 16
+    assert cfg.curriculum.pull_to_grasp.params["initial_level"] == 18
     assert cfg.curriculum.pull_to_grasp.params["current_level_fraction"] == pytest.approx(1.0)
     assert cfg.curriculum.pull_to_grasp.params["current_level_fraction_schedule"] == pytest.approx((1.0,))
     assert cfg.curriculum.pull_to_grasp.params["terminal_level_fraction"] == pytest.approx(1.0)
@@ -1768,6 +1771,7 @@ def test_termination_event_reward_cancels_reward_manager_time_scaling():
             terms = {
                 "unsafe": torch.tensor([True, False, True]),
                 "lost_grasp": torch.tensor([True, True, False]),
+                "success": torch.tensor([True, False, False]),
             }
             return terms[name]
 
@@ -1778,6 +1782,11 @@ def test_termination_event_reward_cancels_reward_manager_time_scaling():
     event_rate = term(env, ["unsafe", "lost_grasp"])
 
     torch.testing.assert_close(event_rate * env.step_dt, torch.tensor([2.0, 1.0, 0.0]))
+
+    term._excluded_term_names = ["success"]
+    exclusive_event_rate = term(env, ["unsafe", "lost_grasp"], ["success"])
+
+    torch.testing.assert_close(exclusive_event_rate * env.step_dt, torch.tensor([0.0, 1.0, 0.0]))
 
 
 def test_runtime_configuration_authors_split_cable_assets():
