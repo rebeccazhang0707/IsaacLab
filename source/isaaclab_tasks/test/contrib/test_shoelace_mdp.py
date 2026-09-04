@@ -146,7 +146,7 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert not hasattr(cfg.actions, "force")
     assert cfg.events.reset_shoelace.func is shoelace_events.ResetShoelaceCurriculum
     assert cfg.curriculum.pull_to_grasp.func is shoelace_curriculums.PullToGraspCurriculum
-    assert cfg.curriculum.pull_to_grasp.params["level_count"] == 14
+    assert cfg.curriculum.pull_to_grasp.params["level_count"] == 17
     assert "approach_level_count" not in cfg.curriculum.pull_to_grasp.params
     assert "grasp_assist_strengths" not in cfg.curriculum.pull_to_grasp.params
     assert cfg.curriculum.pull_to_grasp.params["current_level_fraction"] == pytest.approx(0.5)
@@ -169,15 +169,33 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
         (-0.509291, -0.021903, 0.501640, -2.588014, -1.197501, 2.624648, 1.603688)
     )
     arm_states = cfg.events.reset_shoelace.params["arm_joint_positions_by_level"]
-    assert tuple(len(states) for states in arm_states) == (14, 14)
-    assert arm_states[0][10] == pytest.approx(
+    assert tuple(len(states) for states in arm_states) == (17, 17)
+    assert arm_states[0][13] == pytest.approx(
         (0.374299, -0.059333, -0.531376, -2.610756, 1.098843, 2.563040, -0.152894)
     )
-    assert arm_states[1][12] == pytest.approx(
+    assert arm_states[1][15] == pytest.approx(
         (-0.439454, -0.223472, 0.486224, -2.694287, -1.023344, 2.657568, 1.607431)
     )
     assert cfg.events.reset_shoelace.params["gripper_joint_positions_by_level"] == pytest.approx(
-        (0.002, 0.0025, 0.003, 0.0035, 0.004, 0.005, 0.006, 0.008, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01)
+        (
+            0.002,
+            0.0025,
+            0.003,
+            0.0035,
+            0.003625,
+            0.00375,
+            0.003875,
+            0.004,
+            0.005,
+            0.006,
+            0.008,
+            0.01,
+            0.01,
+            0.01,
+            0.01,
+            0.01,
+            0.01,
+        )
     )
     assert cfg.events.reset_shoelace.params["closed_position"] == pytest.approx(0.002)
     assert cfg.actions.left_arm.scale == pytest.approx((0.005, 0.005, 0.005, 0.01, 0.01, 0.01))
@@ -276,7 +294,7 @@ def test_shoelace_play_mode_uses_complete_authored_reset():
 
     cfg.play_mode()
 
-    assert cfg.curriculum.pull_to_grasp.params["initial_level"] == 13
+    assert cfg.curriculum.pull_to_grasp.params["initial_level"] == 16
     assert cfg.curriculum.pull_to_grasp.params["current_level_fraction"] == pytest.approx(1.0)
     assert cfg.curriculum.pull_to_grasp.params["current_level_fraction_schedule"] == pytest.approx((1.0,))
     assert cfg.curriculum.pull_to_grasp.params["terminal_level_fraction"] == pytest.approx(1.0)
@@ -725,12 +743,12 @@ def test_reset_curriculum_selects_calibrated_states_by_discrete_level():
     """Each environment must receive the measured state for its sampled curriculum level."""
     cfg = ShoelaceEnvCfg()
     left_states = cfg.events.reset_shoelace.params["arm_joint_positions_by_level"][0]
-    levels = torch.tensor((10, 7, 0), dtype=torch.long)
+    levels = torch.tensor((13, 10, 0), dtype=torch.long)
 
     selected = shoelace_events.ResetShoelaceCurriculum._select_joint_positions(torch.zeros((3, 7)), left_states, levels)
 
-    torch.testing.assert_close(selected[0], torch.tensor(left_states[10]))
-    torch.testing.assert_close(selected[1], torch.tensor(left_states[7]))
+    torch.testing.assert_close(selected[0], torch.tensor(left_states[13]))
+    torch.testing.assert_close(selected[1], torch.tensor(left_states[10]))
     torch.testing.assert_close(selected[2], torch.tensor(left_states[0]))
 
 
