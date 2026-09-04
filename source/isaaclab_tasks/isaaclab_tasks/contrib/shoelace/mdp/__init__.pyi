@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 __all__ = [
+    "bilateral_grasp_acquisition_event",
     "closing_away_from_tails",
     "directional_tail_pull",
     "acquired_grasp_retention",
@@ -17,6 +18,7 @@ __all__ = [
     "ResetShoelaceCurriculum",
     "reference_pull_directions",
     "remaining_tail_grasping",
+    "reset_relative_dense_reward",
     "reset_shoelace_state",
     "second_tail_coordination",
     "second_tail_approach_progress",
@@ -51,12 +53,14 @@ from .observations import (
 )
 from .rewards import (
     acquired_grasp_retention,
+    bilateral_grasp_acquisition_event,
     closing_away_from_tails,
     directional_tail_pull,
     finite_joint_vel_l2,
     grasp_acquisition_event,
     premature_close_event,
     remaining_tail_grasping,
+    reset_relative_dense_reward,
     second_tail_approach_progress,
     second_tail_coordination,
     shoelace_dense_reward,

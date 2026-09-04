@@ -17,6 +17,7 @@ from .utils import (
     grasp_distances,
     grasp_state,
     gripper_closed_fraction,
+    gripper_positions,
     potential,
     pull_directions,
     robot_tcp_position,
@@ -91,6 +92,67 @@ class grasp_acquisition_event(ManagerTermBase):
             / max(sum(side_weights), 1.0e-6)
             / max(env.step_dt, 1.0e-6)
         )
+
+
+class bilateral_grasp_acquisition_event(ManagerTermBase):
+    """Reward the first confirmed simultaneous strict grasp of both shoelace tails."""
+
+    def __init__(self, cfg, env) -> None:
+        super().__init__(cfg, env)
+        self._acquired = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self._candidate_steps = torch.zeros(env.num_envs, dtype=torch.int64, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        selected = slice(None) if env_ids is None else env_ids
+        initial_grasp = _configured_grasp_state(self, "maximum_grasp_distance")
+        if initial_grasp is None:
+            self._acquired[selected] = False
+        else:
+            self._acquired[selected] = initial_grasp[selected].all(dim=1)
+        self._candidate_steps[selected] = 0
+
+    def __call__(
+        self,
+        env,
+        maximum_grasp_distance: float,
+        maximum_finger_position: float,
+        asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
+        left_robot_cfg: SceneEntityCfg,
+        right_robot_cfg: SceneEntityCfg,
+        minimum_finger_position: float = 0.0,
+        confirmation_steps: int = 1,
+    ) -> torch.Tensor:
+        """Return a unit-rate impulse after confirming both strict grasps together.
+
+        Args:
+            env: The task environment.
+            maximum_grasp_distance: Maximum tail-to-TCP acquisition distance [m].
+            maximum_finger_position: Maximum driven finger-joint position for acquisition [m].
+            asset_cfgs: Scene entities for the left and right cable chains.
+            left_robot_cfg: Left robot hand and finger scene entity.
+            right_robot_cfg: Right robot hand and finger scene entity.
+            minimum_finger_position: Minimum driven finger-joint position for acquisition [m].
+            confirmation_steps: Consecutive control steps required to confirm bilateral acquisition.
+
+        Returns:
+            Per-environment bilateral acquisition event rate.
+        """
+        grasped = grasp_state(
+            env,
+            maximum_grasp_distance,
+            maximum_finger_position,
+            asset_cfgs,
+            left_robot_cfg,
+            right_robot_cfg,
+            minimum_finger_position,
+        ).all(dim=1)
+        self._candidate_steps.copy_(
+            torch.where(grasped, self._candidate_steps + 1, torch.zeros_like(self._candidate_steps))
+        )
+        confirmed = self._candidate_steps >= max(int(confirmation_steps), 1)
+        newly_acquired = confirmed & (~self._acquired)
+        self._acquired |= confirmed
+        return newly_acquired.float() / max(env.step_dt, 1.0e-6)
 
 
 def second_tail_coordination(
@@ -549,6 +611,215 @@ def finite_joint_vel_l2(
     return torch.where(torch.isfinite(penalty), bounded_penalty, torch.zeros_like(penalty))
 
 
+class reset_relative_dense_reward(ManagerTermBase):
+    """Reward reset-relative task progress through a confirmed bilateral grasp."""
+
+    def __init__(self, cfg, env) -> None:
+        super().__init__(cfg, env)
+        self._previous_approach = torch.full((env.num_envs,), torch.nan, device=env.device)
+        self._previous_acquisition = torch.full((env.num_envs,), torch.nan, device=env.device)
+        self._baseline_throat_count = torch.full((env.num_envs,), torch.nan, device=env.device)
+        self._baseline_tail_distances = torch.full((env.num_envs, 2), torch.nan, device=env.device)
+        self._baseline_tail_separation = torch.full((env.num_envs,), torch.nan, device=env.device)
+        self._previous_task_progress = torch.full((env.num_envs,), torch.nan, device=env.device)
+        self._candidate_steps = torch.zeros(env.num_envs, dtype=torch.int64, device=env.device)
+        self._bilaterally_acquired = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        selected = slice(None) if env_ids is None else env_ids
+        self._previous_approach[selected] = torch.nan
+        self._previous_acquisition[selected] = torch.nan
+        self._baseline_throat_count[selected] = torch.nan
+        self._baseline_tail_distances[selected] = torch.nan
+        self._baseline_tail_separation[selected] = torch.nan
+        self._previous_task_progress[selected] = torch.nan
+        self._candidate_steps[selected] = 0
+        initial_grasp = _configured_grasp_state(self, "maximum_grasp_distance")
+        if initial_grasp is None:
+            self._bilaterally_acquired[selected] = False
+        else:
+            self._bilaterally_acquired[selected] = initial_grasp[selected].all(dim=1)
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        reach_std: float,
+        grasp_std: float,
+        throat_radius: float,
+        maximum_throat_segments: int,
+        tail_success_distance: float,
+        tail_success_separation: float,
+        target_speed: float,
+        open_position: float,
+        minimum_finger_position: float,
+        maximum_finger_position: float,
+        maximum_grasp_distance: float,
+        maximum_progress_rate: float,
+        soft_min_temperature: float,
+        soft_min_weight: float,
+        confirmation_steps: int,
+        approach_weight: float,
+        acquisition_weight: float,
+        task_weight: float,
+        pull_weight: float,
+        asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
+        left_robot_cfg: SceneEntityCfg,
+        right_robot_cfg: SceneEntityCfg,
+    ) -> torch.Tensor:
+        """Return bounded phase progress rates and strict-grasp directional pull credit.
+
+        The approach and acquisition potentials stop contributing after bilateral acquisition. The task
+        potential is zero at the episode reset and reaches one only when every geometric success margin is
+        met. Its soft minimum emphasizes the least-complete margin without creating a hard zero-gradient gate.
+
+        Args:
+            env: The task environment.
+            reach_std: Approach-distance tanh width [m].
+            grasp_std: Grasp-proximity tanh width [m].
+            throat_radius: Radius used to classify segments inside the knot throat [m].
+            maximum_throat_segments: Maximum throat segment count at success.
+            tail_success_distance: Per-tail distance from the knot at success [m].
+            tail_success_separation: Tail-to-tail separation at success [m].
+            target_speed: Pull speed that produces unit directional credit [m/s].
+            open_position: Driven finger-joint position when open [m].
+            minimum_finger_position: Minimum driven finger-joint position for strict grasping [m].
+            maximum_finger_position: Maximum driven finger-joint position for strict grasping [m].
+            maximum_grasp_distance: Maximum tail-to-TCP distance for strict grasping [m].
+            maximum_progress_rate: Absolute limit for each normalized potential rate [1/s].
+            soft_min_temperature: Temperature of the weakest-margin approximation.
+            soft_min_weight: Fraction of task progress contributed by the weakest-margin approximation.
+            confirmation_steps: Consecutive control steps required to confirm bilateral acquisition.
+            approach_weight: Relative weight of approach progress.
+            acquisition_weight: Relative weight of aperture-aligned acquisition progress.
+            task_weight: Relative weight of reset-relative geometric progress.
+            pull_weight: Relative weight of signed directional tail velocity.
+            asset_cfgs: Scene entities for the left and right cable chains.
+            left_robot_cfg: Left robot hand and finger scene entity.
+            right_robot_cfg: Right robot hand and finger scene entity.
+
+        Returns:
+            Per-environment dense task reward rate.
+        """
+        positions, _, knot, tail_positions, tail_velocities = task_state(env, asset_cfgs)
+        tcp_positions = torch.stack(
+            (
+                robot_tcp_position(env, left_robot_cfg),
+                robot_tcp_position(env, right_robot_cfg),
+            ),
+            dim=1,
+        )
+        distances = torch.linalg.vector_norm(tail_positions - tcp_positions, dim=-1)
+        finger_positions = gripper_positions(env, left_robot_cfg, right_robot_cfg)
+        aperture = _grasp_aperture_score(
+            finger_positions,
+            open_position,
+            minimum_finger_position,
+            maximum_finger_position,
+        )
+        finite = (
+            torch.isfinite(positions).all(dim=(1, 2))
+            & torch.isfinite(tail_positions).all(dim=(1, 2))
+            & torch.isfinite(tail_velocities).all(dim=(1, 2))
+            & torch.isfinite(tcp_positions).all(dim=(1, 2))
+            & torch.isfinite(finger_positions).all(dim=1)
+        )
+
+        reach = 1.0 - torch.tanh(distances / max(reach_std, 1.0e-6))
+        grasp_proximity = 1.0 - torch.tanh(distances / max(grasp_std, 1.0e-6))
+        acquisition = _hamacher_product(grasp_proximity, aperture)
+        approach_score = reach.mean(dim=1)
+        per_tail_acquisition = _hamacher_product(reach, acquisition)
+        acquisition_score = _hamacher_product(per_tail_acquisition[:, 0], per_tail_acquisition[:, 1])
+
+        throat_count, tail_distances, tail_separation = untying_metrics(
+            positions,
+            knot,
+            tail_positions,
+            throat_radius,
+        )
+        baseline_unset = ~torch.isfinite(self._baseline_throat_count)
+        seed_baseline = finite & baseline_unset
+        self._baseline_throat_count.copy_(torch.where(seed_baseline, throat_count.float(), self._baseline_throat_count))
+        self._baseline_tail_distances.copy_(
+            torch.where(seed_baseline.unsqueeze(1), tail_distances, self._baseline_tail_distances)
+        )
+        self._baseline_tail_separation.copy_(
+            torch.where(seed_baseline, tail_separation, self._baseline_tail_separation)
+        )
+        task_progress = _reset_relative_task_progress(
+            throat_count,
+            tail_distances,
+            tail_separation,
+            self._baseline_throat_count,
+            self._baseline_tail_distances,
+            self._baseline_tail_separation,
+            maximum_throat_segments,
+            tail_success_distance,
+            tail_success_separation,
+            soft_min_temperature,
+            soft_min_weight,
+        )
+
+        grasped = grasp_state(
+            env,
+            maximum_grasp_distance,
+            maximum_finger_position,
+            asset_cfgs,
+            left_robot_cfg,
+            right_robot_cfg,
+            minimum_finger_position,
+        )
+        bilateral_grasp = grasped.all(dim=1)
+        self._candidate_steps.copy_(
+            torch.where(
+                finite & bilateral_grasp,
+                self._candidate_steps + 1,
+                torch.zeros_like(self._candidate_steps),
+            )
+        )
+        confirmed = self._candidate_steps >= max(int(confirmation_steps), 1)
+        newly_acquired = confirmed & (~self._bilaterally_acquired)
+        self._bilaterally_acquired |= confirmed
+
+        bounded_rate = max(maximum_progress_rate, 0.0)
+        approach_rate = _finite_difference_rate(
+            approach_score,
+            self._previous_approach,
+            env.step_dt,
+            bounded_rate,
+        )
+        acquisition_rate = _finite_difference_rate(
+            acquisition_score,
+            self._previous_acquisition,
+            env.step_dt,
+            bounded_rate,
+        )
+        task_rate = _finite_difference_rate(
+            task_progress,
+            self._previous_task_progress,
+            env.step_dt,
+            bounded_rate,
+        )
+        pre_acquisition = ~self._bilaterally_acquired
+        task_active = self._bilaterally_acquired & bilateral_grasp & (~newly_acquired)
+
+        projected_speed = torch.sum(tail_velocities * pull_directions(tail_velocities), dim=-1)
+        synchronized_speed = projected_speed.amin(dim=1)
+        pull_score = torch.tanh(synchronized_speed / max(target_speed, 1.0e-6))
+        pull_active = self._bilaterally_acquired & bilateral_grasp
+        reward = (
+            approach_weight * approach_rate * pre_acquisition
+            + acquisition_weight * acquisition_rate * pre_acquisition
+            + task_weight * task_rate * task_active
+            + pull_weight * pull_score * pull_active
+        )
+
+        self._previous_approach.copy_(torch.where(finite, approach_score, self._previous_approach))
+        self._previous_acquisition.copy_(torch.where(finite, acquisition_score, self._previous_acquisition))
+        self._previous_task_progress.copy_(torch.where(finite, task_progress, self._previous_task_progress))
+        return torch.where(finite, reward, torch.zeros_like(reward))
+
+
 def shoelace_dense_reward(
     env: ManagerBasedRLEnv,
     reach_std: float,
@@ -756,3 +1027,77 @@ def directional_tail_pull(
 def _hamacher_product(a: torch.Tensor, b: torch.Tensor, eps: float = 1.0e-6) -> torch.Tensor:
     """Return the Hamacher soft-AND of two values in ``[0, 1]``."""
     return (a * b) / (a + b - a * b + eps)
+
+
+def _configured_grasp_state(term: ManagerTermBase, distance_key: str) -> torch.Tensor | None:
+    """Return strict grasp state using a manager term's configured parameters."""
+    params = getattr(term.cfg, "params", None)
+    required = (distance_key, "maximum_finger_position", "asset_cfgs", "left_robot_cfg", "right_robot_cfg")
+    if not isinstance(params, dict) or any(name not in params for name in required):
+        return None
+    return grasp_state(
+        term._env,
+        params[distance_key],
+        params["maximum_finger_position"],
+        params["asset_cfgs"],
+        params["left_robot_cfg"],
+        params["right_robot_cfg"],
+        params.get("minimum_finger_position", 0.0),
+    )
+
+
+def _grasp_aperture_score(
+    finger_positions: torch.Tensor,
+    open_position: float,
+    minimum_finger_position: float,
+    maximum_finger_position: float,
+) -> torch.Tensor:
+    """Return a continuous score that is one inside the strict grasp aperture."""
+    lower_score = finger_positions / max(minimum_finger_position, 1.0e-6)
+    upper_range = max(open_position - maximum_finger_position, 1.0e-6)
+    upper_score = (open_position - finger_positions) / upper_range
+    return torch.minimum(lower_score, upper_score).clamp(0.0, 1.0)
+
+
+def _reset_relative_task_progress(
+    throat_count: torch.Tensor,
+    tail_distances: torch.Tensor,
+    tail_separation: torch.Tensor,
+    baseline_throat_count: torch.Tensor,
+    baseline_tail_distances: torch.Tensor,
+    baseline_tail_separation: torch.Tensor,
+    maximum_throat_segments: int,
+    tail_success_distance: float,
+    tail_success_separation: float,
+    soft_min_temperature: float,
+    soft_min_weight: float,
+) -> torch.Tensor:
+    """Return reset-relative mean progress blended with the least-complete margin."""
+    throat_range = (baseline_throat_count - maximum_throat_segments).clamp_min(1.0)
+    throat_progress = (baseline_throat_count - throat_count.float()) / throat_range
+    tail_ranges = (tail_success_distance - baseline_tail_distances).clamp_min(1.0e-6)
+    tail_progress = (tail_distances - baseline_tail_distances) / tail_ranges
+    separation_range = (tail_success_separation - baseline_tail_separation).clamp_min(1.0e-6)
+    separation_progress = (tail_separation - baseline_tail_separation) / separation_range
+    components = torch.cat(
+        (throat_progress.unsqueeze(1), tail_progress, separation_progress.unsqueeze(1)),
+        dim=1,
+    ).clamp(0.0, 1.0)
+    temperature = max(soft_min_temperature, 1.0e-6)
+    soft_min = -temperature * torch.logsumexp(-components / temperature, dim=1)
+    zero_offset = temperature * torch.log(components.new_tensor(float(components.shape[1])))
+    normalized_soft_min = (soft_min + zero_offset).clamp(0.0, 1.0)
+    bounded_soft_min_weight = min(max(soft_min_weight, 0.0), 1.0)
+    return (1.0 - bounded_soft_min_weight) * components.mean(dim=1) + (bounded_soft_min_weight * normalized_soft_min)
+
+
+def _finite_difference_rate(
+    current: torch.Tensor,
+    previous: torch.Tensor,
+    step_dt: float,
+    maximum_rate: float,
+) -> torch.Tensor:
+    """Return a finite, bounded potential difference rate."""
+    valid = torch.isfinite(current) & torch.isfinite(previous)
+    rate = torch.where(valid, current - previous, torch.zeros_like(current)) / max(step_dt, 1.0e-6)
+    return rate.clamp(min=-maximum_rate, max=maximum_rate)

@@ -50,12 +50,13 @@ _TAIL_SUCCESS_DISTANCE = 0.09
 _TAIL_SUCCESS_SEPARATION = 0.18
 _MAXIMUM_SUCCESS_GRASP_DISTANCE = 0.015
 _GRASP_ACQUISITION_DISTANCE = 0.012
-_MAXIMUM_GRASP_DISTANCE = 0.015
+_MAXIMUM_GRASP_DISTANCE = 0.020
 _GRIPPER_OPEN_POSITION = 0.01
-_GRIPPER_CLOSED_POSITION = 0.0
+_GRIPPER_CLOSED_POSITION = 0.002
 _GRIPPER_MINIMUM_GRASP_POSITION = 0.0003
 _GRIPPER_CLOSED_THRESHOLD = 0.0025
-_GRASP_CONFIRMATION_STEPS = 3
+_GRASP_CONFIRMATION_STEPS = 1
+_GRASP_RELEASE_CONFIRMATION_STEPS = 6
 _TARGET_PULL_SPEED = 0.04
 _MINIMUM_LACE_HEIGHT = -0.003
 _MAXIMUM_LACE_SPREAD = 0.6
@@ -118,7 +119,7 @@ _RIGHT_FRANKA_CURRICULUM_JOINT_POSITIONS = (_RIGHT_FRANKA_SETTLED_GRASP_JOINT_PO
 _CURRICULUM_GRIPPER_JOINT_POSITIONS = (
     tuple(
         _GRIPPER_CLOSED_POSITION + fraction * (_GRIPPER_OPEN_POSITION - _GRIPPER_CLOSED_POSITION)
-        for fraction in (0.0, 0.25, 0.5, 0.75)
+        for fraction in (0.0, 0.125, 0.25, 0.5)
     )
     + (_GRIPPER_OPEN_POSITION,) * 7
 )
@@ -481,7 +482,7 @@ class RewardsCfg:
     """Meta-World-style dense task reward with completion and safety terms."""
 
     dense_task = RewTerm(
-        func=mdp.shoelace_dense_reward,
+        func=mdp.reset_relative_dense_reward,
         weight=10.0,
         params={
             **_ROBOT_TERM_PARAMS,
@@ -493,7 +494,13 @@ class RewardsCfg:
             "tail_success_separation": _TAIL_SUCCESS_SEPARATION,
             "target_speed": _TARGET_PULL_SPEED,
             "open_position": _GRIPPER_OPEN_POSITION,
-            "closed_position": _GRIPPER_CLOSED_POSITION,
+            "minimum_finger_position": _GRIPPER_MINIMUM_GRASP_POSITION,
+            "maximum_finger_position": _GRIPPER_CLOSED_THRESHOLD,
+            "maximum_grasp_distance": _MAXIMUM_GRASP_DISTANCE,
+            "maximum_progress_rate": 3.0,
+            "soft_min_temperature": 0.05,
+            "soft_min_weight": 0.25,
+            "confirmation_steps": _GRASP_CONFIRMATION_STEPS,
             "approach_weight": 0.1,
             "acquisition_weight": 0.25,
             "task_weight": 1.0,
@@ -501,7 +508,7 @@ class RewardsCfg:
         },
     )
     grasp_acquisition = RewTerm(
-        func=mdp.grasp_acquisition_event,
+        func=mdp.bilateral_grasp_acquisition_event,
         weight=10.0,
         params={
             **_ROBOT_TERM_PARAMS,
@@ -509,7 +516,6 @@ class RewardsCfg:
             "minimum_finger_position": _GRIPPER_MINIMUM_GRASP_POSITION,
             "maximum_finger_position": _GRIPPER_CLOSED_THRESHOLD,
             "confirmation_steps": _GRASP_CONFIRMATION_STEPS,
-            "side_weights": (1.0, 1.0),
         },
     )
     success = RewTerm(
@@ -519,7 +525,7 @@ class RewardsCfg:
     )
     failure = RewTerm(
         func=mdp.termination_event_reward,
-        weight=-2.0,
+        weight=-12.0,
         params={"term_keys": ["unsafe", "lost_grasp"]},
     )
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
@@ -577,6 +583,7 @@ class TerminationsCfg:
             "maximum_finger_position": _GRIPPER_CLOSED_THRESHOLD,
             "maximum_grasp_distance": _MAXIMUM_GRASP_DISTANCE,
             "confirmation_steps": _GRASP_CONFIRMATION_STEPS,
+            "release_confirmation_steps": _GRASP_RELEASE_CONFIRMATION_STEPS,
         },
     )
     time_out = DoneTerm(func=mdp.time_out, time_out=True)

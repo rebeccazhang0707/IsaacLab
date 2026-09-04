@@ -41,19 +41,26 @@ def shoelace_unsafe(
 
 
 class lost_grasp(ManagerTermBase):
-    """Terminate when either retained grasp is lost after bilateral acquisition."""
+    """Terminate after either retained grasp remains lost for a confirmation window."""
 
     def __init__(self, cfg, env) -> None:
         super().__init__(cfg, env)
         self._acquired = torch.zeros((env.num_envs, 2), dtype=torch.bool, device=env.device)
         self._bilaterally_acquired = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         self._candidate_steps = torch.zeros((env.num_envs, 2), dtype=torch.int64, device=env.device)
+        self._release_candidate_steps = torch.zeros(env.num_envs, dtype=torch.int64, device=env.device)
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         selected = slice(None) if env_ids is None else env_ids
-        self._acquired[selected] = False
-        self._bilaterally_acquired[selected] = False
+        initial_grasp = _configured_grasp_state(self, "acquisition_distance")
+        if initial_grasp is None:
+            self._acquired[selected] = False
+            self._bilaterally_acquired[selected] = False
+        else:
+            self._acquired[selected] = initial_grasp[selected]
+            self._bilaterally_acquired[selected] = initial_grasp[selected].all(dim=1)
         self._candidate_steps[selected] = 0
+        self._release_candidate_steps[selected] = 0
 
     def __call__(
         self,
@@ -66,6 +73,7 @@ class lost_grasp(ManagerTermBase):
         right_robot_cfg: SceneEntityCfg,
         minimum_finger_position: float = 0.0,
         confirmation_steps: int = 1,
+        release_confirmation_steps: int = 1,
     ) -> torch.Tensor:
         """Return per-environment grasp-loss flags after acquisition."""
         distances = grasp_distances(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
@@ -100,8 +108,33 @@ class lost_grasp(ManagerTermBase):
             acquired = retained = retained.bool()
         self._acquired |= acquired
         self._bilaterally_acquired |= acquired.all(dim=1)
-        lost_after_bilateral_acquisition = self._bilaterally_acquired & (self._acquired & (~retained)).any(dim=1)
-        return (~torch.isfinite(distances).all(dim=1)) | lost_after_bilateral_acquisition
+        release_candidate = self._bilaterally_acquired & (self._acquired & (~retained)).any(dim=1)
+        self._release_candidate_steps.copy_(
+            torch.where(
+                release_candidate,
+                self._release_candidate_steps + 1,
+                torch.zeros_like(self._release_candidate_steps),
+            )
+        )
+        confirmed_release = self._release_candidate_steps >= max(int(release_confirmation_steps), 1)
+        return (~torch.isfinite(distances).all(dim=1)) | confirmed_release
+
+
+def _configured_grasp_state(term: ManagerTermBase, distance_key: str) -> torch.Tensor | None:
+    """Return strict grasp state using a manager term's configured parameters."""
+    params = getattr(term.cfg, "params", None)
+    required = (distance_key, "maximum_finger_position", "asset_cfgs", "left_robot_cfg", "right_robot_cfg")
+    if not isinstance(params, dict) or any(name not in params for name in required):
+        return None
+    return grasp_state(
+        term._env,
+        params[distance_key],
+        params["maximum_finger_position"],
+        params["asset_cfgs"],
+        params["left_robot_cfg"],
+        params["right_robot_cfg"],
+        params.get("minimum_finger_position", 0.0),
+    )
 
 
 def shoelace_success(
