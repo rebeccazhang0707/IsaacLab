@@ -157,7 +157,7 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     )
     assert cfg.curriculum.pull_to_grasp.params["fraction_increase_success_rate"] == pytest.approx(0.5)
     assert cfg.curriculum.pull_to_grasp.params["fraction_backoff_success_rate"] == pytest.approx(0.1)
-    assert cfg.curriculum.pull_to_grasp.params["promotion_window_count"] == 2
+    assert cfg.curriculum.pull_to_grasp.params["promotion_window_count"] == 1
     assert cfg.curriculum.pull_to_grasp.params["replay_level_weights"] == pytest.approx((0.5, 0.3, 0.2))
     assert cfg.curriculum.pull_to_grasp.params["initial_level"] == 0
     assert cfg.events.reset_shoelace.params["gripper_open_phase_fraction"] == pytest.approx(0.4)

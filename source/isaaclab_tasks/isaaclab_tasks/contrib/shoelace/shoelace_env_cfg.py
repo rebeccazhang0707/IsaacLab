@@ -471,7 +471,7 @@ class CurriculumCfg:
             "terminal_level_fraction_schedule": (0.2, 0.35, 0.5, 0.75, 1.0),
             "fraction_increase_success_rate": 0.5,
             "fraction_backoff_success_rate": 0.1,
-            "promotion_window_count": 2,
+            "promotion_window_count": 1,
             "replay_level_weights": (0.5, 0.3, 0.2),
             "initial_level": 0,
         },
