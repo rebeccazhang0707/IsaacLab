@@ -234,8 +234,9 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.rewards.dense_task.params["maximum_finger_position"] == pytest.approx(0.0025)
     assert cfg.rewards.dense_task.params["maximum_progress_rate"] == pytest.approx(3.0)
     assert cfg.rewards.dense_task.params["soft_min_temperature"] == pytest.approx(0.05)
-    assert cfg.rewards.dense_task.params["soft_min_weight"] == pytest.approx(0.75)
+    assert cfg.rewards.dense_task.params["soft_min_weight"] == pytest.approx(0.25)
     assert cfg.rewards.dense_task.params["confirmation_steps"] == 1
+    assert cfg.rewards.dense_task.params["retention_weight"] == pytest.approx(0.5)
     assert cfg.rewards.dense_task.params["pull_weight"] == pytest.approx(0.25)
     assert cfg.rewards.grasp_acquisition.func is shoelace_rewards.bilateral_grasp_acquisition_event
     assert cfg.rewards.grasp_acquisition.weight == pytest.approx(10.0)
@@ -1075,6 +1076,7 @@ def test_reset_relative_dense_reward_requires_confirmed_grasp_for_task_progress(
             approach_weight=0.1,
             acquisition_weight=0.25,
             task_weight=1.0,
+            retention_weight=0.5,
             pull_weight=0.25,
             asset_cfgs=None,
             left_robot_cfg="left",
@@ -1090,6 +1092,11 @@ def test_reset_relative_dense_reward_requires_confirmed_grasp_for_task_progress(
     grasped[:] = True
     torch.testing.assert_close(compute_reward(), torch.zeros(1))
     torch.testing.assert_close(compute_reward(), torch.zeros(1))
+
+    tcp_positions[:, 0, 0] += 0.01
+    assert compute_reward().item() < 0.0
+    tcp_positions.copy_(tail_positions)
+    assert compute_reward().item() > 0.0
 
     tail_positions.copy_(torch.tensor([[[-0.1, 0.0, 0.0], [0.1, 0.0, 0.0]]]))
     tcp_positions.copy_(tail_positions)
@@ -1110,6 +1117,8 @@ def test_reset_relative_dense_reward_requires_confirmed_grasp_for_task_progress(
     torch.testing.assert_close(compute_reward(), torch.zeros(1))
     grasped[:] = False
     tcp_positions[..., 2] += 0.03
+    assert compute_reward().item() < 0.0
+    term.reset()
     torch.testing.assert_close(compute_reward(), torch.zeros(1))
 
 

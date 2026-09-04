@@ -500,11 +500,12 @@ class RewardsCfg:
             "maximum_grasp_distance": _MAXIMUM_GRASP_DISTANCE,
             "maximum_progress_rate": 3.0,
             "soft_min_temperature": 0.05,
-            "soft_min_weight": 0.75,
+            "soft_min_weight": 0.25,
             "confirmation_steps": _GRASP_CONFIRMATION_STEPS,
             "approach_weight": 0.1,
             "acquisition_weight": 0.25,
             "task_weight": 1.0,
+            "retention_weight": 0.5,
             "pull_weight": 0.25,
         },
     )
