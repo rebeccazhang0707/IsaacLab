@@ -288,13 +288,13 @@ terminations and has no explicit terminal reward or penalty.
 
 ## Reset and curriculum context
 
-Every reset restores the authored cable pose and zero cable velocity. The 56-level curriculum then applies
+Every reset restores the authored cable pose and zero cable velocity. The 59-level curriculum then applies
 calibrated arm and gripper states:
 
-- levels 0--50 keep both arms at the settled grasp pose while the gripper target moves from `0.002` to `0.005 m`;
+- levels 0--53 keep both arms at the settled grasp pose while the gripper target moves from `0.002` to `0.005 m`;
 - the contact-release intervals around `0.0035--0.003625 m` and `0.004--0.004047 m` use measured micrometre-scale
   reset increments;
-- levels 51--55 keep the gripper fully open and progressively move the arms through calibrated approach poses
+- levels 54--58 keep the gripper fully open and progressively move the arms through calibrated approach poses
   toward the full pre-grasp pose.
 
 The curriculum begins at level 0 and promotes after one qualifying window with at least 128 episodes and a
@@ -650,7 +650,7 @@ iteration 205. Increasing the difficult-reset share initially reduced its comple
 41.09% and 42.19%. The later windows recovered through 42.97%, 52.31%, and 60.77% before crossing the promotion
 threshold at 71.09%; all ranks reached level 3 at iteration 251. Bilateral acquisition remained nonzero throughout
 the temporary regression, which distinguished ongoing level-2 learning from an acquisition-dead policy. Allowing
-the improving frontier to finish its windows, rather than reacting to the replay-mixed aggregate success trough,
+the improving frontier to finish its windows, rather than reacting to the replay-mixed aggregate-success minimum,
 preserved a valid curriculum transition. The transition checkpoint is `model_250.pt`.
 
 Level 3 then advanced without a regression. Its 79.69% window raised exposure to 35% at iteration 272, its 89.06%
@@ -1104,7 +1104,7 @@ level 28, 111/128 deterministic and 104/128 stochastic successes at level 29, ac
 unsafe or time-out events. The stronger, less overdamped drive is therefore used for subsequent training instead
 of adding sub-micrometre reset levels.
 
-With the retuned drive, a 20-update continuation promoted levels 29, 30, 31, 32, and 33 with qualifying windows
+With the recalibrated drive, a 20-update continuation promoted levels 29, 30, 31, 32, and 33 with qualifying windows
 of 78.91%, 100%, 84.50%, 73.44%, and 71.54%. It ended at level 34 with 72.24% aggregate success and no unsafe
 or time-out events, but that aggregate metric still contained prior-level episodes. Full 600-step deterministic
 traces corrected the interpretation: `model_525.pt`, `model_535.pt`, `model_540.pt`, and `model_544.pt` all had
@@ -1196,3 +1196,53 @@ The known healthy reset-relative dense reward therefore remains unchanged. The i
 promotion gate is retained: it moves past frontier states that already supply complete acquisition and useful
 success trajectories without pretending that the rejected retention term solved them. Subsequent continuation
 uses only pre-retention checkpoints and changes curriculum gating separately from the reward.
+
+### Promotion-gate ablation at the low-noise frontier
+
+A ten-update continuation from `model_583.pt` changed only the promotion and fraction-increase gates from 50%
+to 40%. All eight ranks promoted level 40 on a 46.09% completed frontier window and level 41 on a 41.09%
+window, reaching level 42 with a final 40.79% window. Aggregate success was 46.14%; acquisition remained
+complete, every failure was lost grasp, and unsafe and time-out terminations remained zero. The artifacts are
+under
+`logs/rsl_rl/shoelace_dual_franka/2026-09-05_13-39-28_admm_rho400_curriculum56_spacing0p25_drive6000d60_resume_promo0p5_m583_fixedstats_std0p0025_h80_epoch1_promo0p4_lr2p5e6_level40frac0p5_8gpu_10`.
+
+GPU-swapped deterministic gates separated curriculum movement from actor improvement. At level 42, three seeds
+and both GPU assignments produced 318/768 successes for the input `model_583.pt` and 320/768 for
+`model_591.pt`. At level 41, the corresponding two-GPU swapped comparison produced 102/256 and 98/256.
+These differences are within sampling variation: the lower gate successfully avoids overtraining adjacent reset
+states that the policy can already solve about 40% of the time, but the ten PPO updates did not measurably
+improve or forget the mean policy. The 40% gate is therefore kept as an experimental continuation override and
+is not lowered further or promoted to the source default yet.
+
+The evaluation trace utility now asserts the constructed environment's runtime solver. Its earlier startup
+summary displayed `CouplerProxyCfg` because that summary was rendered before `ShoelaceEnv` converted the proxy
+template; every repeated gate reported and asserted `CouplerAdmmCfg` after construction. The header discrepancy
+did not invalidate the ADMM evaluations. The next controlled continuation starts from `model_591.pt` at level
+42 and keeps every optimizer, rollout, exploration, and curriculum parameter unchanged.
+
+That continuation promoted every rank from level 42 to level 43 on a 43.75% frontier window, then completed at
+level 43 with a 32.81% final window. All eight ranks exited normally after ten updates. A three-seed, GPU-swapped
+deterministic comparison measured 261/768 input `model_591.pt` successes and 293/768 `model_596.pt` successes at
+level 43; five of six paired gates improved, while acquisition remained complete and all failures were lost
+grasp. The update therefore moved the mean policy in the desired direction, but not far enough to establish a
+robust 40% frontier margin.
+
+A two-assignment reset-only sweep of `model_596.pt` then measured 106/256, 98/256, 113/256, 104/256, 82/256,
+92/256, and 88/256 successes at gripper positions `0.004021484375`, `0.0040224609375`, `0.0040234375`,
+`0.0040244140625`, `0.004025390625`, `0.0040263671875`, and `0.00402734375 m`. The first four positions
+retained approximately 40--44% success before the latter three fell to 32--36%. The three quarter-step positions
+between the former levels 43 and 44 are therefore inserted, producing 59 reset levels and preserving a uniform
+`0.9765625` micrometre transition across this measured contact boundary. Subsequent continuation resumes
+`model_596.pt` at the unchanged physical reset that remains level 43.
+
+The first 59-level continuation did not promote online: its level-43 windows ranged from 29.34% to 38.83% and
+ended at 37.06%. Nevertheless, fixed gates selected `model_604.pt` rather than the final checkpoint. A
+three-seed, GPU-swapped comparison measured 252/768 successes for the input `model_596.pt` and 296/768 for
+`model_604.pt`, an absolute gain of 5.73 percentage points with improvement in five of six paired gates. All
+episodes again acquired both tails and ended only in success or lost grasp. The next short continuation therefore
+started from `model_604.pt` at level 43. Its final completed frontier window reached 40.62%, promoting the
+rank-zero curriculum to the first inserted reset state at level 44. All eight workers exited normally after ten
+updates, unsafe and time-out terminations remained zero, and checkpoints `model_604.pt` through `model_613.pt`
+were written. This is the first online evidence that the denser curriculum crosses the former level-43-to-44
+contact boundary and exercises the newly inserted transition instead of jumping directly to the harder former
+level 44.

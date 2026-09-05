@@ -153,7 +153,7 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.events.reset_shoelace.func is shoelace_events.ResetShoelaceCurriculum
     assert cfg.scene.env_spacing == pytest.approx(0.25)
     assert cfg.curriculum.pull_to_grasp.func is shoelace_curriculums.PullToGraspCurriculum
-    assert cfg.curriculum.pull_to_grasp.params["level_count"] == 56
+    assert cfg.curriculum.pull_to_grasp.params["level_count"] == 59
     assert cfg.curriculum.pull_to_grasp.params["promotion_success_rate"] == pytest.approx(0.5)
     assert "approach_level_count" not in cfg.curriculum.pull_to_grasp.params
     assert "grasp_assist_strengths" not in cfg.curriculum.pull_to_grasp.params
@@ -177,11 +177,11 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
         (-0.509291, -0.021903, 0.501640, -2.588014, -1.197501, 2.624648, 1.603688)
     )
     arm_states = cfg.events.reset_shoelace.params["arm_joint_positions_by_level"]
-    assert tuple(len(states) for states in arm_states) == (56, 56)
-    assert arm_states[0][52] == pytest.approx(
+    assert tuple(len(states) for states in arm_states) == (59, 59)
+    assert arm_states[0][55] == pytest.approx(
         (0.374299, -0.059333, -0.531376, -2.610756, 1.098843, 2.563040, -0.152894)
     )
-    assert arm_states[1][54] == pytest.approx(
+    assert arm_states[1][57] == pytest.approx(
         (-0.439454, -0.223472, 0.486224, -2.694287, -1.023344, 2.657568, 1.607431)
     )
     assert cfg.events.reset_shoelace.params["gripper_joint_positions_by_level"] == pytest.approx(
@@ -230,6 +230,9 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
             0.0040205078125,
             0.004021484375,
             0.0040234375,
+            0.0040244140625,
+            0.004025390625,
+            0.0040263671875,
             0.00402734375,
             0.00403125,
             0.004046875,

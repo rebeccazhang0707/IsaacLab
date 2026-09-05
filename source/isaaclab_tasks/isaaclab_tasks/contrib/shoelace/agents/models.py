@@ -5,9 +5,8 @@
 
 """RSL-RL models used for shoelace checkpoint consolidation."""
 
-from tensordict import TensorDict
-
 from rsl_rl.models import MLPModel
+from tensordict import TensorDict
 
 
 class FixedObservationStatisticsMLPModel(MLPModel):
