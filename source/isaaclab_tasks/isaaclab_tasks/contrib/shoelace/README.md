@@ -1246,3 +1246,33 @@ updates, unsafe and time-out terminations remained zero, and checkpoints `model_
 were written. This is the first online evidence that the denser curriculum crosses the former level-43-to-44
 contact boundary and exercises the newly inserted transition instead of jumping directly to the harder former
 level 44.
+
+The online promotion did not by itself prove a better deterministic actor. At the new level 44, a four-seed,
+GPU-swapped comparison measured 379/1024 successes for the input `model_604.pt` and 365/1024 for
+`model_612.pt`; the two GPU assignments favored opposite checkpoints. Both actors acquired every episode and
+all failures were lost grasp, but neither established a 40% mean-policy margin. The next controlled ablation
+therefore restarts the stronger input `model_604.pt` directly at level 44 and raises only the current-level sample
+fraction from 50% to 75%. This gives the new frontier more learning signal while retaining 25% replay, without
+changing the reward, termination, optimizer, exploration noise, or 40% promotion gate.
+
+The 75%-frontier ablation promoted through the first two inserted levels, 44 and 45, on 40.00% and approximately 43.5%
+windows, then stopped at level 46 as its complete windows declined from 39.53% to 30.62%. Fixed-policy gates
+showed that the movement was curriculum sampling rather than actor improvement: a four-seed, GPU-swapped
+comparison at level 46 measured 359/1024 successes for the input `model_604.pt` and 351/1024 for the apparent
+single-seed peak `model_609.pt`. All episodes acquired both tails, and all failures were lost grasp. Across the
+ten updates, actor MLP parameters moved only `7.7e-5` in relative L2 norm while critic parameters moved
+`1.1e-3`; deterministic performance did not improve.
+
+The remaining credit gap inside `reset_relative_dense_reward` motivated one more controlled negative-result
+test. After bilateral acquisition, the term disables task-potential credit immediately when either strict grasp
+becomes false, although lost-grasp termination waits six control steps. An experimental version preserved only
+negative task-potential differences during that interval and continued to suppress positive ungrasped progress.
+A fixed `model_604.pt` level-46 gate left successful dense return unchanged at approximately 10.50 while reducing
+lost-grasp dense return from 9.41 to 8.40 and its final-16-step component from 2.13 to 1.15.
+
+Fresh training disproved the intervention. At iteration 10 it had a 47.83-step mean episode, `-0.0723` dense
+reward, zero acquisition, and 100% lost-grasp termination. The rejected retention run had 46.50 steps and
+`-0.0908` dense reward at the same iteration, whereas the healthy baseline had 6.04 steps and positive `0.0005`
+dense reward. Negative-only shaping still taught the actor to avoid motion that might incur regression rather
+than to complete the pull. The run was stopped at iteration 12 and the shaping change was removed; the healthy
+reset-relative reward remains the source contract.
