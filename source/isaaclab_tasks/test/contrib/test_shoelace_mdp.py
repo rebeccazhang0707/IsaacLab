@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 import torch
 import warp as wp
+from tensordict import TensorDict
 
 from pxr import Usd, UsdGeom, UsdPhysics
 
@@ -27,6 +28,7 @@ import isaaclab_tasks.contrib.shoelace.mdp.rewards as shoelace_rewards
 import isaaclab_tasks.contrib.shoelace.mdp.terminations as shoelace_terminations
 import isaaclab_tasks.contrib.shoelace.mdp.utils as shoelace_utils
 import isaaclab_tasks.contrib.shoelace.shoelace_env as shoelace_env_module
+from isaaclab_tasks.contrib.shoelace.agents.models import FixedObservationStatisticsMLPModel
 from isaaclab_tasks.contrib.shoelace.agents.rsl_rl_ppo_cfg import ShoelacePPORunnerCfg
 from isaaclab_tasks.contrib.shoelace.mdp.constants import (
     DYNAMIC_SEGMENT_COUNT,
@@ -144,9 +146,15 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert isinstance(cfg.actions.left_gripper, BinaryJointPositionActionCfg)
     assert isinstance(cfg.actions.right_gripper, BinaryJointPositionActionCfg)
     assert not hasattr(cfg.actions, "force")
+    for robot_cfg in (cfg.scene.robot_left, cfg.scene.robot_right):
+        hand_drive = robot_cfg.actuators["panda_hand"]
+        assert hand_drive.stiffness == pytest.approx(6000.0)
+        assert hand_drive.damping == pytest.approx(60.0)
     assert cfg.events.reset_shoelace.func is shoelace_events.ResetShoelaceCurriculum
+    assert cfg.scene.env_spacing == pytest.approx(0.25)
     assert cfg.curriculum.pull_to_grasp.func is shoelace_curriculums.PullToGraspCurriculum
-    assert cfg.curriculum.pull_to_grasp.params["level_count"] == 19
+    assert cfg.curriculum.pull_to_grasp.params["level_count"] == 56
+    assert cfg.curriculum.pull_to_grasp.params["promotion_success_rate"] == pytest.approx(0.5)
     assert "approach_level_count" not in cfg.curriculum.pull_to_grasp.params
     assert "grasp_assist_strengths" not in cfg.curriculum.pull_to_grasp.params
     assert cfg.curriculum.pull_to_grasp.params["current_level_fraction"] == pytest.approx(0.5)
@@ -169,11 +177,11 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
         (-0.509291, -0.021903, 0.501640, -2.588014, -1.197501, 2.624648, 1.603688)
     )
     arm_states = cfg.events.reset_shoelace.params["arm_joint_positions_by_level"]
-    assert tuple(len(states) for states in arm_states) == (19, 19)
-    assert arm_states[0][15] == pytest.approx(
+    assert tuple(len(states) for states in arm_states) == (56, 56)
+    assert arm_states[0][52] == pytest.approx(
         (0.374299, -0.059333, -0.531376, -2.610756, 1.098843, 2.563040, -0.152894)
     )
-    assert arm_states[1][17] == pytest.approx(
+    assert arm_states[1][54] == pytest.approx(
         (-0.439454, -0.223472, 0.486224, -2.694287, -1.023344, 2.657568, 1.607431)
     )
     assert cfg.events.reset_shoelace.params["gripper_joint_positions_by_level"] == pytest.approx(
@@ -182,12 +190,49 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
             0.0025,
             0.003,
             0.0035,
+            0.00353125,
+            0.00353515625,
+            0.0035390625,
+            0.00354296875,
+            0.003546875,
+            0.00355078125,
+            0.0035546875,
+            0.00355859375,
+            0.0035625,
+            0.00356640625,
+            0.0035703125,
+            0.00357421875,
+            0.003578125,
+            0.00358203125,
+            0.0035859375,
+            0.00358984375,
+            0.00359375,
+            0.00359765625,
+            0.0036015625,
+            0.00360546875,
+            0.003609375,
+            0.00361328125,
+            0.0036171875,
+            0.00362109375,
             0.003625,
             0.00375,
             0.0038125,
             0.003875,
             0.0039375,
             0.004,
+            0.00400390625,
+            0.0040078125,
+            0.00401171875,
+            0.004015625,
+            0.004017578125,
+            0.0040185546875,
+            0.00401953125,
+            0.0040205078125,
+            0.004021484375,
+            0.0040234375,
+            0.00402734375,
+            0.00403125,
+            0.004046875,
             0.005,
             0.006,
             0.008,
@@ -297,7 +342,9 @@ def test_shoelace_play_mode_uses_complete_authored_reset():
 
     cfg.play_mode()
 
-    assert cfg.curriculum.pull_to_grasp.params["initial_level"] == 18
+    assert cfg.curriculum.pull_to_grasp.params["initial_level"] == (
+        cfg.curriculum.pull_to_grasp.params["level_count"] - 1
+    )
     assert cfg.curriculum.pull_to_grasp.params["current_level_fraction"] == pytest.approx(1.0)
     assert cfg.curriculum.pull_to_grasp.params["current_level_fraction_schedule"] == pytest.approx((1.0,))
     assert cfg.curriculum.pull_to_grasp.params["terminal_level_fraction"] == pytest.approx(1.0)
@@ -856,6 +903,25 @@ def test_shoelace_agent_uses_asymmetric_observations():
         "actor": ["policy"],
         "critic": ["policy", "privileged"],
     }
+
+
+def test_fixed_observation_statistics_model_preserves_loaded_statistics():
+    """Checkpoint consolidation must not update the loaded observation statistics."""
+    observations = TensorDict({"policy": torch.randn(8, 3)}, batch_size=[8])
+    model = FixedObservationStatisticsMLPModel(
+        observations,
+        {"actor": ["policy"]},
+        "actor",
+        2,
+        hidden_dims=[8],
+        obs_normalization=True,
+    )
+    statistics = {name: value.clone() for name, value in model.obs_normalizer.state_dict().items()}
+
+    model.update_normalization(TensorDict({"policy": torch.full((8, 3), 7.0)}, batch_size=[8]))
+
+    for name, expected in statistics.items():
+        torch.testing.assert_close(model.obs_normalizer.state_dict()[name], expected)
 
 
 def test_shoelace_agent_saves_intermediate_checkpoints():

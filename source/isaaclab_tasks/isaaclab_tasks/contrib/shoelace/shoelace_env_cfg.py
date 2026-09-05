@@ -61,7 +61,7 @@ _GRASP_RELEASE_CONFIRMATION_STEPS = 6
 _TARGET_PULL_SPEED = 0.04
 _MINIMUM_LACE_HEIGHT = -0.003
 _MAXIMUM_LACE_SPREAD = 0.6
-_CURRICULUM_LEVEL_COUNT = 19
+_CURRICULUM_LEVEL_COUNT = 56
 _GRIPPER_OPEN_PHASE_FRACTION = 0.4
 _APPROACH_PHASE_EXPONENT = 2.0
 
@@ -103,14 +103,14 @@ _RIGHT_FRANKA_SETTLED_GRASP_JOINT_POSITIONS = (
     2.624648,
     1.603688,
 )
-_LEFT_FRANKA_CURRICULUM_JOINT_POSITIONS = (_LEFT_FRANKA_SETTLED_GRASP_JOINT_POSITIONS,) * 14 + (
+_LEFT_FRANKA_CURRICULUM_JOINT_POSITIONS = (_LEFT_FRANKA_SETTLED_GRASP_JOINT_POSITIONS,) * 51 + (
     (0.383982, -0.016711, -0.526566, -2.592917, 1.140252, 2.562327, -0.165460),
     (0.374299, -0.059333, -0.531376, -2.610756, 1.098843, 2.563040, -0.152894),
     (0.354776, -0.120520, -0.533189, -2.634336, 1.037260, 2.562372, -0.133620),
     (0.320544, -0.194545, -0.527101, -2.659350, 0.959992, 2.557317, -0.108805),
     tuple(_LEFT_FRANKA_ARM_JOINT_POSITIONS.values()),
 )
-_RIGHT_FRANKA_CURRICULUM_JOINT_POSITIONS = (_RIGHT_FRANKA_SETTLED_GRASP_JOINT_POSITIONS,) * 14 + (
+_RIGHT_FRANKA_CURRICULUM_JOINT_POSITIONS = (_RIGHT_FRANKA_SETTLED_GRASP_JOINT_POSITIONS,) * 51 + (
     (-0.510776, -0.033617, 0.501523, -2.619221, -1.247455, 2.646284, 1.657949),
     (-0.499383, -0.091087, 0.499334, -2.634953, -1.164799, 2.659881, 1.652890),
     (-0.477853, -0.149894, 0.497408, -2.662283, -1.103112, 2.660680, 1.633300),
@@ -125,12 +125,49 @@ _CURRICULUM_GRIPPER_JOINT_POSITIONS = (
             0.0625,
             0.125,
             0.1875,
+            0.19140625,
+            0.19189453125,
+            0.1923828125,
+            0.19287109375,
+            0.193359375,
+            0.19384765625,
+            0.1943359375,
+            0.19482421875,
+            0.1953125,
+            0.19580078125,
+            0.1962890625,
+            0.19677734375,
+            0.197265625,
+            0.19775390625,
+            0.1982421875,
+            0.19873046875,
+            0.19921875,
+            0.19970703125,
+            0.2001953125,
+            0.20068359375,
+            0.201171875,
+            0.20166015625,
+            0.2021484375,
+            0.20263671875,
             0.203125,
             0.21875,
             0.2265625,
             0.234375,
             0.2421875,
             0.25,
+            0.25048828125,
+            0.2509765625,
+            0.25146484375,
+            0.251953125,
+            0.252197265625,
+            0.2523193359375,
+            0.25244140625,
+            0.2525634765625,
+            0.252685546875,
+            0.2529296875,
+            0.25341796875,
+            0.25390625,
+            0.255859375,
             0.375,
             0.5,
             0.75,
@@ -194,8 +231,8 @@ def _franka_cfg(
             joint_effort_limit=500.0,
             actuator_velocity_limit=0.04,
             joint_velocity_limit=2.0,
-            stiffness=1000.0,
-            damping=100.0,
+            stiffness=6000.0,
+            damping=60.0,
             armature=0.1,
         ),
         "panda_finger2_passive": ImplicitActuatorCfg(
@@ -478,7 +515,7 @@ class CurriculumCfg:
         params={
             "level_count": _CURRICULUM_LEVEL_COUNT,
             "success_term_name": "success",
-            "promotion_success_rate": 0.7,
+            "promotion_success_rate": 0.5,
             "minimum_episodes": 128,
             "current_level_fraction": 0.5,
             "current_level_fraction_schedule": (0.2, 0.35, 0.5),
@@ -667,7 +704,7 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
     )
     scene: ShoelaceSceneCfg = ShoelaceSceneCfg(
         num_envs=32,
-        env_spacing=1.5,
+        env_spacing=0.25,
         replicate_physics=True,
     )
     observations: ObservationsCfg = ObservationsCfg()
