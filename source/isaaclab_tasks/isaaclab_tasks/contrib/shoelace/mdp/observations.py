@@ -13,6 +13,26 @@ from isaaclab.utils import math as math_utils
 from .utils import free_positions, grasp_state, pull_directions, tail_to_tcp_vectors, task_state
 
 
+def filtered_last_action(
+    env,
+    left_arm_action_name: str = "left_arm",
+    left_gripper_action_name: str = "left_gripper",
+    right_arm_action_name: str = "right_arm",
+    right_gripper_action_name: str = "right_gripper",
+) -> torch.Tensor:
+    """Last executed arm commands and raw gripper actions [dimensionless]."""
+    action_manager = env.action_manager
+    return torch.cat(
+        (
+            action_manager.get_term(left_arm_action_name).filtered_actions,
+            action_manager.get_term(left_gripper_action_name).raw_actions,
+            action_manager.get_term(right_arm_action_name).filtered_actions,
+            action_manager.get_term(right_gripper_action_name).raw_actions,
+        ),
+        dim=-1,
+    )
+
+
 def tails_to_tcp(
     env,
     asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],

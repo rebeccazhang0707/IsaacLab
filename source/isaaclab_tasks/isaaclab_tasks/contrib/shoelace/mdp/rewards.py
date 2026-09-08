@@ -592,6 +592,7 @@ class termination_event_reward(is_terminated_term):
         env: ManagerBasedRLEnv,
         term_keys: str | list[str] = ".*",
         exclude_term_keys: str | list[str] | None = None,
+        include_time_outs: bool = False,
     ) -> torch.Tensor:
         """Return selected event counts unless an excluded event occurred on the same step.
 
@@ -599,12 +600,18 @@ class termination_event_reward(is_terminated_term):
             env: The task environment.
             term_keys: Termination terms whose events contribute to the reward.
             exclude_term_keys: Termination terms that suppress the selected event reward when concurrent.
+            include_time_outs: Whether episodic time-outs contribute to the event reward.
 
         Returns:
             Per-environment event counts divided by the environment step interval.
         """
-        del exclude_term_keys
-        event_rate = super().__call__(env, term_keys) / env.step_dt
+        del term_keys, exclude_term_keys
+        event_count = torch.zeros(env.num_envs, device=env.device)
+        for term_name in self._term_names:
+            event_count += env.termination_manager.get_term(term_name)
+        if not include_time_outs:
+            event_count *= ~env.termination_manager.time_outs
+        event_rate = event_count / env.step_dt
         excluded = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
         for term_name in getattr(self, "_excluded_term_names", ()):
             excluded |= env.termination_manager.get_term(term_name).bool()
@@ -664,6 +671,101 @@ class reset_relative_dense_reward(ManagerTermBase):
         else:
             self._bilaterally_acquired[selected] = initial_grasp[selected].all(dim=1)
 
+        params = getattr(self.cfg, "params", None)
+        if not isinstance(params, dict):
+            return
+        task_keys = ("asset_cfgs", "throat_radius")
+        if all(name in params for name in task_keys):
+            positions, _, knot, tail_positions, _ = task_state(self._env, params["asset_cfgs"])
+            throat_count, tail_distances, tail_separation = untying_metrics(
+                positions,
+                knot,
+                tail_positions,
+                params["throat_radius"],
+            )
+            finite_task = (
+                torch.isfinite(positions).all(dim=(1, 2))
+                & torch.isfinite(knot).all(dim=1)
+                & torch.isfinite(tail_positions).all(dim=(1, 2))
+                & torch.isfinite(tail_distances).all(dim=1)
+                & torch.isfinite(tail_separation)
+            )
+            finite_selected = finite_task[selected]
+            self._baseline_throat_count[selected] = torch.where(
+                finite_selected,
+                throat_count[selected].float(),
+                torch.full_like(throat_count[selected].float(), torch.nan),
+            )
+            self._baseline_tail_distances[selected] = torch.where(
+                finite_selected.unsqueeze(1),
+                tail_distances[selected],
+                torch.full_like(tail_distances[selected], torch.nan),
+            )
+            self._baseline_tail_separation[selected] = torch.where(
+                finite_selected,
+                tail_separation[selected],
+                torch.full_like(tail_separation[selected], torch.nan),
+            )
+            self._previous_task_progress[selected] = torch.where(
+                finite_selected,
+                torch.zeros_like(tail_separation[selected]),
+                torch.full_like(tail_separation[selected], torch.nan),
+            )
+
+        approach_keys = (
+            "asset_cfgs",
+            "left_robot_cfg",
+            "right_robot_cfg",
+            "reach_std",
+            "grasp_std",
+            "open_position",
+            "minimum_finger_position",
+            "maximum_finger_position",
+        )
+        if all(name in params for name in approach_keys):
+            _, _, _, tail_positions, _ = task_state(self._env, params["asset_cfgs"])
+            tcp_positions = torch.stack(
+                (
+                    robot_tcp_position(self._env, params["left_robot_cfg"]),
+                    robot_tcp_position(self._env, params["right_robot_cfg"]),
+                ),
+                dim=1,
+            )
+            distances = torch.linalg.vector_norm(tail_positions - tcp_positions, dim=-1)
+            finger_positions = gripper_positions(
+                self._env,
+                params["left_robot_cfg"],
+                params["right_robot_cfg"],
+            )
+            aperture = _grasp_aperture_score(
+                finger_positions,
+                params["open_position"],
+                params["minimum_finger_position"],
+                params["maximum_finger_position"],
+            )
+            reach = 1.0 - torch.tanh(distances / max(params["reach_std"], 1.0e-6))
+            grasp_proximity = 1.0 - torch.tanh(distances / max(params["grasp_std"], 1.0e-6))
+            acquisition = _hamacher_product(grasp_proximity, aperture)
+            approach_score = reach.mean(dim=1)
+            per_tail_acquisition = _hamacher_product(reach, acquisition)
+            acquisition_score = _hamacher_product(per_tail_acquisition[:, 0], per_tail_acquisition[:, 1])
+            finite_phase = (
+                torch.isfinite(tail_positions).all(dim=(1, 2))
+                & torch.isfinite(tcp_positions).all(dim=(1, 2))
+                & torch.isfinite(finger_positions).all(dim=1)
+            )
+            finite_selected = finite_phase[selected]
+            self._previous_approach[selected] = torch.where(
+                finite_selected,
+                approach_score[selected],
+                torch.full_like(approach_score[selected], torch.nan),
+            )
+            self._previous_acquisition[selected] = torch.where(
+                finite_selected,
+                acquisition_score[selected],
+                torch.full_like(acquisition_score[selected], torch.nan),
+            )
+
     def __call__(
         self,
         env: ManagerBasedRLEnv,
@@ -689,6 +791,7 @@ class reset_relative_dense_reward(ManagerTermBase):
         asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
         left_robot_cfg: SceneEntityCfg,
         right_robot_cfg: SceneEntityCfg,
+        maximum_success_grasp_distance: float | None = None,
     ) -> torch.Tensor:
         """Return bounded phase progress and strict-grasp directional pull credit.
 
@@ -720,6 +823,8 @@ class reset_relative_dense_reward(ManagerTermBase):
             asset_cfgs: Scene entities for the left and right cable chains.
             left_robot_cfg: Left robot hand and finger scene entity.
             right_robot_cfg: Right robot hand and finger scene entity.
+            maximum_success_grasp_distance: Tail-to-TCP distance below which grasp retention is fully credited [m].
+                When omitted, ``grasp_std`` is used.
 
         Returns:
             Per-environment dense task reward rate.
@@ -783,7 +888,10 @@ class reset_relative_dense_reward(ManagerTermBase):
             soft_min_temperature,
             soft_min_weight,
         )
-
+        retained_distance = grasp_std if maximum_success_grasp_distance is None else maximum_success_grasp_distance
+        retention_range = max(maximum_grasp_distance - retained_distance, 1.0e-6)
+        per_tail_retention = ((maximum_grasp_distance - distances) / retention_range).clamp(0.0, 1.0)
+        retained_task_progress = task_progress * per_tail_retention.amin(dim=1)
         grasped = grasp_state(
             env,
             maximum_grasp_distance,
@@ -819,13 +927,13 @@ class reset_relative_dense_reward(ManagerTermBase):
             bounded_rate,
         )
         task_rate = _finite_difference_rate(
-            task_progress,
+            retained_task_progress,
             self._previous_task_progress,
             env.step_dt,
             bounded_rate,
         )
         pre_acquisition = ~self._bilaterally_acquired
-        task_active = self._bilaterally_acquired & bilateral_grasp & (~newly_acquired)
+        task_active = self._bilaterally_acquired & (~newly_acquired)
 
         projected_speed = torch.sum(tail_velocities * pull_directions(tail_velocities), dim=-1)
         synchronized_speed = projected_speed.amin(dim=1)
@@ -840,7 +948,7 @@ class reset_relative_dense_reward(ManagerTermBase):
 
         self._previous_approach.copy_(torch.where(finite, approach_score, self._previous_approach))
         self._previous_acquisition.copy_(torch.where(finite, acquisition_score, self._previous_acquisition))
-        self._previous_task_progress.copy_(torch.where(finite, task_progress, self._previous_task_progress))
+        self._previous_task_progress.copy_(torch.where(finite, retained_task_progress, self._previous_task_progress))
         return torch.where(finite, reward, torch.zeros_like(reward))
 
 

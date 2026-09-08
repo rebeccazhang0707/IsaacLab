@@ -120,6 +120,169 @@ class lost_grasp(ManagerTermBase):
         return (~torch.isfinite(distances).all(dim=1)) | confirmed_release
 
 
+class missed_grasp_acquisition(ManagerTermBase):
+    """Terminate when both tails are reachable but bilateral acquisition stalls."""
+
+    def __init__(self, cfg, env) -> None:
+        super().__init__(cfg, env)
+        self._bilaterally_acquired = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self._acquisition_started = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self._candidate_steps = torch.zeros(env.num_envs, dtype=torch.int64, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        """Reset acquisition history and seed it from the configured task state."""
+        selected = slice(None) if env_ids is None else env_ids
+        initial_grasp = _configured_grasp_state(self, "acquisition_distance")
+        if initial_grasp is None:
+            self._bilaterally_acquired[selected] = False
+        else:
+            self._bilaterally_acquired[selected] = initial_grasp[selected].all(dim=1)
+        self._acquisition_started[selected] = self._bilaterally_acquired[selected]
+        self._candidate_steps[selected] = 0
+
+    def __call__(
+        self,
+        env,
+        acquisition_distance: float,
+        maximum_finger_position: float,
+        asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
+        left_robot_cfg: SceneEntityCfg,
+        right_robot_cfg: SceneEntityCfg,
+        minimum_finger_position: float = 0.0,
+        deadline_steps: int = 1,
+    ) -> torch.Tensor:
+        """Return failures after acquisition stalls while both tails are within reach.
+
+        Args:
+            env: The task environment.
+            acquisition_distance: Maximum tail-to-TCP acquisition distance [m].
+            maximum_finger_position: Maximum driven finger-joint position for acquisition [m].
+            asset_cfgs: Shoelace scene entities.
+            left_robot_cfg: Left robot scene entity.
+            right_robot_cfg: Right robot scene entity.
+            minimum_finger_position: Minimum driven finger-joint position for acquisition [m].
+            deadline_steps: Consecutive reachable control steps allowed before termination.
+
+        Returns:
+            Per-environment missed-acquisition flags.
+        """
+        distances = grasp_distances(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
+        acquired = grasp_state(
+            env,
+            acquisition_distance,
+            maximum_finger_position,
+            asset_cfgs,
+            left_robot_cfg,
+            right_robot_cfg,
+            minimum_finger_position,
+        ).all(dim=1)
+        self._bilaterally_acquired |= acquired
+        reachable = torch.isfinite(distances).all(dim=1) & (distances <= acquisition_distance).all(dim=1)
+        self._acquisition_started |= reachable
+        candidate = self._acquisition_started & (~self._bilaterally_acquired)
+        self._candidate_steps.copy_(
+            torch.where(candidate, self._candidate_steps + 1, torch.zeros_like(self._candidate_steps))
+        )
+        return self._candidate_steps >= max(int(deadline_steps), 1)
+
+
+class insufficient_separation_progress(ManagerTermBase):
+    """Terminate acquired trajectories that miss a reset-relative tail-separation deadline."""
+
+    def __init__(self, cfg, env) -> None:
+        super().__init__(cfg, env)
+        self._baseline_tail_separation = torch.full((env.num_envs,), torch.nan, device=env.device)
+        self._bilaterally_acquired = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self._steps_since_acquisition = torch.zeros(env.num_envs, dtype=torch.int64, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        """Reset progress history and capture the configured reset geometry."""
+        selected = slice(None) if env_ids is None else env_ids
+        self._baseline_tail_separation[selected] = torch.nan
+        initial_grasp = _configured_grasp_state(self, "acquisition_distance")
+        if initial_grasp is None:
+            self._bilaterally_acquired[selected] = False
+        else:
+            self._bilaterally_acquired[selected] = initial_grasp[selected].all(dim=1)
+        self._steps_since_acquisition[selected] = 0
+
+        params = getattr(self.cfg, "params", None)
+        if not isinstance(params, dict) or "asset_cfgs" not in params:
+            return
+        _, _, _, tail_positions, _ = task_state(self._env, params["asset_cfgs"])
+        tail_separation = torch.linalg.vector_norm(tail_positions[:, 0] - tail_positions[:, 1], dim=1)
+        selected_separation = tail_separation[selected]
+        self._baseline_tail_separation[selected] = torch.where(
+            torch.isfinite(selected_separation),
+            selected_separation,
+            torch.full_like(selected_separation, torch.nan),
+        )
+
+    def __call__(
+        self,
+        env,
+        acquisition_distance: float,
+        maximum_finger_position: float,
+        target_tail_separation: float,
+        minimum_progress_fraction: float,
+        deadline_steps: int,
+        asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
+        left_robot_cfg: SceneEntityCfg,
+        right_robot_cfg: SceneEntityCfg,
+        minimum_finger_position: float = 0.0,
+    ) -> torch.Tensor:
+        """Return failures that do not maintain enough separation after acquisition.
+
+        Args:
+            env: The task environment.
+            acquisition_distance: Maximum tail-to-TCP acquisition distance [m].
+            maximum_finger_position: Maximum driven finger-joint position for acquisition [m].
+            target_tail_separation: Tail separation used by the success target [m].
+            minimum_progress_fraction: Required fraction of reset-to-target separation progress.
+            deadline_steps: Acquired control steps allowed before enforcing the requirement.
+            asset_cfgs: Shoelace scene entities.
+            left_robot_cfg: Left robot scene entity.
+            right_robot_cfg: Right robot scene entity.
+            minimum_finger_position: Minimum driven finger-joint position for acquisition [m].
+
+        Returns:
+            Per-environment insufficient-separation flags.
+        """
+        _, _, _, tail_positions, _ = task_state(env, asset_cfgs)
+        tail_separation = torch.linalg.vector_norm(tail_positions[:, 0] - tail_positions[:, 1], dim=1)
+        unseeded = ~torch.isfinite(self._baseline_tail_separation)
+        self._baseline_tail_separation.copy_(
+            torch.where(unseeded & torch.isfinite(tail_separation), tail_separation, self._baseline_tail_separation)
+        )
+        acquired = grasp_state(
+            env,
+            acquisition_distance,
+            maximum_finger_position,
+            asset_cfgs,
+            left_robot_cfg,
+            right_robot_cfg,
+            minimum_finger_position,
+        ).all(dim=1)
+        self._bilaterally_acquired |= acquired
+        self._steps_since_acquisition.copy_(
+            torch.where(
+                self._bilaterally_acquired,
+                self._steps_since_acquisition + 1,
+                torch.zeros_like(self._steps_since_acquisition),
+            )
+        )
+        progress_fraction = min(max(float(minimum_progress_fraction), 0.0), 1.0)
+        remaining_separation = (target_tail_separation - self._baseline_tail_separation).clamp_min(0.0)
+        required_separation = self._baseline_tail_separation + progress_fraction * remaining_separation
+        finite = torch.isfinite(tail_separation) & torch.isfinite(required_separation)
+        return (
+            self._bilaterally_acquired
+            & (self._steps_since_acquisition >= max(int(deadline_steps), 1))
+            & finite
+            & (tail_separation < required_separation)
+        )
+
+
 def _configured_grasp_state(term: ManagerTermBase, distance_key: str) -> torch.Tensor | None:
     """Return strict grasp state using a manager term's configured parameters."""
     params = getattr(term.cfg, "params", None)

@@ -22,7 +22,6 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, CableObjectCfg
 from isaaclab.controllers import DifferentialIKControllerCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
-from isaaclab.envs.mdp.actions import DifferentialInverseKinematicsActionCfg
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -53,11 +52,15 @@ _GRASP_ACQUISITION_DISTANCE = 0.012
 _MAXIMUM_GRASP_DISTANCE = 0.020
 _GRIPPER_OPEN_POSITION = 0.01
 _GRIPPER_CLOSED_POSITION = 0.002
+_GRIPPER_CLOSE_TARGET = 0.0015
 _GRIPPER_MINIMUM_GRASP_POSITION = 0.0003
 _GRIPPER_CLOSED_THRESHOLD = 0.0025
 _GRIPPER_SUCCESS_THRESHOLD = 0.0035
 _GRASP_CONFIRMATION_STEPS = 1
 _GRASP_RELEASE_CONFIRMATION_STEPS = 6
+_GRASP_ACQUISITION_DEADLINE_STEPS = 8
+_SEPARATION_PROGRESS_DEADLINE_STEPS = 64
+_MINIMUM_SEPARATION_PROGRESS = 0.5
 _TARGET_PULL_SPEED = 0.04
 _MINIMUM_LACE_HEIGHT = -0.003
 _MAXIMUM_LACE_SPREAD = 0.6
@@ -102,19 +105,117 @@ _RIGHT_FRANKA_SETTLED_GRASP_JOINT_POSITIONS = (
     2.624648,
     1.603688,
 )
-_LEFT_FRANKA_CURRICULUM_JOINT_POSITIONS = (_LEFT_FRANKA_SETTLED_GRASP_JOINT_POSITIONS,) * 54 + (
-    (0.383982, -0.016711, -0.526566, -2.592917, 1.140252, 2.562327, -0.165460),
-    (0.374299, -0.059333, -0.531376, -2.610756, 1.098843, 2.563040, -0.152894),
-    (0.354776, -0.120520, -0.533189, -2.634336, 1.037260, 2.562372, -0.133620),
-    (0.320544, -0.194545, -0.527101, -2.659350, 0.959992, 2.557317, -0.108805),
-    tuple(_LEFT_FRANKA_ARM_JOINT_POSITIONS.values()),
+_RIGHT_FRANKA_CONTACT_POSE_1_JOINT_POSITIONS = (
+    -0.508908238594,
+    0.001041418021,
+    0.502844791584,
+    -2.566197815865,
+    -1.205718847000,
+    2.614505814911,
+    1.608019054752,
 )
-_RIGHT_FRANKA_CURRICULUM_JOINT_POSITIONS = (_RIGHT_FRANKA_SETTLED_GRASP_JOINT_POSITIONS,) * 54 + (
-    (-0.510776, -0.033617, 0.501523, -2.619221, -1.247455, 2.646284, 1.657949),
-    (-0.499383, -0.091087, 0.499334, -2.634953, -1.164799, 2.659881, 1.652890),
-    (-0.477853, -0.149894, 0.497408, -2.662283, -1.103112, 2.660680, 1.633300),
-    (-0.439454, -0.223472, 0.486224, -2.694287, -1.023344, 2.657568, 1.607431),
-    tuple(_RIGHT_FRANKA_ARM_JOINT_POSITIONS.values()),
+_RIGHT_FRANKA_CONTACT_POSE_2_JOINT_POSITIONS = (
+    -0.508039408424,
+    0.004605980527,
+    0.503710989481,
+    -2.561184597482,
+    -1.203628728833,
+    2.611603975973,
+    1.606203600583,
+)
+_RIGHT_FRANKA_CONTACT_POSE_3_JOINT_POSITIONS = (
+    -0.507449049679,
+    0.019704037585,
+    0.504276442333,
+    -2.546659900388,
+    -1.208664909196,
+    2.604852518599,
+    1.608572404884,
+)
+_RIGHT_FRANKA_APPROACH_BRIDGE_JOINT_POSITIONS = (
+    (-0.507592004576, 0.017412899251, 0.504158130358, -2.549777760137, -1.210331670910, 2.606632777565, 1.610694055455),
+    (-0.507656984074, 0.016371472736, 0.504104352187, -2.551194969114, -1.211089289871, 2.607441986187, 1.611658442079),
+    (-0.507669979974, 0.016163187433, 0.504093596553, -2.551478410909, -1.211240813663, 2.607603827911, 1.611851319403),
+)
+_RIGHT_FRANKA_APPROACH_LEARNING_JOINT_POSITIONS = (
+    (-0.507681936202, 0.015971564954, 0.504083701370, -2.551739177361, -1.211380215552, 2.607752722297, 1.612028766542),
+    (-0.507690253578, 0.015838262360, 0.504076817764, -2.551920580110, -1.211477190779, 2.607856301001, 1.612152208029),
+    (-0.507698570953, 0.015704959766, 0.504069934158, -2.552101982859, -1.211574166006, 2.607959879704, 1.612275649517),
+)
+_LEFT_FRANKA_APPROACH_POSE_1_JOINT_POSITIONS = (
+    0.383982,
+    -0.016711,
+    -0.526566,
+    -2.592917,
+    1.140252,
+    2.562327,
+    -0.165460,
+)
+_RIGHT_FRANKA_APPROACH_POSE_1_JOINT_POSITIONS = (
+    -0.510776,
+    -0.033617,
+    0.501523,
+    -2.619221,
+    -1.247455,
+    2.646284,
+    1.657949,
+)
+_APPROACH_BRIDGE_FRACTIONS = (
+    (0.125, 0.0),
+    (0.25, 0.0),
+    (0.25, 0.01),
+    (0.25, 0.0125),
+    (0.5, 0.0125),
+)
+_LEFT_FRANKA_APPROACH_BRIDGE_JOINT_POSITIONS = tuple(
+    tuple(
+        start + fraction * (end - start)
+        for start, end in zip(
+            _LEFT_FRANKA_SETTLED_GRASP_JOINT_POSITIONS,
+            _LEFT_FRANKA_APPROACH_POSE_1_JOINT_POSITIONS,
+            strict=True,
+        )
+    )
+    for fraction, _ in _APPROACH_BRIDGE_FRACTIONS
+)
+_RIGHT_FRANKA_APPROACH_EXIT_BRIDGE_JOINT_POSITIONS = tuple(
+    tuple(
+        start + fraction * (end - start)
+        for start, end in zip(
+            _RIGHT_FRANKA_APPROACH_LEARNING_JOINT_POSITIONS[-1],
+            _RIGHT_FRANKA_APPROACH_POSE_1_JOINT_POSITIONS,
+            strict=True,
+        )
+    )
+    for _, fraction in _APPROACH_BRIDGE_FRACTIONS
+)
+_CONTACT_CURRICULUM_LEVEL_COUNT = 81
+_LEFT_FRANKA_CURRICULUM_JOINT_POSITIONS = (
+    (_LEFT_FRANKA_SETTLED_GRASP_JOINT_POSITIONS,) * 87
+    + _LEFT_FRANKA_APPROACH_BRIDGE_JOINT_POSITIONS
+    + (
+        _LEFT_FRANKA_APPROACH_POSE_1_JOINT_POSITIONS,
+        (0.374299, -0.059333, -0.531376, -2.610756, 1.098843, 2.563040, -0.152894),
+        (0.354776, -0.120520, -0.533189, -2.634336, 1.037260, 2.562372, -0.133620),
+        (0.320544, -0.194545, -0.527101, -2.659350, 0.959992, 2.557317, -0.108805),
+        tuple(_LEFT_FRANKA_ARM_JOINT_POSITIONS.values()),
+    )
+)
+_RIGHT_FRANKA_CURRICULUM_JOINT_POSITIONS = (
+    (_RIGHT_FRANKA_SETTLED_GRASP_JOINT_POSITIONS,) * 68
+    + (_RIGHT_FRANKA_CONTACT_POSE_1_JOINT_POSITIONS,) * 10
+    + (_RIGHT_FRANKA_CONTACT_POSE_2_JOINT_POSITIONS,)
+    + (_RIGHT_FRANKA_CONTACT_POSE_3_JOINT_POSITIONS,) * 2
+    + _RIGHT_FRANKA_APPROACH_BRIDGE_JOINT_POSITIONS
+    + _RIGHT_FRANKA_APPROACH_LEARNING_JOINT_POSITIONS
+    + _RIGHT_FRANKA_APPROACH_EXIT_BRIDGE_JOINT_POSITIONS
+    + (
+        _RIGHT_FRANKA_APPROACH_POSE_1_JOINT_POSITIONS,
+        (-0.499383, -0.091087, 0.499334, -2.634953, -1.164799, 2.659881, 1.652890),
+        (-0.477853, -0.149894, 0.497408, -2.662283, -1.103112, 2.660680, 1.633300),
+        (-0.439454, -0.223472, 0.486224, -2.694287, -1.023344, 2.657568, 1.607431),
+        tuple(_RIGHT_FRANKA_ARM_JOINT_POSITIONS.values()),
+    )
 )
 _CURRICULUM_GRIPPER_JOINT_POSITIONS = (
     tuple(
@@ -122,6 +223,7 @@ _CURRICULUM_GRIPPER_JOINT_POSITIONS = (
         for fraction in (
             0.0,
             0.0625,
+            0.1171875,
             0.125,
             0.1875,
             0.19140625,
@@ -149,10 +251,12 @@ _CURRICULUM_GRIPPER_JOINT_POSITIONS = (
             0.2021484375,
             0.20263671875,
             0.203125,
+            0.21484375,
             0.21875,
             0.2265625,
             0.234375,
             0.2421875,
+            0.2470703125,
             0.25,
             0.25048828125,
             0.2509765625,
@@ -170,13 +274,37 @@ _CURRICULUM_GRIPPER_JOINT_POSITIONS = (
             0.25341796875,
             0.25390625,
             0.255859375,
+            0.2572544642857143,
+            0.25864955357142855,
+            0.26004464285714285,
+            0.26143973214285715,
+            0.26283482142857145,
+            0.2642299107142857,
+            0.265625,
+            0.26785714285714285,
+            0.2700892857142857,
+            0.27232142857142855,
+            0.27455357142857145,
+            0.2767857142857143,
+            0.27901785714285715,
+            0.28125,
+            0.28515625,
+            0.2890625,
+            0.2900390625,
+            0.291015625,
             0.375,
+            0.3828125,
+            0.390625,
+            0.39453125,
+            0.39501953125,
+            0.3955078125,
+            0.395751953125,
             0.5,
             0.75,
             1.0,
         )
     )
-    + (_GRIPPER_OPEN_POSITION,) * 5
+    + (_GRIPPER_OPEN_POSITION,) * 16
 )
 _CURRICULUM_LEVEL_COUNT = len(_CURRICULUM_GRIPPER_JOINT_POSITIONS)
 
@@ -251,9 +379,9 @@ def _franka_cfg(
     return robot
 
 
-def _arm_action(asset_name: str) -> DifferentialInverseKinematicsActionCfg:
+def _arm_action(asset_name: str) -> mdp.EMADifferentialInverseKinematicsActionCfg:
     """Build one six-dimensional relative TCP action."""
-    return DifferentialInverseKinematicsActionCfg(
+    return mdp.EMADifferentialInverseKinematicsActionCfg(
         asset_name=asset_name,
         joint_names=["panda_joint.*"],
         body_name="panda_hand",
@@ -264,7 +392,11 @@ def _arm_action(asset_name: str) -> DifferentialInverseKinematicsActionCfg:
             ik_params={"lambda_val": 0.01},
         ),
         scale=(0.005, 0.005, 0.005, 0.01, 0.01, 0.01),
-        body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=TCP_OFFSET),
+        body_offset=mdp.EMADifferentialInverseKinematicsActionCfg.OffsetCfg(pos=TCP_OFFSET),
+        alpha=0.75,
+        warmup_steps=3,
+        warmup_steps_by_curriculum_level=(3,) * _CONTACT_CURRICULUM_LEVEL_COUNT
+        + (0,) * (_CURRICULUM_LEVEL_COUNT - _CONTACT_CURRICULUM_LEVEL_COUNT),
     )
 
 
@@ -366,14 +498,14 @@ class ActionsCfg:
         asset_name="robot_left",
         joint_names=["panda_finger_joint1"],
         open_command_expr={"panda_finger_joint1": _GRIPPER_OPEN_POSITION},
-        close_command_expr={"panda_finger_joint1": _GRIPPER_CLOSED_POSITION},
+        close_command_expr={"panda_finger_joint1": _GRIPPER_CLOSE_TARGET},
     )
     right_arm = _arm_action("robot_right")
     right_gripper = mdp.BinaryJointPositionActionCfg(
         asset_name="robot_right",
         joint_names=["panda_finger_joint1"],
         open_command_expr={"panda_finger_joint1": _GRIPPER_OPEN_POSITION},
-        close_command_expr={"panda_finger_joint1": _GRIPPER_CLOSED_POSITION},
+        close_command_expr={"panda_finger_joint1": _GRIPPER_CLOSE_TARGET},
     )
 
 
@@ -435,7 +567,7 @@ class ObservationsCfg:
             scale=10.0,
         )
         tail_velocities = ObsTerm(func=mdp.tail_velocities, params={"asset_cfgs": _SHOELACE_ASSET_CFGS})
-        last_action = ObsTerm(func=mdp.last_action)
+        last_action = ObsTerm(func=mdp.filtered_last_action)
 
         def __post_init__(self) -> None:
             self.enable_corruption = False
@@ -553,9 +685,10 @@ class RewardsCfg:
             "minimum_finger_position": _GRIPPER_MINIMUM_GRASP_POSITION,
             "maximum_finger_position": _GRIPPER_CLOSED_THRESHOLD,
             "maximum_grasp_distance": _MAXIMUM_GRASP_DISTANCE,
+            "maximum_success_grasp_distance": _MAXIMUM_SUCCESS_GRASP_DISTANCE,
             "maximum_progress_rate": 3.0,
             "soft_min_temperature": 0.05,
-            "soft_min_weight": 0.25,
+            "soft_min_weight": 0.75,
             "confirmation_steps": _GRASP_CONFIRMATION_STEPS,
             "approach_weight": 0.1,
             "acquisition_weight": 0.25,
@@ -582,7 +715,11 @@ class RewardsCfg:
     failure = RewTerm(
         func=mdp.termination_event_reward,
         weight=-12.0,
-        params={"term_keys": ["unsafe", "lost_grasp"], "exclude_term_keys": ["success"]},
+        params={
+            "term_keys": ["unsafe", "lost_grasp", "missed_grasp", "insufficient_separation", "time_out"],
+            "exclude_term_keys": ["success"],
+            "include_time_outs": True,
+        },
     )
     action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
     left_joint_velocity = RewTerm(
@@ -642,6 +779,28 @@ class TerminationsCfg:
             "release_confirmation_steps": _GRASP_RELEASE_CONFIRMATION_STEPS,
         },
     )
+    missed_grasp = DoneTerm(
+        func=mdp.missed_grasp_acquisition,
+        params={
+            **_ROBOT_TERM_PARAMS,
+            "acquisition_distance": _GRASP_ACQUISITION_DISTANCE,
+            "minimum_finger_position": _GRIPPER_MINIMUM_GRASP_POSITION,
+            "maximum_finger_position": _GRIPPER_CLOSED_THRESHOLD,
+            "deadline_steps": _GRASP_ACQUISITION_DEADLINE_STEPS,
+        },
+    )
+    insufficient_separation = DoneTerm(
+        func=mdp.insufficient_separation_progress,
+        params={
+            **_ROBOT_TERM_PARAMS,
+            "acquisition_distance": _GRASP_ACQUISITION_DISTANCE,
+            "minimum_finger_position": _GRIPPER_MINIMUM_GRASP_POSITION,
+            "maximum_finger_position": _GRIPPER_CLOSED_THRESHOLD,
+            "target_tail_separation": _TAIL_SUCCESS_SEPARATION,
+            "minimum_progress_fraction": _MINIMUM_SEPARATION_PROGRESS,
+            "deadline_steps": _SEPARATION_PROGRESS_DEADLINE_STEPS,
+        },
+    )
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
 
 
@@ -649,6 +808,7 @@ class TerminationsCfg:
 class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for two Frankas untying an authored shoelace knot."""
 
+    is_finite_horizon = True
     decimation = 4
     episode_length_s = 20.0
     sim: SimulationCfg = SimulationCfg(
@@ -725,9 +885,9 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
     """Number of ADMM interface iterations per coupled step."""
     admm_rho: float = 400.0
     """ADMM penalty parameter [dimensionless]."""
-    admm_gamma: float = 0.0
+    admm_gamma: float = 7.5e-5
     """ADMM proximal mass scaling parameter [dimensionless]."""
-    admm_baumgarte: float = 0.5
+    admm_baumgarte: float = 0.75
     """ADMM position-error correction fraction [dimensionless]."""
     admm_contact_matching: Literal["disabled", "latest", "sticky"] = "latest"
     """Frame-to-frame matching mode for ADMM rigid contacts."""

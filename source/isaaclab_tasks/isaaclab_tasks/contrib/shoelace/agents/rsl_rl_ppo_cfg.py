@@ -9,12 +9,22 @@ from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPp
 
 
 @configclass
+class ShoelaceHybridActionDistributionCfg(RslRlMLPModelCfg.GaussianDistributionCfg):
+    """Gaussian arm and Bernoulli gripper distribution configuration."""
+
+    class_name: str = "isaaclab_tasks.contrib.shoelace.agents.models:ShoelaceHybridActionDistribution"
+    arm_action_scale: float = 0.7
+    gripper_logit_scale: float = 2.0
+
+
+@configclass
 class ShoelacePPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """RSL-RL PPO configuration for dual-Franka shoelace untying."""
 
-    num_steps_per_env = 32
+    num_steps_per_env = 16
+    init_at_random_ep_len = False
     max_iterations = 1000
-    save_interval = 10
+    save_interval = 50
     experiment_name = "shoelace_dual_franka"
     clip_actions = 1.0
     obs_groups = {"actor": ["policy"], "critic": ["policy", "privileged"]}
@@ -22,7 +32,7 @@ class ShoelacePPORunnerCfg(RslRlOnPolicyRunnerCfg):
         hidden_dims=[256, 128],
         activation="elu",
         obs_normalization=True,
-        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=0.3),
+        distribution_cfg=ShoelaceHybridActionDistributionCfg(init_std=0.3),
     )
     critic = RslRlMLPModelCfg(
         hidden_dims=[256, 128],

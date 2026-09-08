@@ -29,7 +29,7 @@ from isaaclab_contrib.coupling import CouplerAdmmCfg, CouplerProxyCfg  # noqa: E
 import isaaclab_tasks  # noqa: E402, F401
 import isaaclab_tasks.contrib.shoelace.shoelace_env as shoelace_env_module  # noqa: E402
 from isaaclab_tasks.contrib.shoelace.mdp.constants import REFERENCE_PULL_DIRECTIONS, TCP_OFFSET  # noqa: E402
-from isaaclab_tasks.contrib.shoelace.mdp.utils import task_state  # noqa: E402
+from isaaclab_tasks.contrib.shoelace.mdp.utils import task_state, untying_metrics  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg, setup_preset_cli  # noqa: E402
 
 
@@ -226,6 +226,47 @@ def _state(env) -> dict[str, torch.Tensor]:
     }
 
 
+def _success_metrics(env, success_params: dict) -> dict[str, torch.Tensor]:
+    """Evaluate the task success gates without enabling automatic episode resets."""
+    positions, velocities, knot, tail_positions, _ = task_state(env, success_params["asset_cfgs"])
+    throat_count, tail_distances, tail_separation = untying_metrics(
+        positions,
+        knot,
+        tail_positions,
+        success_params["throat_radius"],
+    )
+    tcp_positions = _tcp_positions(env)
+    grasp_distances = torch.linalg.vector_norm(tail_positions - tcp_positions, dim=-1)
+    finger_positions = _finger_positions(env)
+    grasped = (
+        (grasp_distances <= success_params["maximum_success_grasp_distance"])
+        & (finger_positions >= success_params["minimum_finger_position"])
+        & (finger_positions <= success_params["maximum_finger_position"])
+    )
+    finite = torch.isfinite(positions).all(dim=(1, 2)) & torch.isfinite(velocities).all(dim=(1, 2))
+    spread = torch.linalg.vector_norm(positions - positions.mean(dim=1, keepdim=True), dim=-1).amax(dim=1)
+    safe = (
+        finite
+        & (positions[..., 2].amin(dim=1) >= success_params["minimum_lace_height"])
+        & (spread <= success_params["maximum_lace_spread"])
+    )
+    success = (
+        (throat_count <= success_params["maximum_throat_segments"])
+        & (tail_distances.amin(dim=1) >= success_params["tail_success_distance"])
+        & (tail_separation >= success_params["tail_success_separation"])
+        & grasped.all(dim=1)
+        & safe
+    )
+    return {
+        "throat_count": throat_count,
+        "tail_distances": tail_distances,
+        "tail_separation": tail_separation,
+        "grasped": grasped,
+        "safe": safe,
+        "success": success,
+    }
+
+
 def _calibrated_curriculum_states(
     approach_trace: list[dict[str, torch.Tensor]],
     reference_tail: torch.Tensor,
@@ -411,8 +452,29 @@ def main() -> None:  # noqa: C901
     parser.add_argument("--hold_steps", type=int, default=30)
     parser.add_argument("--pull_steps", type=int, default=45)
     parser.add_argument("--pull_speed", type=float, default=0.04)
+    parser.add_argument(
+        "--left_pull_direction_w",
+        type=float,
+        nargs=3,
+        default=REFERENCE_PULL_DIRECTIONS[0],
+        metavar=("X", "Y", "Z"),
+        help="Left TCP pull direction in the world frame.",
+    )
+    parser.add_argument(
+        "--right_pull_direction_w",
+        type=float,
+        nargs=3,
+        default=REFERENCE_PULL_DIRECTIONS[1],
+        metavar=("X", "Y", "Z"),
+        help="Right TCP pull direction in the world frame.",
+    )
     parser.add_argument("--run_label", default="")
     parser.add_argument("--summary_only", action="store_true")
+    parser.add_argument(
+        "--grasp_assist",
+        action="store_true",
+        help="Enable the task's diagnostic grasp spring; disabled by default.",
+    )
     parser.add_argument(
         "--play_curriculum_levels",
         action="store_true",
@@ -513,6 +575,10 @@ def main() -> None:  # noqa: C901
         raise ValueError("Approach steps must be non-negative; close and pull steps must be positive.")
     if args_cli.approach_speed <= 0.0 or args_cli.approach_tolerance < 0.0:
         raise ValueError("Approach speed must be positive and tolerance must be non-negative.")
+    if not np.isfinite(args_cli.left_pull_direction_w).all() or np.linalg.norm(args_cli.left_pull_direction_w) == 0.0:
+        raise ValueError("Left pull direction must be finite and non-zero.")
+    if not np.isfinite(args_cli.right_pull_direction_w).all() or np.linalg.norm(args_cli.right_pull_direction_w) == 0.0:
+        raise ValueError("Right pull direction must be finite and non-zero.")
     if args_cli.left_tcp_offset_w is not None and not np.isfinite(args_cli.left_tcp_offset_w).all():
         raise ValueError("Left TCP offset must contain finite values.")
     if args_cli.right_tcp_offset_w is not None and not np.isfinite(args_cli.right_tcp_offset_w).all():
@@ -578,7 +644,7 @@ def main() -> None:  # noqa: C901
         env_cfg.episode_length_s,
         (scripted_steps + 1) * env_cfg.sim.dt * env_cfg.decimation,
     )
-    env_cfg.grasp_assist_enabled = False
+    env_cfg.grasp_assist_enabled = args_cli.grasp_assist
     env_cfg.coupling_mode = args_cli.coupling_mode
     env_cfg.admm_iterations = args_cli.admm_iterations
     env_cfg.admm_rho = args_cli.admm_rho
@@ -673,9 +739,9 @@ def main() -> None:  # noqa: C901
     curriculum["terminal_level_fraction"] = 1.0
     curriculum["terminal_level_fraction_schedule"] = (1.0,)
 
-    env_cfg.terminations.success = None
-    env_cfg.terminations.unsafe = None
-    env_cfg.terminations.lost_grasp = None
+    success_params = env_cfg.terminations.success.params
+    for termination_name in vars(env_cfg.terminations):
+        setattr(env_cfg.terminations, termination_name, None)
     for reward_name in list(vars(env_cfg.rewards)):
         setattr(env_cfg.rewards, reward_name, None)
 
@@ -864,7 +930,11 @@ def main() -> None:  # noqa: C901
                     )
             pull_start = _state(env)
 
-            directions_w = torch.tensor(REFERENCE_PULL_DIRECTIONS, device=env.device, dtype=torch.float32)
+            directions_w = torch.tensor(
+                (args_cli.left_pull_direction_w, args_cli.right_pull_direction_w),
+                device=env.device,
+                dtype=torch.float32,
+            )
             directions_w /= torch.linalg.vector_norm(directions_w, dim=-1, keepdim=True)
             raw_speed = args_cli.pull_speed * policy_dt / arm_action_scale
             for arm, robot_name in enumerate(("robot_left", "robot_right")):
@@ -876,10 +946,14 @@ def main() -> None:  # noqa: C901
 
             maximum_distance = pull_start["distance"].clone()
             minimum_follow_projection = torch.full((1, 2), float("inf"), device=env.device)
+            first_success_step = None
             samples = []
             for step in range(args_cli.pull_steps):
                 gym_env.step(actions)
                 current = _state(env)
+                success_metrics = _success_metrics(env, success_params)
+                if first_success_step is None and bool(success_metrics["success"][0]):
+                    first_success_step = step + 1
                 maximum_distance = torch.maximum(maximum_distance, current["distance"])
                 tcp_delta = current["tcp"] - pull_start["tcp"]
                 tail_delta = current["tail"] - pull_start["tail"]
@@ -895,6 +969,7 @@ def main() -> None:  # noqa: C901
                         }
                     )
             pull_end = _state(env)
+            final_success_metrics = _success_metrics(env, success_params)
 
             tcp_delta = pull_end["tcp"] - pull_start["tcp"]
             tail_delta = pull_end["tail"] - pull_start["tail"]
@@ -922,16 +997,6 @@ def main() -> None:  # noqa: C901
                 & (pull_end["finger"][0] >= minimum_finger_position)
                 & (pull_end["finger"][0] <= maximum_finger_position)
             )
-            curriculum_states = _calibrated_curriculum_states(
-                approach_trace=approach_trace,
-                reference_tail=reset_state["tail"],
-                level_count=curriculum["level_count"],
-                gripper_open_phase_fraction=env_cfg.events.reset_shoelace.params["gripper_open_phase_fraction"],
-                approach_phase_exponent=env_cfg.events.reset_shoelace.params["approach_phase_exponent"],
-                open_position=env_cfg.events.reset_shoelace.params["open_position"],
-                closed_position=closed_position,
-            )
-
             result = {
                 "run_label": args_cli.run_label,
                 "action_terms": dict(
@@ -957,6 +1022,7 @@ def main() -> None:  # noqa: C901
                 "hold_duration_s": args_cli.hold_steps * policy_dt,
                 "pull_duration_s": args_cli.pull_steps * policy_dt,
                 "commanded_pull_speed_m_s": args_cli.pull_speed,
+                "pull_directions_w": directions_w.tolist(),
                 "gripper_damping_n_s_m": args_cli.gripper_damping,
                 "gripper_stiffness_n_m": env_cfg.scene.robot_left.actuators["panda_hand"].stiffness,
                 "bend_stiffness": shoelace_env_module.BEND_STIFFNESS,
@@ -982,6 +1048,7 @@ def main() -> None:  # noqa: C901
                 "num_substeps": args_cli.num_substeps,
                 "vbd_iterations": args_cli.vbd_iterations,
                 "coupling_mode": args_cli.coupling_mode,
+                "grasp_assist": args_cli.grasp_assist,
                 "coupler_iterations": coupler_cfg.iterations,
                 "admm_rho": coupler_cfg.rho if isinstance(coupler_cfg, CouplerAdmmCfg) else None,
                 "admm_gamma": coupler_cfg.gamma if isinstance(coupler_cfg, CouplerAdmmCfg) else None,
@@ -1039,10 +1106,25 @@ def main() -> None:  # noqa: C901
                 "final_distance_mm": (pull_end["distance"][0] * 1000).tolist(),
                 "maximum_distance_mm": (maximum_distance[0] * 1000).tolist(),
                 "retained_at_end": retained.tolist(),
-                "curriculum_states": curriculum_states,
+                "first_success_pull_step": first_success_step,
+                "final_success": bool(final_success_metrics["success"][0]),
+                "final_throat_count": int(final_success_metrics["throat_count"][0]),
+                "final_tail_to_knot_mm": (final_success_metrics["tail_distances"][0] * 1000).tolist(),
+                "final_tail_separation_mm": float(final_success_metrics["tail_separation"][0] * 1000),
+                "final_success_grasped": final_success_metrics["grasped"][0].tolist(),
+                "final_safe": bool(final_success_metrics["safe"][0]),
                 "pull_samples": samples,
             }
             if not args_cli.summary_only:
+                result["curriculum_states"] = _calibrated_curriculum_states(
+                    approach_trace=approach_trace,
+                    reference_tail=reset_state["tail"],
+                    level_count=curriculum["level_count"],
+                    gripper_open_phase_fraction=env_cfg.events.reset_shoelace.params["gripper_open_phase_fraction"],
+                    approach_phase_exponent=env_cfg.events.reset_shoelace.params["approach_phase_exponent"],
+                    open_position=env_cfg.events.reset_shoelace.params["open_position"],
+                    closed_position=closed_position,
+                )
                 result["approach_samples"] = approach_samples
                 result["close_samples"] = close_samples
                 result["hold_samples"] = hold_samples

@@ -4,15 +4,21 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 __all__ = [
+    # actions
+    "EMADifferentialInverseKinematicsAction",
+    "EMADifferentialInverseKinematicsActionCfg",
     "bilateral_grasp_acquisition_event",
     "closing_away_from_tails",
     "directional_tail_pull",
     "acquired_grasp_retention",
     "episode_phase",
+    "filtered_last_action",
     "finite_joint_vel_l2",
     "grasp_acquisition_event",
     "inferred_grasp_state",
+    "insufficient_separation_progress",
     "lost_grasp",
+    "missed_grasp_acquisition",
     "premature_close_event",
     "PullToGraspCurriculum",
     "ResetShoelaceCurriculum",
@@ -39,10 +45,13 @@ __all__ = [
 
 from isaaclab.envs.mdp import *  # noqa: F403
 
+from .actions import EMADifferentialInverseKinematicsAction
+from .actions_cfg import EMADifferentialInverseKinematicsActionCfg
 from .curriculums import PullToGraspCurriculum
 from .events import ResetShoelaceCurriculum, reset_shoelace_state
 from .observations import (
     episode_phase,
+    filtered_last_action,
     inferred_grasp_state,
     reference_pull_directions,
     tail_separation,
@@ -70,4 +79,10 @@ from .rewards import (
     termination_event_reward,
     untying_progress,
 )
-from .terminations import lost_grasp, shoelace_success, shoelace_unsafe
+from .terminations import (
+    insufficient_separation_progress,
+    lost_grasp,
+    missed_grasp_acquisition,
+    shoelace_success,
+    shoelace_unsafe,
+)

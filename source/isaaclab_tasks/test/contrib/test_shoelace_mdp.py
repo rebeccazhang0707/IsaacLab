@@ -17,18 +17,33 @@ from tensordict import TensorDict
 from pxr import Usd, UsdGeom, UsdPhysics
 
 from isaaclab.envs import ManagerBasedRLEnvCfg
-from isaaclab.envs.mdp.actions import BinaryJointPositionActionCfg, DifferentialInverseKinematicsActionCfg
+from isaaclab.envs.mdp.actions import (
+    BinaryJointPositionActionCfg,
+    DifferentialInverseKinematicsActionCfg,
+)
+from isaaclab.envs.mdp.actions.task_space_actions import DifferentialInverseKinematicsAction
 from isaaclab.managers import CurriculumTermCfg, SceneEntityCfg
 
 from isaaclab_contrib.coupling import CouplerAdmmCfg, CouplerProxyCfg
 
+import isaaclab_tasks.contrib.shoelace.mdp.actions as shoelace_actions
+import isaaclab_tasks.contrib.shoelace.mdp.actions_cfg as shoelace_actions_cfg
 import isaaclab_tasks.contrib.shoelace.mdp.curriculums as shoelace_curriculums
 import isaaclab_tasks.contrib.shoelace.mdp.events as shoelace_events
+import isaaclab_tasks.contrib.shoelace.mdp.observations as shoelace_observations
 import isaaclab_tasks.contrib.shoelace.mdp.rewards as shoelace_rewards
 import isaaclab_tasks.contrib.shoelace.mdp.terminations as shoelace_terminations
 import isaaclab_tasks.contrib.shoelace.mdp.utils as shoelace_utils
 import isaaclab_tasks.contrib.shoelace.shoelace_env as shoelace_env_module
-from isaaclab_tasks.contrib.shoelace.agents.models import FixedObservationStatisticsMLPModel
+from isaaclab_tasks.contrib.shoelace.agents.models import (
+    FixedObservationStatisticsMLPModel,
+    FrozenBackboneFixedObservationStatisticsMLPModel,
+    FrozenGripperOutputHeadFixedObservationStatisticsMLPModel,
+    FrozenGripperSplitBackboneFixedObservationStatisticsMLPModel,
+    FrozenPolicyFixedObservationStatisticsMLPModel,
+    ShoelaceHybridActionDistribution,
+    SplitBackboneFixedObservationStatisticsMLPModel,
+)
 from isaaclab_tasks.contrib.shoelace.agents.rsl_rl_ppo_cfg import ShoelacePPORunnerCfg
 from isaaclab_tasks.contrib.shoelace.mdp.constants import (
     DYNAMIC_SEGMENT_COUNT,
@@ -137,15 +152,24 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.coupling_mode == "proxy"
     assert cfg.admm_iterations == 5
     assert cfg.admm_rho == pytest.approx(400.0)
-    assert cfg.admm_gamma == pytest.approx(0.0)
-    assert cfg.admm_baumgarte == pytest.approx(0.5)
+    assert cfg.admm_gamma == pytest.approx(7.5e-5)
+    assert cfg.admm_baumgarte == pytest.approx(0.75)
     assert cfg.admm_contact_matching == "latest"
     assert isinstance(cfg.sim.physics.solver_cfg, CouplerProxyCfg)
     assert isinstance(cfg.actions.left_arm, DifferentialInverseKinematicsActionCfg)
     assert isinstance(cfg.actions.right_arm, DifferentialInverseKinematicsActionCfg)
+    assert isinstance(cfg.actions.left_arm, shoelace_actions_cfg.EMADifferentialInverseKinematicsActionCfg)
+    assert isinstance(cfg.actions.right_arm, shoelace_actions_cfg.EMADifferentialInverseKinematicsActionCfg)
+    assert cfg.actions.left_arm.alpha == pytest.approx(0.75)
+    assert cfg.actions.right_arm.alpha == pytest.approx(0.75)
+    assert cfg.actions.left_arm.warmup_steps == 3
+    assert cfg.actions.right_arm.warmup_steps == 3
+    assert cfg.actions.left_arm.warmup_steps_by_curriculum_level == (3,) * 81 + (0,) * 16
+    assert cfg.actions.right_arm.warmup_steps_by_curriculum_level == (3,) * 81 + (0,) * 16
     assert isinstance(cfg.actions.left_gripper, BinaryJointPositionActionCfg)
     assert isinstance(cfg.actions.right_gripper, BinaryJointPositionActionCfg)
     assert not hasattr(cfg.actions, "force")
+    assert cfg.observations.policy.last_action.func is shoelace_observations.filtered_last_action
     for robot_cfg in (cfg.scene.robot_left, cfg.scene.robot_right):
         hand_drive = robot_cfg.actuators["panda_hand"]
         assert hand_drive.stiffness == pytest.approx(6000.0)
@@ -153,7 +177,7 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.events.reset_shoelace.func is shoelace_events.ResetShoelaceCurriculum
     assert cfg.scene.env_spacing == pytest.approx(0.25)
     assert cfg.curriculum.pull_to_grasp.func is shoelace_curriculums.PullToGraspCurriculum
-    assert cfg.curriculum.pull_to_grasp.params["level_count"] == 59
+    assert cfg.curriculum.pull_to_grasp.params["level_count"] == 97
     assert cfg.curriculum.pull_to_grasp.params["promotion_success_rate"] == pytest.approx(0.5)
     assert "approach_level_count" not in cfg.curriculum.pull_to_grasp.params
     assert "grasp_assist_strengths" not in cfg.curriculum.pull_to_grasp.params
@@ -177,17 +201,128 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
         (-0.509291, -0.021903, 0.501640, -2.588014, -1.197501, 2.624648, 1.603688)
     )
     arm_states = cfg.events.reset_shoelace.params["arm_joint_positions_by_level"]
-    assert tuple(len(states) for states in arm_states) == (59, 59)
-    assert arm_states[0][55] == pytest.approx(
+    assert tuple(len(states) for states in arm_states) == (97, 97)
+    assert arm_states[1][67] == pytest.approx(
+        (-0.509291, -0.021903, 0.501640, -2.588014, -1.197501, 2.624648, 1.603688)
+    )
+    assert arm_states[1][68] == pytest.approx(
+        (-0.508908238594, 0.001041418021, 0.502844791584, -2.566197815865, -1.205718847, 2.614505814911, 1.608019054752)
+    )
+    assert arm_states[1][77] == pytest.approx(arm_states[1][68])
+    assert arm_states[1][78] == pytest.approx(
+        (
+            -0.508039408424,
+            0.004605980527,
+            0.503710989481,
+            -2.561184597482,
+            -1.203628728833,
+            2.611603975973,
+            1.606203600583,
+        )
+    )
+    assert arm_states[1][79] == pytest.approx(
+        (
+            -0.507449049679,
+            0.019704037585,
+            0.504276442333,
+            -2.546659900388,
+            -1.208664909196,
+            2.604852518599,
+            1.608572404884,
+        )
+    )
+    assert arm_states[1][80] == pytest.approx(arm_states[1][79])
+    assert arm_states[1][81] == pytest.approx(
+        (
+            -0.507592004576,
+            0.017412899251,
+            0.504158130358,
+            -2.549777760137,
+            -1.210331670910,
+            2.606632777565,
+            1.610694055455,
+        )
+    )
+    assert arm_states[1][82] == pytest.approx(
+        (
+            -0.507656984074,
+            0.016371472736,
+            0.504104352187,
+            -2.551194969114,
+            -1.211089289871,
+            2.607441986187,
+            1.611658442079,
+        )
+    )
+    assert arm_states[1][83] == pytest.approx(
+        (
+            -0.507669979974,
+            0.016163187433,
+            0.504093596553,
+            -2.551478410909,
+            -1.211240813663,
+            2.607603827911,
+            1.611851319403,
+        )
+    )
+    assert arm_states[1][84] == pytest.approx(
+        (
+            -0.507681936202,
+            0.015971564954,
+            0.504083701370,
+            -2.551739177361,
+            -1.211380215552,
+            2.607752722297,
+            1.612028766542,
+        )
+    )
+    assert arm_states[1][85] == pytest.approx(
+        (
+            -0.507690253578,
+            0.015838262360,
+            0.504076817764,
+            -2.551920580110,
+            -1.211477190779,
+            2.607856301001,
+            1.612152208029,
+        )
+    )
+    assert arm_states[1][86] == pytest.approx(
+        (
+            -0.507698570953,
+            0.015704959766,
+            0.504069934158,
+            -2.552101982859,
+            -1.211574166006,
+            2.607959879704,
+            1.612275649517,
+        )
+    )
+    approach_pose_1 = (
+        (0.383982, -0.016711, -0.526566, -2.592917, 1.140252, 2.562327, -0.165460),
+        (-0.510776, -0.033617, 0.501523, -2.619221, -1.247455, 2.646284, 1.657949),
+    )
+    bridge_fractions = ((0.125, 0.0), (0.25, 0.0), (0.25, 0.01), (0.25, 0.0125), (0.5, 0.0125))
+    for level, fractions in enumerate(bridge_fractions, start=87):
+        for arm_index, fraction in enumerate(fractions):
+            expected = tuple(
+                start + fraction * (end - start)
+                for start, end in zip(arm_states[arm_index][86], approach_pose_1[arm_index], strict=True)
+            )
+            assert arm_states[arm_index][level] == pytest.approx(expected)
+    assert arm_states[0][92] == pytest.approx(approach_pose_1[0])
+    assert arm_states[1][92] == pytest.approx(approach_pose_1[1])
+    assert arm_states[0][93] == pytest.approx(
         (0.374299, -0.059333, -0.531376, -2.610756, 1.098843, 2.563040, -0.152894)
     )
-    assert arm_states[1][57] == pytest.approx(
+    assert arm_states[1][95] == pytest.approx(
         (-0.439454, -0.223472, 0.486224, -2.694287, -1.023344, 2.657568, 1.607431)
     )
     assert cfg.events.reset_shoelace.params["gripper_joint_positions_by_level"] == pytest.approx(
         (
             0.002,
             0.0025,
+            0.0029375,
             0.003,
             0.0035,
             0.00353125,
@@ -215,10 +350,12 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
             0.0036171875,
             0.00362109375,
             0.003625,
+            0.00371875,
             0.00375,
             0.0038125,
             0.003875,
             0.0039375,
+            0.0039765625,
             0.004,
             0.00400390625,
             0.0040078125,
@@ -236,7 +373,31 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
             0.00402734375,
             0.00403125,
             0.004046875,
+            0.0040580357142857145,
+            0.004069196428571429,
+            0.004080357142857143,
+            0.004091517857142857,
+            0.004102678571428571,
+            0.004113839285714286,
+            0.004125,
+            0.004142857142857143,
+            0.004160714285714286,
+            0.004178571428571428,
+            0.004196428571428571,
+            0.004214285714285714,
+            0.004232142857142857,
+            0.00425,
+            0.00428125,
+            0.0043125,
+            0.0043203125,
+            0.004328125,
             0.005,
+            0.0050625,
+            0.005125,
+            0.00515625,
+            0.00516015625,
+            0.0051640625,
+            0.005166015625,
             0.006,
             0.008,
             0.01,
@@ -245,15 +406,27 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
             0.01,
             0.01,
             0.01,
+            0.01,
+            0.01,
+            0.01,
+            0.01,
+            0.01,
+            0.01,
+            0.01,
+            0.01,
+            0.01,
+            0.01,
+            0.01,
         )
     )
+
     assert cfg.events.reset_shoelace.params["closed_position"] == pytest.approx(0.002)
     assert cfg.actions.left_arm.scale == pytest.approx((0.005, 0.005, 0.005, 0.01, 0.01, 0.01))
     assert cfg.actions.left_arm.body_offset.pos == pytest.approx((0.0, 0.0, 0.1034))
     assert cfg.actions.left_gripper.open_command_expr["panda_finger_joint1"] == pytest.approx(0.01)
-    assert cfg.actions.left_gripper.close_command_expr["panda_finger_joint1"] == pytest.approx(0.002)
+    assert cfg.actions.left_gripper.close_command_expr["panda_finger_joint1"] == pytest.approx(0.0015)
     assert cfg.actions.right_gripper.open_command_expr["panda_finger_joint1"] == pytest.approx(0.01)
-    assert cfg.actions.right_gripper.close_command_expr["panda_finger_joint1"] == pytest.approx(0.002)
+    assert cfg.actions.right_gripper.close_command_expr["panda_finger_joint1"] == pytest.approx(0.0015)
     assert cfg.scene.robot_left.init_state.joint_pos["panda_finger_joint.*"] == pytest.approx(0.01)
     assert cfg.scene.robot_right.init_state.joint_pos["panda_finger_joint.*"] == pytest.approx(0.01)
     assert cfg.scene.robot_left.init_state.joint_pos["panda_joint4"] == pytest.approx(-2.681384)
@@ -264,8 +437,16 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.scene.robot_right.init_state.joint_pos["panda_joint6"] == pytest.approx(2.645580)
     assert not hasattr(cfg.terminations, "left_joint_velocity")
     assert not hasattr(cfg.terminations, "right_joint_velocity")
-    assert cfg.rewards.failure.params["term_keys"] == ["unsafe", "lost_grasp"]
+    assert cfg.rewards.failure.params["term_keys"] == [
+        "unsafe",
+        "lost_grasp",
+        "missed_grasp",
+        "insufficient_separation",
+        "time_out",
+    ]
     assert cfg.rewards.failure.params["exclude_term_keys"] == ["success"]
+    assert cfg.rewards.failure.params["include_time_outs"] is True
+    assert cfg.is_finite_horizon is True
     assert cfg.decimation == 4
     assert cfg.episode_length_s == pytest.approx(20.0)
     assert cfg.sim.physics.num_substeps == 5
@@ -307,7 +488,7 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.rewards.dense_task.params["maximum_finger_position"] == pytest.approx(0.0025)
     assert cfg.rewards.dense_task.params["maximum_progress_rate"] == pytest.approx(3.0)
     assert cfg.rewards.dense_task.params["soft_min_temperature"] == pytest.approx(0.05)
-    assert cfg.rewards.dense_task.params["soft_min_weight"] == pytest.approx(0.25)
+    assert cfg.rewards.dense_task.params["soft_min_weight"] == pytest.approx(0.75)
     assert cfg.rewards.dense_task.params["confirmation_steps"] == 1
     assert cfg.rewards.dense_task.params["pull_weight"] == pytest.approx(0.25)
     assert cfg.rewards.grasp_acquisition.func is shoelace_rewards.bilateral_grasp_acquisition_event
@@ -319,6 +500,11 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.terminations.success.params["maximum_finger_position"] == pytest.approx(0.0035)
     assert cfg.terminations.lost_grasp.params["maximum_finger_position"] == pytest.approx(0.0025)
     assert cfg.terminations.lost_grasp.params["release_confirmation_steps"] == 6
+    assert cfg.terminations.missed_grasp.func is shoelace_terminations.missed_grasp_acquisition
+    assert cfg.terminations.missed_grasp.params["deadline_steps"] == 8
+    assert cfg.terminations.insufficient_separation.func is shoelace_terminations.insufficient_separation_progress
+    assert cfg.terminations.insufficient_separation.params["minimum_progress_fraction"] == pytest.approx(0.5)
+    assert cfg.terminations.insufficient_separation.params["deadline_steps"] == 64
     assert not hasattr(cfg.rewards, "eef_tracking")
     assert not hasattr(cfg.rewards, "approach_progress")
     assert not hasattr(cfg.rewards, "coordination")
@@ -337,6 +523,138 @@ def test_shoelace_task_uses_dual_franka_manager_contract():
     assert cfg.rewards.right_joint_velocity.func is shoelace_rewards.finite_joint_vel_l2
     assert cfg.rewards.right_joint_velocity.weight == pytest.approx(-1.0e-4)
     assert cfg.rewards.right_joint_velocity.params["maximum_penalty"] == pytest.approx(100.0)
+
+
+def test_shoelace_arm_action_filters_after_first_post_reset_command(monkeypatch):
+    """With zero warm-up, the EMA must leave each reset's first command unchanged."""
+    processed_calls: list[torch.Tensor] = []
+
+    def process_base(term, actions):
+        term._raw_actions.copy_(actions)
+        term._processed_actions.copy_(2.0 * actions)
+        processed_calls.append(actions.clone())
+
+    def reset_base(term, env_ids):
+        term._raw_actions[env_ids] = 0.0
+
+    monkeypatch.setattr(DifferentialInverseKinematicsAction, "process_actions", process_base)
+    monkeypatch.setattr(DifferentialInverseKinematicsAction, "reset", reset_base)
+    action = object.__new__(shoelace_actions.EMADifferentialInverseKinematicsAction)
+    action._alpha = 0.75
+    action._warmup_steps = 0
+    action._warmup_steps_by_level = None
+    action._raw_actions = torch.zeros(3, 2)
+    action._processed_actions = torch.zeros(3, 2)
+    action._filtered_actions = torch.zeros(3, 2)
+    action._history_valid = torch.zeros(3, dtype=torch.bool)
+    action._steps_since_reset = torch.zeros(3, dtype=torch.int64)
+    action._warmup_steps_by_env = torch.zeros(3, dtype=torch.int64)
+
+    first = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+    second = torch.tensor([[2.0, 0.0], [1.0, 2.0], [3.0, 4.0]])
+    action.process_actions(first)
+    torch.testing.assert_close(processed_calls[-1], first)
+    torch.testing.assert_close(action.raw_actions, first)
+    action.process_actions(second)
+    expected_second = 0.25 * first + 0.75 * second
+    torch.testing.assert_close(processed_calls[-1], expected_second)
+    torch.testing.assert_close(action.raw_actions, second)
+
+    action.reset(torch.tensor([1]))
+    third = torch.tensor([[4.0, 2.0], [9.0, 8.0], [2.0, 0.0]])
+    expected_third = 0.25 * expected_second + 0.75 * third
+    expected_third[1] = third[1]
+    action.process_actions(third)
+    torch.testing.assert_close(processed_calls[-1], expected_third)
+    torch.testing.assert_close(action.filtered_actions, expected_third)
+    torch.testing.assert_close(action.raw_actions, third)
+
+
+def test_shoelace_arm_action_holds_commands_during_post_reset_warmup(monkeypatch):
+    """The configured warm-up must preserve raw actions while holding executed arm commands."""
+    processed_calls = []
+
+    def process_base(term, actions):
+        term._raw_actions.copy_(actions)
+        term._processed_actions.copy_(2.0 * actions)
+        processed_calls.append(actions.clone())
+
+    monkeypatch.setattr(DifferentialInverseKinematicsAction, "process_actions", process_base)
+
+    action = object.__new__(shoelace_actions.EMADifferentialInverseKinematicsAction)
+    action._alpha = 0.75
+    action._warmup_steps = 3
+    action._raw_actions = torch.zeros(2, 2)
+    action._processed_actions = torch.zeros(2, 2)
+    action._filtered_actions = torch.zeros(2, 2)
+    action._history_valid = torch.zeros(2, dtype=torch.bool)
+    action._steps_since_reset = torch.zeros(2, dtype=torch.int64)
+    action._warmup_steps_by_env = torch.full((2,), 3, dtype=torch.int64)
+
+    command = torch.ones(2, 2)
+    for _ in range(3):
+        action.process_actions(command)
+        torch.testing.assert_close(action.filtered_actions, torch.zeros_like(command))
+        torch.testing.assert_close(action.raw_actions, command)
+
+    action.process_actions(command)
+
+    torch.testing.assert_close(action.filtered_actions, torch.full_like(command, 0.75))
+    torch.testing.assert_close(processed_calls[-1], torch.full_like(command, 0.75))
+
+
+def test_shoelace_arm_action_selects_warmup_from_curriculum_level(monkeypatch):
+    """Each reset environment must use the warm-up duration for its sampled level."""
+
+    def reset_base(term, env_ids):
+        term._raw_actions[env_ids] = 0.0
+
+    monkeypatch.setattr(DifferentialInverseKinematicsAction, "reset", reset_base)
+    levels = torch.tensor((80, 81, 96), dtype=torch.long)
+    curriculum_term = SimpleNamespace(levels=levels)
+    curriculum_cfg = SimpleNamespace(func=curriculum_term)
+    action = object.__new__(shoelace_actions.EMADifferentialInverseKinematicsAction)
+    action.cfg = SimpleNamespace(warmup_curriculum_term_name="pull_to_grasp")
+    action._env = SimpleNamespace(curriculum_manager=SimpleNamespace(cfg=SimpleNamespace(pull_to_grasp=curriculum_cfg)))
+    action._warmup_steps = 3
+    action._warmup_steps_by_level = torch.tensor((3,) * 81 + (0,) * 16, dtype=torch.int64)
+    action._warmup_steps_by_env = torch.full((3,), 3, dtype=torch.int64)
+    action._raw_actions = torch.ones(3, 2)
+    action._processed_actions = torch.ones(3, 2)
+    action._filtered_actions = torch.ones(3, 2)
+    action._history_valid = torch.ones(3, dtype=torch.bool)
+    action._steps_since_reset = torch.ones(3, dtype=torch.int64)
+
+    action.reset(torch.tensor((0, 1, 2)))
+
+    torch.testing.assert_close(action._warmup_steps_by_env, torch.tensor((3, 0, 0), dtype=torch.int64))
+    torch.testing.assert_close(action._steps_since_reset, torch.zeros(3, dtype=torch.int64))
+    torch.testing.assert_close(action.filtered_actions, torch.zeros(3, 2))
+
+
+def test_filtered_last_action_matches_executed_arm_command_order():
+    """Action history must expose filtered arms and raw binary grippers in policy order."""
+    terms = {
+        "left_arm": SimpleNamespace(filtered_actions=torch.full((2, 6), 1.0), raw_actions=torch.full((2, 6), -1.0)),
+        "left_gripper": SimpleNamespace(raw_actions=torch.full((2, 1), 2.0)),
+        "right_arm": SimpleNamespace(filtered_actions=torch.full((2, 6), 3.0), raw_actions=torch.full((2, 6), -3.0)),
+        "right_gripper": SimpleNamespace(raw_actions=torch.full((2, 1), 4.0)),
+    }
+    env = SimpleNamespace(action_manager=SimpleNamespace(get_term=terms.__getitem__))
+
+    observed = shoelace_observations.filtered_last_action(env)
+
+    expected = torch.cat(
+        (
+            terms["left_arm"].filtered_actions,
+            terms["left_gripper"].raw_actions,
+            terms["right_arm"].filtered_actions,
+            terms["right_gripper"].raw_actions,
+        ),
+        dim=-1,
+    )
+    assert observed.shape == (2, 14)
+    torch.testing.assert_close(observed, expected)
 
 
 def test_shoelace_play_mode_uses_complete_authored_reset():
@@ -927,9 +1245,228 @@ def test_fixed_observation_statistics_model_preserves_loaded_statistics():
         torch.testing.assert_close(model.obs_normalizer.state_dict()[name], expected)
 
 
+def test_frozen_backbone_model_trains_only_output_layer_and_distribution():
+    """Consolidation must isolate the action head from shared-backbone gradient interference."""
+    observations = TensorDict({"policy": torch.randn(8, 3)}, batch_size=[8])
+    model = FrozenBackboneFixedObservationStatisticsMLPModel(
+        observations,
+        {"actor": ["policy"]},
+        "actor",
+        14,
+        hidden_dims=[8],
+        obs_normalization=True,
+        distribution_cfg={
+            "class_name": "isaaclab_tasks.contrib.shoelace.agents.models:ShoelaceHybridActionDistribution",
+            "init_std": 0.2,
+        },
+    )
+
+    trainable_names = {name for name, parameter in model.named_parameters() if parameter.requires_grad}
+
+    assert trainable_names == {"distribution.std_param", "mlp.2.weight", "mlp.2.bias"}
+
+
+def test_frozen_gripper_output_head_model_updates_only_arm_rows():
+    """Output-head consolidation must not move either binary gripper decision boundary."""
+    observations = TensorDict({"policy": torch.randn(8, 3)}, batch_size=[8])
+    model = FrozenGripperOutputHeadFixedObservationStatisticsMLPModel(
+        observations,
+        {"actor": ["policy"]},
+        "actor",
+        14,
+        hidden_dims=[8],
+        obs_normalization=True,
+        distribution_cfg={
+            "class_name": "isaaclab_tasks.contrib.shoelace.agents.models:ShoelaceHybridActionDistribution",
+            "init_std": 0.2,
+            "learn_std": False,
+        },
+    )
+    output_layer = model.mlp[-1]
+    weight_before = output_layer.weight.detach().clone()
+    bias_before = output_layer.bias.detach().clone()
+    optimizer = torch.optim.Adam(model.parameters(), lr=1.0e-3)
+
+    model(observations).sum().backward()
+    optimizer.step()
+
+    gripper_rows = torch.tensor([6, 13])
+    arm_rows = torch.tensor([0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12])
+    torch.testing.assert_close(output_layer.weight[gripper_rows], weight_before[gripper_rows])
+    torch.testing.assert_close(output_layer.bias[gripper_rows], bias_before[gripper_rows])
+    assert torch.count_nonzero(output_layer.weight[arm_rows] - weight_before[arm_rows]) > 0
+    assert torch.count_nonzero(output_layer.bias[arm_rows] - bias_before[arm_rows]) > 0
+    backbone_layers = list(model.mlp.children())[:-1]
+    assert all(not parameter.requires_grad for layer in backbone_layers for parameter in layer.parameters())
+
+
+def test_frozen_policy_model_preserves_every_actor_parameter():
+    """Critic warm-up must prevent gradients from changing any policy parameter."""
+    observations = TensorDict({"policy": torch.randn(8, 3)}, batch_size=[8])
+    model = FrozenPolicyFixedObservationStatisticsMLPModel(
+        observations,
+        {"actor": ["policy"]},
+        "actor",
+        14,
+        hidden_dims=[8],
+        obs_normalization=True,
+        distribution_cfg={
+            "class_name": "isaaclab_tasks.contrib.shoelace.agents.models:ShoelaceHybridActionDistribution",
+            "init_std": 0.2,
+        },
+    )
+
+    assert all(not parameter.requires_grad for parameter in model.parameters())
+
+
+def test_split_backbone_model_isolates_arm_and_gripper_gradients():
+    """Arm and gripper losses must not update the other action family's backbone."""
+    observations = TensorDict({"policy": torch.randn(8, 3)}, batch_size=[8])
+    model = SplitBackboneFixedObservationStatisticsMLPModel(
+        observations,
+        {"actor": ["policy"]},
+        "actor",
+        14,
+        hidden_dims=[8],
+        obs_normalization=True,
+        distribution_cfg={
+            "class_name": "isaaclab_tasks.contrib.shoelace.agents.models:ShoelaceHybridActionDistribution",
+            "init_std": 0.2,
+        },
+    )
+    output = model(observations)
+    output[..., [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]].sum().backward()
+
+    assert any(parameter.grad is not None for parameter in model.mlp.arm_mlp.parameters())
+    assert all(
+        parameter.grad is None or torch.count_nonzero(parameter.grad) == 0
+        for parameter in model.mlp.gripper_mlp.parameters()
+    )
+
+    model.zero_grad(set_to_none=True)
+    model(observations)[..., [6, 13]].sum().backward()
+
+    assert all(
+        parameter.grad is None or torch.count_nonzero(parameter.grad) == 0
+        for parameter in model.mlp.arm_mlp.parameters()
+    )
+    assert any(parameter.grad is not None for parameter in model.mlp.gripper_mlp.parameters())
+
+
+def test_frozen_gripper_split_backbone_model_trains_only_arm_policy():
+    """Arm consolidation must preserve every parameter that controls gripper decisions."""
+    observations = TensorDict({"policy": torch.randn(8, 3)}, batch_size=[8])
+    model = FrozenGripperSplitBackboneFixedObservationStatisticsMLPModel(
+        observations,
+        {"actor": ["policy"]},
+        "actor",
+        14,
+        hidden_dims=[8],
+        obs_normalization=True,
+        distribution_cfg={
+            "class_name": "isaaclab_tasks.contrib.shoelace.agents.models:ShoelaceHybridActionDistribution",
+            "init_std": 0.2,
+        },
+    )
+    output = model(observations)
+    output.sum().backward()
+
+    assert all(parameter.requires_grad for parameter in model.mlp.arm_mlp.parameters())
+    assert any(parameter.grad is not None for parameter in model.mlp.arm_mlp.parameters())
+    assert all(not parameter.requires_grad for parameter in model.mlp.gripper_mlp.parameters())
+    assert all(parameter.grad is None for parameter in model.mlp.gripper_mlp.parameters())
+
+
+def test_shoelace_hybrid_distribution_matches_binary_gripper_contract():
+    """Gripper actions must be discrete while arm actions retain Gaussian exploration."""
+    distribution = ShoelaceHybridActionDistribution(14, init_std=0.2, learn_std=False, gripper_logit_scale=500.0)
+    mlp_output = torch.zeros((4096, 14))
+    mlp_output[:, 6] = -0.001
+    mlp_output[:, 13] = 0.0014
+
+    deterministic = distribution.deterministic_output(mlp_output)
+    distribution.update(mlp_output)
+    sampled = distribution.sample()
+
+    torch.testing.assert_close(deterministic, mlp_output)
+    assert set(torch.unique(torch.sign(sampled[:, 6])).tolist()) == {-1.0, 1.0}
+    assert set(torch.unique(torch.sign(sampled[:, 13])).tolist()) == {-1.0, 1.0}
+    torch.testing.assert_close(sampled[:, 6].abs(), torch.full((4096,), 0.001))
+    torch.testing.assert_close(sampled[:, 13].abs(), torch.full((4096,), 0.0014))
+    assert sampled[:, :6].std().item() == pytest.approx(0.2, abs=0.01)
+    assert torch.isfinite(distribution.log_prob(sampled)).all()
+
+
+def test_shoelace_hybrid_distribution_scales_only_continuous_arm_actions():
+    """Arm calibration must scale means and noise without changing binary gripper outputs."""
+    distribution = ShoelaceHybridActionDistribution(
+        14,
+        init_std=0.2,
+        learn_std=False,
+        arm_action_scale=0.7,
+        gripper_logit_scale=500.0,
+    )
+    mlp_output = torch.ones((2, 14))
+    mlp_output[:, (6, 13)] = -0.001
+    expected = mlp_output.clone()
+    expected[:, (0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12)] *= 0.7
+
+    distribution.update(mlp_output)
+
+    torch.testing.assert_close(distribution.deterministic_output(mlp_output), expected)
+    torch.testing.assert_close(distribution.mean[:, distribution._arm_indices], expected[:, distribution._arm_indices])
+    torch.testing.assert_close(
+        distribution.std[:, distribution._arm_indices],
+        torch.full((2, 12), 0.14),
+    )
+    torch.testing.assert_close(distribution.as_deterministic_output_module()(mlp_output), expected)
+    scripted_output = torch.jit.script(distribution.as_deterministic_output_module())(mlp_output)
+    torch.testing.assert_close(scripted_output, expected)
+
+
+def test_shoelace_hybrid_distribution_kl_matches_independent_factors():
+    """The reported KL must include Gaussian arms and Bernoulli grippers exactly once."""
+    distribution = ShoelaceHybridActionDistribution(14, init_std=0.2, learn_std=False, gripper_logit_scale=500.0)
+    old_output = torch.zeros((3, 14))
+    new_output = torch.full((3, 14), 0.1)
+    old_std = torch.full((3, 14), 0.2)
+    new_std = torch.full((3, 14), 0.25)
+    old_params = (old_output, old_std)
+    new_params = (new_output, new_std)
+
+    actual = distribution.kl_divergence(old_params, new_params)
+    arm_indices = (0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12)
+    gripper_indices = (6, 13)
+    expected = torch.distributions.kl_divergence(
+        torch.distributions.Normal(old_output[..., arm_indices], old_std[..., arm_indices]),
+        torch.distributions.Normal(new_output[..., arm_indices], new_std[..., arm_indices]),
+    ).sum(dim=-1)
+    expected += torch.distributions.kl_divergence(
+        torch.distributions.Bernoulli(logits=500.0 * old_output[..., gripper_indices]),
+        torch.distributions.Bernoulli(logits=500.0 * new_output[..., gripper_indices]),
+    ).sum(dim=-1)
+
+    torch.testing.assert_close(actual, expected)
+
+
 def test_shoelace_agent_saves_intermediate_checkpoints():
     """Training must expose checkpoints frequently enough for phase-metric evaluation."""
-    assert ShoelacePPORunnerCfg().save_interval == 10
+    assert ShoelacePPORunnerCfg().save_interval == 50
+
+
+def test_shoelace_agent_starts_with_complete_episodes():
+    """Success curricula must not count artificially shortened startup episodes."""
+    assert ShoelacePPORunnerCfg().init_at_random_ep_len is False
+
+
+def test_shoelace_agent_uses_persistent_gripper_sampling():
+    """The sampled gripper policy must suppress rare open actions during a sustained hold."""
+    assert ShoelacePPORunnerCfg().actor.distribution_cfg.gripper_logit_scale == 2.0
+
+
+def test_shoelace_agent_uses_contact_stable_arm_action_scale():
+    """The arm action scale must preserve marginal cable contacts during pulling."""
+    assert ShoelacePPORunnerCfg().actor.distribution_cfg.arm_action_scale == 0.7
 
 
 def test_reference_pull_directions_match_normalized_demo_forces():
@@ -1142,6 +1679,7 @@ def test_reset_relative_dense_reward_requires_confirmed_grasp_for_task_progress(
         "maximum_grasp_distance": 0.015,
         "minimum_finger_position": 0.0003,
         "maximum_finger_position": 0.0025,
+        "throat_radius": 0.025,
         "asset_cfgs": None,
         "left_robot_cfg": "left",
         "right_robot_cfg": "right",
@@ -1162,6 +1700,7 @@ def test_reset_relative_dense_reward_requires_confirmed_grasp_for_task_progress(
             minimum_finger_position=0.0003,
             maximum_finger_position=0.0025,
             maximum_grasp_distance=0.015,
+            maximum_success_grasp_distance=0.012,
             maximum_progress_rate=3.0,
             soft_min_temperature=0.05,
             soft_min_weight=0.25,
@@ -1196,13 +1735,15 @@ def test_reset_relative_dense_reward_requires_confirmed_grasp_for_task_progress(
     assert compute_reward().item() > 3.0
 
     grasped[:] = False
-    positions[..., 0] = 0.2
+    tcp_positions[:, 1, 2] += 0.03
+    assert compute_reward().item() < 0.0
     torch.testing.assert_close(compute_reward(), torch.zeros(1))
-    positions.zero_()
+    tcp_positions.copy_(tail_positions)
+    grasped[:] = True
+    assert compute_reward().item() > 0.0
     tail_positions.copy_(torch.tensor([[[-0.06, 0.0, 0.0], [0.06, 0.0, 0.0]]]))
     tcp_positions.copy_(tail_positions)
     tail_velocities.zero_()
-    grasped[:] = True
     assert compute_reward().item() < 0.0
 
     term.reset()
@@ -1210,6 +1751,71 @@ def test_reset_relative_dense_reward_requires_confirmed_grasp_for_task_progress(
     grasped[:] = False
     tcp_positions[..., 2] += 0.03
     torch.testing.assert_close(compute_reward(), torch.zeros(1))
+
+
+def test_reset_relative_dense_reward_captures_first_action_progress(monkeypatch):
+    """The reset state, rather than the post-action state, must define the task-progress baseline."""
+    positions = torch.zeros((1, DYNAMIC_SEGMENT_COUNT, 3))
+    knot = torch.zeros((1, 3))
+    tail_positions = torch.tensor([[[-0.06, 0.0, 0.0], [0.06, 0.0, 0.0]]])
+    tail_velocities = torch.zeros((1, 2, 3))
+    tcp_positions = tail_positions.clone()
+    finger_positions = torch.full((1, 2), 0.001)
+    grasped = torch.ones((1, 2), dtype=torch.bool)
+    monkeypatch.setattr(
+        shoelace_rewards,
+        "robot_tcp_position",
+        lambda _, robot_cfg: tcp_positions[:, 0 if robot_cfg == "left" else 1],
+    )
+    monkeypatch.setattr(shoelace_rewards, "gripper_positions", lambda *args: finger_positions)
+    monkeypatch.setattr(shoelace_rewards, "grasp_state", lambda *args: grasped)
+    monkeypatch.setattr(
+        shoelace_rewards,
+        "task_state",
+        lambda *args: (positions, None, knot, tail_positions, tail_velocities),
+    )
+    env = SimpleNamespace(num_envs=1, device="cpu", step_dt=0.1)
+    reset_params = {
+        "maximum_grasp_distance": 0.015,
+        "minimum_finger_position": 0.0003,
+        "maximum_finger_position": 0.0025,
+        "throat_radius": 0.025,
+        "asset_cfgs": None,
+        "left_robot_cfg": "left",
+        "right_robot_cfg": "right",
+    }
+    term = shoelace_rewards.reset_relative_dense_reward(SimpleNamespace(params=reset_params), env)
+    term.reset()
+
+    tail_positions.copy_(torch.tensor([[[-0.1, 0.0, 0.0], [0.1, 0.0, 0.0]]]))
+    tcp_positions.copy_(tail_positions)
+    reward = term(
+        env,
+        reach_std=0.05,
+        grasp_std=0.012,
+        throat_radius=0.025,
+        maximum_throat_segments=52,
+        tail_success_distance=0.09,
+        tail_success_separation=0.18,
+        target_speed=0.04,
+        open_position=0.01,
+        minimum_finger_position=0.0003,
+        maximum_finger_position=0.0025,
+        maximum_grasp_distance=0.015,
+        maximum_progress_rate=3.0,
+        soft_min_temperature=0.05,
+        soft_min_weight=0.25,
+        confirmation_steps=2,
+        approach_weight=0.1,
+        acquisition_weight=0.25,
+        task_weight=1.0,
+        pull_weight=0.25,
+        asset_cfgs=None,
+        left_robot_cfg="left",
+        right_robot_cfg="right",
+    )
+
+    assert reward.item() > 0.0
 
 
 def test_premature_close_penalizes_only_first_pre_acquisition_closure(monkeypatch):
@@ -1818,6 +2424,74 @@ def test_lost_grasp_allows_recovery_before_bilateral_acquisition(monkeypatch):
     torch.testing.assert_close(term(env, 0.01, 0.01, 0.025, None, None, None), torch.tensor([True]))
 
 
+def test_missed_grasp_acquisition_terminates_only_stalled_reachable_states(monkeypatch):
+    """The short deadline must not penalize approach or a completed acquisition."""
+    distances = torch.tensor([[0.005, 0.005], [0.005, 0.005], [0.050, 0.050]])
+    grasped = torch.zeros((3, 2), dtype=torch.bool)
+    monkeypatch.setattr(shoelace_terminations, "grasp_distances", lambda *args: distances)
+    monkeypatch.setattr(shoelace_terminations, "grasp_state", lambda *args, **kwargs: grasped)
+    env = SimpleNamespace(num_envs=3, device="cpu")
+    term = shoelace_terminations.missed_grasp_acquisition(None, env)
+
+    def compute_termination() -> torch.Tensor:
+        return term(
+            env,
+            acquisition_distance=0.012,
+            maximum_finger_position=0.0025,
+            asset_cfgs=None,
+            left_robot_cfg=None,
+            right_robot_cfg=None,
+            minimum_finger_position=0.0003,
+            deadline_steps=3,
+        )
+
+    torch.testing.assert_close(compute_termination(), torch.tensor([False, False, False]))
+    distances[0] = 0.050
+    torch.testing.assert_close(compute_termination(), torch.tensor([False, False, False]))
+    grasped[1] = True
+    torch.testing.assert_close(compute_termination(), torch.tensor([True, False, False]))
+    grasped[1] = False
+    torch.testing.assert_close(compute_termination(), torch.tensor([True, False, False]))
+
+
+def test_insufficient_separation_progress_uses_post_acquisition_deadline(monkeypatch):
+    """Only acquired tails below the reset-relative separation target should terminate."""
+    tail_positions = torch.zeros((3, 2, 3))
+    tail_positions[:, 1, 0] = 0.12
+    grasped = torch.tensor([[True, True], [True, True], [False, False]])
+    monkeypatch.setattr(
+        shoelace_terminations,
+        "task_state",
+        lambda *args: (torch.empty(0), torch.empty(0), torch.empty(0), tail_positions, torch.empty(0)),
+    )
+    monkeypatch.setattr(shoelace_terminations, "grasp_state", lambda *args, **kwargs: grasped)
+    params = {
+        "acquisition_distance": 0.012,
+        "maximum_finger_position": 0.0025,
+        "target_tail_separation": 0.18,
+        "minimum_progress_fraction": 0.5,
+        "deadline_steps": 3,
+        "asset_cfgs": None,
+        "left_robot_cfg": None,
+        "right_robot_cfg": None,
+    }
+    env = SimpleNamespace(num_envs=3, device="cpu")
+    term = shoelace_terminations.insufficient_separation_progress(SimpleNamespace(params=params), env)
+    term.reset()
+    tail_positions[:, 1, 0] = torch.tensor([0.151, 0.149, 0.149])
+
+    def compute_termination() -> torch.Tensor:
+        return term(env, **params)
+
+    torch.testing.assert_close(compute_termination(), torch.tensor([False, False, False]))
+    torch.testing.assert_close(compute_termination(), torch.tensor([False, False, False]))
+    torch.testing.assert_close(compute_termination(), torch.tensor([False, True, False]))
+    grasped[2] = True
+    torch.testing.assert_close(compute_termination(), torch.tensor([False, True, False]))
+    torch.testing.assert_close(compute_termination(), torch.tensor([False, True, False]))
+    torch.testing.assert_close(compute_termination(), torch.tensor([False, True, True]))
+
+
 def test_finite_joint_vel_l2_bounds_terminal_state_outliers():
     """A reset-bound robot must not emit invalid or destabilizing velocity penalties."""
     joint_velocities = torch.tensor([[1.0, 2.0], [torch.nan, 2.0], [torch.inf, 2.0], [1000.0, 2.0]])
@@ -1841,6 +2515,7 @@ def test_termination_event_reward_cancels_reward_manager_time_scaling():
                 "unsafe": torch.tensor([True, False, True]),
                 "lost_grasp": torch.tensor([True, True, False]),
                 "success": torch.tensor([True, False, False]),
+                "time_out": torch.tensor([False, False, True]),
             }
             return terms[name]
 
@@ -1856,6 +2531,16 @@ def test_termination_event_reward_cancels_reward_manager_time_scaling():
     exclusive_event_rate = term(env, ["unsafe", "lost_grasp"], ["success"])
 
     torch.testing.assert_close(exclusive_event_rate * env.step_dt, torch.tensor([0.0, 1.0, 0.0]))
+
+    term._term_names = ["unsafe", "lost_grasp", "time_out"]
+    timeout_event_rate = term(
+        env,
+        ["unsafe", "lost_grasp", "time_out"],
+        ["success"],
+        include_time_outs=True,
+    )
+
+    torch.testing.assert_close(timeout_event_rate * env.step_dt, torch.tensor([0.0, 1.0, 2.0]))
 
 
 def test_runtime_configuration_authors_split_cable_assets():
