@@ -21,6 +21,7 @@ from .utils import (
     potential,
     pull_directions,
     robot_tcp_position,
+    tail_to_tcp_hand_vectors,
     task_state,
     untying_metrics,
 )
@@ -121,6 +122,8 @@ class bilateral_grasp_acquisition_event(ManagerTermBase):
         right_robot_cfg: SceneEntityCfg,
         minimum_finger_position: float = 0.0,
         confirmation_steps: int = 1,
+        socket_targets: tuple[tuple[float, float, float], tuple[float, float, float]] | None = None,
+        maximum_socket_error: float | None = None,
     ) -> torch.Tensor:
         """Return a unit-rate impulse after confirming both strict grasps together.
 
@@ -133,6 +136,8 @@ class bilateral_grasp_acquisition_event(ManagerTermBase):
             right_robot_cfg: Right robot hand and finger scene entity.
             minimum_finger_position: Minimum driven finger-joint position for acquisition [m].
             confirmation_steps: Consecutive control steps required to confirm bilateral acquisition.
+            socket_targets: Target tail-to-TCP vectors in the controlling hand frames [m].
+            maximum_socket_error: Maximum Euclidean error from each contact socket target [m].
 
         Returns:
             Per-environment bilateral acquisition event rate.
@@ -145,6 +150,8 @@ class bilateral_grasp_acquisition_event(ManagerTermBase):
             left_robot_cfg,
             right_robot_cfg,
             minimum_finger_position,
+            socket_targets,
+            maximum_socket_error,
         ).all(dim=1)
         self._candidate_steps.copy_(
             torch.where(grasped, self._candidate_steps + 1, torch.zeros_like(self._candidate_steps))
@@ -746,13 +753,28 @@ class reset_relative_dense_reward(ManagerTermBase):
             reach = 1.0 - torch.tanh(distances / max(params["reach_std"], 1.0e-6))
             grasp_proximity = 1.0 - torch.tanh(distances / max(params["grasp_std"], 1.0e-6))
             acquisition = _hamacher_product(grasp_proximity, aperture)
+            socket_targets = params.get("socket_targets")
+            socket_std = params.get("socket_std")
+            socket_score = None
+            if socket_targets is not None and socket_std is not None:
+                socket_vectors = tail_to_tcp_hand_vectors(
+                    self._env,
+                    params["asset_cfgs"],
+                    params["left_robot_cfg"],
+                    params["right_robot_cfg"],
+                )
+                socket_score = _grasp_socket_score(socket_vectors, socket_targets, socket_std)
+                acquisition = _hamacher_product(acquisition, socket_score)
             approach_score = reach.mean(dim=1)
+            if socket_score is not None:
+                approach_score = 0.5 * (reach + socket_score).mean(dim=1)
             per_tail_acquisition = _hamacher_product(reach, acquisition)
             acquisition_score = _hamacher_product(per_tail_acquisition[:, 0], per_tail_acquisition[:, 1])
             finite_phase = (
                 torch.isfinite(tail_positions).all(dim=(1, 2))
                 & torch.isfinite(tcp_positions).all(dim=(1, 2))
                 & torch.isfinite(finger_positions).all(dim=1)
+                & torch.isfinite(acquisition).all(dim=1)
             )
             finite_selected = finite_phase[selected]
             self._previous_approach[selected] = torch.where(
@@ -792,6 +814,9 @@ class reset_relative_dense_reward(ManagerTermBase):
         left_robot_cfg: SceneEntityCfg,
         right_robot_cfg: SceneEntityCfg,
         maximum_success_grasp_distance: float | None = None,
+        socket_targets: tuple[tuple[float, float, float], tuple[float, float, float]] | None = None,
+        socket_std: float | None = None,
+        maximum_socket_error: float | None = None,
     ) -> torch.Tensor:
         """Return bounded phase progress and strict-grasp directional pull credit.
 
@@ -825,6 +850,9 @@ class reset_relative_dense_reward(ManagerTermBase):
             right_robot_cfg: Right robot hand and finger scene entity.
             maximum_success_grasp_distance: Tail-to-TCP distance below which grasp retention is fully credited [m].
                 When omitted, ``grasp_std`` is used.
+            socket_targets: Target tail-to-TCP vectors in the controlling hand frames [m].
+            socket_std: Contact-socket score width [m].
+            maximum_socket_error: Maximum Euclidean error for strict socket acquisition [m].
 
         Returns:
             Per-environment dense task reward rate.
@@ -856,7 +884,22 @@ class reset_relative_dense_reward(ManagerTermBase):
         reach = 1.0 - torch.tanh(distances / max(reach_std, 1.0e-6))
         grasp_proximity = 1.0 - torch.tanh(distances / max(grasp_std, 1.0e-6))
         acquisition = _hamacher_product(grasp_proximity, aperture)
+        socket_score = None
+        if socket_targets is not None or socket_std is not None:
+            if socket_targets is None or socket_std is None:
+                raise ValueError("Socket targets and socket score width must be configured together.")
+            socket_vectors = tail_to_tcp_hand_vectors(
+                env,
+                asset_cfgs,
+                left_robot_cfg,
+                right_robot_cfg,
+            )
+            socket_score = _grasp_socket_score(socket_vectors, socket_targets, socket_std)
+            acquisition = _hamacher_product(acquisition, socket_score)
+        finite &= torch.isfinite(acquisition).all(dim=1)
         approach_score = reach.mean(dim=1)
+        if socket_score is not None:
+            approach_score = 0.5 * (reach + socket_score).mean(dim=1)
         per_tail_acquisition = _hamacher_product(reach, acquisition)
         acquisition_score = _hamacher_product(per_tail_acquisition[:, 0], per_tail_acquisition[:, 1])
 
@@ -892,7 +935,18 @@ class reset_relative_dense_reward(ManagerTermBase):
         retention_range = max(maximum_grasp_distance - retained_distance, 1.0e-6)
         per_tail_retention = ((maximum_grasp_distance - distances) / retention_range).clamp(0.0, 1.0)
         retained_task_progress = task_progress * per_tail_retention.amin(dim=1)
-        grasped = grasp_state(
+        acquired_grasp = grasp_state(
+            env,
+            maximum_grasp_distance,
+            maximum_finger_position,
+            asset_cfgs,
+            left_robot_cfg,
+            right_robot_cfg,
+            minimum_finger_position,
+            socket_targets,
+            maximum_socket_error,
+        )
+        retained_grasp = grasp_state(
             env,
             maximum_grasp_distance,
             maximum_finger_position,
@@ -901,10 +955,10 @@ class reset_relative_dense_reward(ManagerTermBase):
             right_robot_cfg,
             minimum_finger_position,
         )
-        bilateral_grasp = grasped.all(dim=1)
+        bilateral_acquisition = acquired_grasp.all(dim=1)
         self._candidate_steps.copy_(
             torch.where(
-                finite & bilateral_grasp,
+                finite & bilateral_acquisition,
                 self._candidate_steps + 1,
                 torch.zeros_like(self._candidate_steps),
             )
@@ -938,7 +992,7 @@ class reset_relative_dense_reward(ManagerTermBase):
         projected_speed = torch.sum(tail_velocities * pull_directions(tail_velocities), dim=-1)
         synchronized_speed = projected_speed.amin(dim=1)
         pull_score = torch.tanh(synchronized_speed / max(target_speed, 1.0e-6))
-        pull_active = self._bilaterally_acquired & bilateral_grasp
+        pull_active = self._bilaterally_acquired & retained_grasp.all(dim=1)
         reward = (
             approach_weight * approach_rate * pre_acquisition
             + acquisition_weight * acquisition_rate * pre_acquisition
@@ -1175,7 +1229,24 @@ def _configured_grasp_state(term: ManagerTermBase, distance_key: str) -> torch.T
         params["left_robot_cfg"],
         params["right_robot_cfg"],
         params.get("minimum_finger_position", 0.0),
+        params.get("socket_targets"),
+        params.get("maximum_socket_error"),
     )
+
+
+def _grasp_socket_score(
+    socket_vectors: torch.Tensor,
+    socket_targets: tuple[tuple[float, float, float], tuple[float, float, float]],
+    socket_std: float,
+) -> torch.Tensor:
+    """Return smooth per-tail contact-socket quality in ``[0, 1]``."""
+    if socket_std <= 0.0:
+        raise ValueError("Socket score width must be positive.")
+    targets = socket_vectors.new_tensor(socket_targets)
+    if targets.shape != (2, 3):
+        raise ValueError(f"Expected two three-dimensional socket targets, got shape {tuple(targets.shape)}.")
+    errors = torch.linalg.vector_norm(socket_vectors - targets.unsqueeze(0), dim=-1)
+    return 1.0 - torch.tanh(errors / socket_std)
 
 
 def _grasp_aperture_score(

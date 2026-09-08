@@ -50,15 +50,22 @@ _TAIL_SUCCESS_SEPARATION = 0.18
 _MAXIMUM_SUCCESS_GRASP_DISTANCE = 0.015
 _GRASP_ACQUISITION_DISTANCE = 0.012
 _MAXIMUM_GRASP_DISTANCE = 0.020
-_GRIPPER_OPEN_POSITION = 0.01
+_GRASP_SOCKET_TARGETS = ((-0.00235, -0.00016, 0.00698), (-0.00542, -0.00144, -0.00462))
+_GRASP_SOCKET_STD = 0.020
+_MAXIMUM_GRASP_SOCKET_ERROR = 0.012
+_CONTACT_CURRICULUM_GRIPPER_OPEN_POSITION = 0.01
+_GRIPPER_OPEN_POSITION = 0.015
+_GRIPPER_DEFAULT_POSITION = 0.01
 _GRIPPER_CLOSED_POSITION = 0.002
 _GRIPPER_CLOSE_TARGET = 0.0015
 _GRIPPER_MINIMUM_GRASP_POSITION = 0.0003
 _GRIPPER_CLOSED_THRESHOLD = 0.0025
 _GRIPPER_SUCCESS_THRESHOLD = 0.0035
+_GRIPPER_ACTUATOR_VELOCITY_LIMIT = 0.04
+_GRIPPER_TARGET_VELOCITY_LIMIT = 0.20
 _GRASP_CONFIRMATION_STEPS = 1
 _GRASP_RELEASE_CONFIRMATION_STEPS = 6
-_GRASP_ACQUISITION_DEADLINE_STEPS = 8
+_GRASP_ACQUISITION_DEADLINE_STEPS = 96
 _SEPARATION_PROGRESS_DEADLINE_STEPS = 64
 _MINIMUM_SEPARATION_PROGRESS = 0.5
 _TARGET_PULL_SPEED = 0.04
@@ -219,7 +226,7 @@ _RIGHT_FRANKA_CURRICULUM_JOINT_POSITIONS = (
 )
 _CURRICULUM_GRIPPER_JOINT_POSITIONS = (
     tuple(
-        _GRIPPER_CLOSED_POSITION + fraction * (_GRIPPER_OPEN_POSITION - _GRIPPER_CLOSED_POSITION)
+        _GRIPPER_CLOSED_POSITION + fraction * (_CONTACT_CURRICULUM_GRIPPER_OPEN_POSITION - _GRIPPER_CLOSED_POSITION)
         for fraction in (
             0.0,
             0.0625,
@@ -304,7 +311,8 @@ _CURRICULUM_GRIPPER_JOINT_POSITIONS = (
             1.0,
         )
     )
-    + (_GRIPPER_OPEN_POSITION,) * 16
+    + (_CONTACT_CURRICULUM_GRIPPER_OPEN_POSITION,) * 11
+    + (_GRIPPER_OPEN_POSITION,) * 5
 )
 _CURRICULUM_LEVEL_COUNT = len(_CURRICULUM_GRIPPER_JOINT_POSITIONS)
 
@@ -332,7 +340,7 @@ def _franka_cfg(
     robot.init_state.pos = position
     robot.init_state.rot = rotation
     robot.init_state.joint_pos.update(arm_joint_positions)
-    robot.init_state.joint_pos["panda_finger_joint.*"] = _GRIPPER_OPEN_POSITION
+    robot.init_state.joint_pos["panda_finger_joint.*"] = _GRIPPER_DEFAULT_POSITION
     robot.spawn.rigid_props.disable_gravity = True
     robot.actuators = {
         "panda_arm": ImplicitActuatorCfg(
@@ -360,7 +368,7 @@ def _franka_cfg(
         "panda_hand": ImplicitActuatorCfg(
             joint_names_expr=["panda_finger_joint1"],
             joint_effort_limit=500.0,
-            actuator_velocity_limit=0.04,
+            actuator_velocity_limit=_GRIPPER_ACTUATOR_VELOCITY_LIMIT,
             joint_velocity_limit=2.0,
             stiffness=6000.0,
             damping=60.0,
@@ -494,18 +502,20 @@ class ActionsCfg:
     """Relative Cartesian arm and binary gripper actions for both Frankas."""
 
     left_arm = _arm_action("robot_left")
-    left_gripper = mdp.BinaryJointPositionActionCfg(
+    left_gripper = mdp.RateLimitedBinaryJointPositionActionCfg(
         asset_name="robot_left",
         joint_names=["panda_finger_joint1"],
         open_command_expr={"panda_finger_joint1": _GRIPPER_OPEN_POSITION},
         close_command_expr={"panda_finger_joint1": _GRIPPER_CLOSE_TARGET},
+        maximum_velocity=_GRIPPER_TARGET_VELOCITY_LIMIT,
     )
     right_arm = _arm_action("robot_right")
-    right_gripper = mdp.BinaryJointPositionActionCfg(
+    right_gripper = mdp.RateLimitedBinaryJointPositionActionCfg(
         asset_name="robot_right",
         joint_names=["panda_finger_joint1"],
         open_command_expr={"panda_finger_joint1": _GRIPPER_OPEN_POSITION},
         close_command_expr={"panda_finger_joint1": _GRIPPER_CLOSE_TARGET},
+        maximum_velocity=_GRIPPER_TARGET_VELOCITY_LIMIT,
     )
 
 
@@ -560,6 +570,16 @@ class ObservationsCfg:
                 "right_robot_cfg": SceneEntityCfg("robot_right", body_names=["panda_hand"]),
             },
             scale=10.0,
+        )
+        grasp_socket_error = ObsTerm(
+            func=mdp.grasp_socket_error,
+            params={
+                "socket_targets": _GRASP_SOCKET_TARGETS,
+                "asset_cfgs": _SHOELACE_ASSET_CFGS,
+                "left_robot_cfg": SceneEntityCfg("robot_left", body_names=["panda_hand"]),
+                "right_robot_cfg": SceneEntityCfg("robot_right", body_names=["panda_hand"]),
+            },
+            scale=50.0,
         )
         tails_to_knot = ObsTerm(
             func=mdp.tails_to_knot,
@@ -686,6 +706,9 @@ class RewardsCfg:
             "maximum_finger_position": _GRIPPER_CLOSED_THRESHOLD,
             "maximum_grasp_distance": _MAXIMUM_GRASP_DISTANCE,
             "maximum_success_grasp_distance": _MAXIMUM_SUCCESS_GRASP_DISTANCE,
+            "socket_targets": _GRASP_SOCKET_TARGETS,
+            "socket_std": _GRASP_SOCKET_STD,
+            "maximum_socket_error": _MAXIMUM_GRASP_SOCKET_ERROR,
             "maximum_progress_rate": 3.0,
             "soft_min_temperature": 0.05,
             "soft_min_weight": 0.75,
@@ -705,6 +728,8 @@ class RewardsCfg:
             "minimum_finger_position": _GRIPPER_MINIMUM_GRASP_POSITION,
             "maximum_finger_position": _GRIPPER_CLOSED_THRESHOLD,
             "confirmation_steps": _GRASP_CONFIRMATION_STEPS,
+            "socket_targets": _GRASP_SOCKET_TARGETS,
+            "maximum_socket_error": _MAXIMUM_GRASP_SOCKET_ERROR,
         },
     )
     success = RewTerm(
@@ -777,6 +802,8 @@ class TerminationsCfg:
             "maximum_grasp_distance": _MAXIMUM_GRASP_DISTANCE,
             "confirmation_steps": _GRASP_CONFIRMATION_STEPS,
             "release_confirmation_steps": _GRASP_RELEASE_CONFIRMATION_STEPS,
+            "socket_targets": _GRASP_SOCKET_TARGETS,
+            "maximum_socket_error": _MAXIMUM_GRASP_SOCKET_ERROR,
         },
     )
     missed_grasp = DoneTerm(
@@ -787,6 +814,8 @@ class TerminationsCfg:
             "minimum_finger_position": _GRIPPER_MINIMUM_GRASP_POSITION,
             "maximum_finger_position": _GRIPPER_CLOSED_THRESHOLD,
             "deadline_steps": _GRASP_ACQUISITION_DEADLINE_STEPS,
+            "socket_targets": _GRASP_SOCKET_TARGETS,
+            "maximum_socket_error": _MAXIMUM_GRASP_SOCKET_ERROR,
         },
     )
     insufficient_separation = DoneTerm(
@@ -799,6 +828,8 @@ class TerminationsCfg:
             "target_tail_separation": _TAIL_SUCCESS_SEPARATION,
             "minimum_progress_fraction": _MINIMUM_SEPARATION_PROGRESS,
             "deadline_steps": _SEPARATION_PROGRESS_DEADLINE_STEPS,
+            "socket_targets": _GRASP_SOCKET_TARGETS,
+            "maximum_socket_error": _MAXIMUM_GRASP_SOCKET_ERROR,
         },
     )
     time_out = DoneTerm(func=mdp.time_out, time_out=True)

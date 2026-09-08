@@ -7,6 +7,9 @@ Added
   policies without changing their observation normalization.
 * Added Gaussian arm exploration with Bernoulli binary-gripper decisions, avoiding Gaussian likelihood updates at
   the gripper sign boundary.
+* Added a signed hand-frame contact-socket observation, checkpoint interface converter, and behavior-cloning tools
+  for socket-aware BC and DAgger consolidation.
+* Added a binary gripper target-rate limiter so contact entry can be slowed without reducing PPO arm exploration.
 
 Changed
 ^^^^^^^
@@ -17,6 +20,10 @@ Changed
 * Calibrated the gripper preload, ADMM interface solve, and curriculum reset density around measured Newton contact
   transitions. Checkpoint continuations should map historical levels by reset geometry because later numeric level
   indices shifted as bridge states were inserted.
+* Changed the actor and critic interfaces from 62/63 to 68/69 values by inserting six socket-error values. Existing
+  62-value checkpoints must first be converted with ``scripts/demos/shoelace_expand_socket_observation.py``.
+* Required the calibrated contact socket for acquisition, retention, and task shaping, and extended the acquisition
+  deadline to cover the deliberately slower gripper target motion.
 
 Fixed
 ^^^^^

@@ -10,7 +10,14 @@ import torch
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils import math as math_utils
 
-from .utils import free_positions, grasp_state, pull_directions, tail_to_tcp_vectors, task_state
+from .utils import (
+    free_positions,
+    grasp_state,
+    pull_directions,
+    tail_to_tcp_hand_vectors,
+    tail_to_tcp_vectors,
+    task_state,
+)
 
 
 def filtered_last_action(
@@ -49,6 +56,21 @@ def tails_to_tcp(
         dim=1,
     )
     return vectors_b.flatten(start_dim=1)
+
+
+def grasp_socket_error(
+    env,
+    socket_targets: tuple[tuple[float, float, float], tuple[float, float, float]],
+    asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
+    left_robot_cfg: SceneEntityCfg,
+    right_robot_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Tail-to-target errors in the controlling hand frames [m], shape ``(num_envs, 6)``."""
+    vectors = tail_to_tcp_hand_vectors(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
+    targets = vectors.new_tensor(socket_targets)
+    if targets.shape != (2, 3):
+        raise ValueError(f"Expected two three-dimensional socket targets, got shape {tuple(targets.shape)}.")
+    return (vectors - targets.unsqueeze(0)).flatten(start_dim=1)
 
 
 def tails_to_knot(

@@ -74,6 +74,8 @@ class lost_grasp(ManagerTermBase):
         minimum_finger_position: float = 0.0,
         confirmation_steps: int = 1,
         release_confirmation_steps: int = 1,
+        socket_targets: tuple[tuple[float, float, float], tuple[float, float, float]] | None = None,
+        maximum_socket_error: float | None = None,
     ) -> torch.Tensor:
         """Return per-environment grasp-loss flags after acquisition."""
         distances = grasp_distances(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
@@ -90,6 +92,8 @@ class lost_grasp(ManagerTermBase):
                 left_robot_cfg,
                 right_robot_cfg,
                 minimum_finger_position,
+                socket_targets,
+                maximum_socket_error,
             )
             self._candidate_steps.copy_(
                 torch.where(acquired, self._candidate_steps + 1, torch.zeros_like(self._candidate_steps))
@@ -150,6 +154,8 @@ class missed_grasp_acquisition(ManagerTermBase):
         right_robot_cfg: SceneEntityCfg,
         minimum_finger_position: float = 0.0,
         deadline_steps: int = 1,
+        socket_targets: tuple[tuple[float, float, float], tuple[float, float, float]] | None = None,
+        maximum_socket_error: float | None = None,
     ) -> torch.Tensor:
         """Return failures after acquisition stalls while both tails are within reach.
 
@@ -162,6 +168,8 @@ class missed_grasp_acquisition(ManagerTermBase):
             right_robot_cfg: Right robot scene entity.
             minimum_finger_position: Minimum driven finger-joint position for acquisition [m].
             deadline_steps: Consecutive reachable control steps allowed before termination.
+            socket_targets: Target tail-to-TCP vectors in the controlling hand frames [m].
+            maximum_socket_error: Maximum Euclidean error from each contact socket target [m].
 
         Returns:
             Per-environment missed-acquisition flags.
@@ -175,6 +183,8 @@ class missed_grasp_acquisition(ManagerTermBase):
             left_robot_cfg,
             right_robot_cfg,
             minimum_finger_position,
+            socket_targets,
+            maximum_socket_error,
         ).all(dim=1)
         self._bilaterally_acquired |= acquired
         reachable = torch.isfinite(distances).all(dim=1) & (distances <= acquisition_distance).all(dim=1)
@@ -230,6 +240,8 @@ class insufficient_separation_progress(ManagerTermBase):
         left_robot_cfg: SceneEntityCfg,
         right_robot_cfg: SceneEntityCfg,
         minimum_finger_position: float = 0.0,
+        socket_targets: tuple[tuple[float, float, float], tuple[float, float, float]] | None = None,
+        maximum_socket_error: float | None = None,
     ) -> torch.Tensor:
         """Return failures that do not maintain enough separation after acquisition.
 
@@ -244,6 +256,8 @@ class insufficient_separation_progress(ManagerTermBase):
             left_robot_cfg: Left robot scene entity.
             right_robot_cfg: Right robot scene entity.
             minimum_finger_position: Minimum driven finger-joint position for acquisition [m].
+            socket_targets: Target tail-to-TCP vectors in the controlling hand frames [m].
+            maximum_socket_error: Maximum Euclidean error from each contact socket target [m].
 
         Returns:
             Per-environment insufficient-separation flags.
@@ -262,6 +276,8 @@ class insufficient_separation_progress(ManagerTermBase):
             left_robot_cfg,
             right_robot_cfg,
             minimum_finger_position,
+            socket_targets,
+            maximum_socket_error,
         ).all(dim=1)
         self._bilaterally_acquired |= acquired
         self._steps_since_acquisition.copy_(
@@ -297,6 +313,8 @@ def _configured_grasp_state(term: ManagerTermBase, distance_key: str) -> torch.T
         params["left_robot_cfg"],
         params["right_robot_cfg"],
         params.get("minimum_finger_position", 0.0),
+        params.get("socket_targets"),
+        params.get("maximum_socket_error"),
     )
 
 

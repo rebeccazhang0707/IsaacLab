@@ -7,6 +7,8 @@ __all__ = [
     # actions
     "EMADifferentialInverseKinematicsAction",
     "EMADifferentialInverseKinematicsActionCfg",
+    "RateLimitedBinaryJointPositionAction",
+    "RateLimitedBinaryJointPositionActionCfg",
     "bilateral_grasp_acquisition_event",
     "closing_away_from_tails",
     "directional_tail_pull",
@@ -15,6 +17,7 @@ __all__ = [
     "filtered_last_action",
     "finite_joint_vel_l2",
     "grasp_acquisition_event",
+    "grasp_socket_error",
     "inferred_grasp_state",
     "insufficient_separation_progress",
     "lost_grasp",
@@ -45,13 +48,14 @@ __all__ = [
 
 from isaaclab.envs.mdp import *  # noqa: F403
 
-from .actions import EMADifferentialInverseKinematicsAction
-from .actions_cfg import EMADifferentialInverseKinematicsActionCfg
+from .actions import EMADifferentialInverseKinematicsAction, RateLimitedBinaryJointPositionAction
+from .actions_cfg import EMADifferentialInverseKinematicsActionCfg, RateLimitedBinaryJointPositionActionCfg
 from .curriculums import PullToGraspCurriculum
 from .events import ResetShoelaceCurriculum, reset_shoelace_state
 from .observations import (
     episode_phase,
     filtered_last_action,
+    grasp_socket_error,
     inferred_grasp_state,
     reference_pull_directions,
     tail_separation,

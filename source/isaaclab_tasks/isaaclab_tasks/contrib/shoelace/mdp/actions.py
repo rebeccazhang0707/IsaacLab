@@ -12,13 +12,40 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import torch
+import warp as wp
 
+from isaaclab.envs.mdp.actions import BinaryJointPositionAction
 from isaaclab.envs.mdp.actions.task_space_actions import DifferentialInverseKinematicsAction
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
-    from .actions_cfg import EMADifferentialInverseKinematicsActionCfg
+    from .actions_cfg import EMADifferentialInverseKinematicsActionCfg, RateLimitedBinaryJointPositionActionCfg
+
+
+class RateLimitedBinaryJointPositionAction(BinaryJointPositionAction):
+    """Rate-limit a binary gripper position target against the measured joint position."""
+
+    cfg: RateLimitedBinaryJointPositionActionCfg
+
+    def __init__(self, cfg: RateLimitedBinaryJointPositionActionCfg, env: ManagerBasedEnv) -> None:
+        super().__init__(cfg, env)
+        maximum_velocity = float(cfg.maximum_velocity)
+        if not math.isfinite(maximum_velocity) or maximum_velocity <= 0.0:
+            raise ValueError(f"Maximum gripper velocity must be finite and positive, got {maximum_velocity}.")
+        self._joint_ids_torch = wp.to_torch(self._joint_ids)
+        self._maximum_command_step = maximum_velocity * env.step_dt
+
+    def process_actions(self, actions: torch.Tensor) -> None:
+        """Map the binary input and limit the target displacement per control step."""
+        super().process_actions(actions)
+        joint_positions = self._asset.data.joint_pos.torch[:, self._joint_ids_torch]
+        target_delta = torch.clamp(
+            self._processed_actions - joint_positions,
+            min=-self._maximum_command_step,
+            max=self._maximum_command_step,
+        )
+        self._processed_actions = joint_positions + target_delta
 
 
 class EMADifferentialInverseKinematicsAction(DifferentialInverseKinematicsAction):

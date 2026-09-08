@@ -87,6 +87,27 @@ def tail_to_tcp_vectors(
     return tail_positions - tcp_positions
 
 
+def tail_to_tcp_hand_vectors(
+    env: ManagerBasedEnv,
+    asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
+    left_robot_cfg: SceneEntityCfg,
+    right_robot_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Return each tail-to-TCP vector in its controlling hand frame [m]."""
+    vectors_w = tail_to_tcp_vectors(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
+    robot_cfgs = (left_robot_cfg, right_robot_cfg)
+    return torch.stack(
+        [
+            math_utils.quat_apply_inverse(
+                env.scene[robot_cfg.name].data.body_quat_w.torch[:, robot_cfg.body_ids[0]],
+                vectors_w[:, arm],
+            )
+            for arm, robot_cfg in enumerate(robot_cfgs)
+        ],
+        dim=1,
+    )
+
+
 def grasp_distances(
     env: ManagerBasedEnv,
     asset_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
@@ -137,6 +158,8 @@ def grasp_state(
     left_robot_cfg: SceneEntityCfg,
     right_robot_cfg: SceneEntityCfg,
     minimum_finger_position: float = 0.0,
+    socket_targets: tuple[tuple[float, float, float], tuple[float, float, float]] | None = None,
+    maximum_socket_error: float | None = None,
 ) -> torch.Tensor:
     """Infer per-tail grasp state from proximity and contact-sized finger aperture.
 
@@ -148,6 +171,8 @@ def grasp_state(
         left_robot_cfg: Left robot hand and finger scene entity.
         right_robot_cfg: Right robot hand and finger scene entity.
         minimum_finger_position: Minimum driven finger-joint position [m].
+        socket_targets: Target tail-to-TCP vectors in the controlling hand frames [m].
+        maximum_socket_error: Maximum Euclidean error from each contact socket target [m].
 
     Returns:
         Per-tail inferred grasp flags, shape ``(num_envs, 2)``.
@@ -155,7 +180,19 @@ def grasp_state(
     distances = grasp_distances(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
     finger_positions = gripper_positions(env, left_robot_cfg, right_robot_cfg)
     valid_aperture = (finger_positions >= minimum_finger_position) & (finger_positions <= maximum_finger_position)
-    return (distances <= maximum_distance) & valid_aperture
+    grasped = (distances <= maximum_distance) & valid_aperture
+    if socket_targets is None and maximum_socket_error is None:
+        return grasped
+    if socket_targets is None or maximum_socket_error is None:
+        raise ValueError("Socket targets and maximum socket error must be configured together.")
+    if maximum_socket_error <= 0.0:
+        raise ValueError("Maximum socket error must be positive.")
+    targets = distances.new_tensor(socket_targets)
+    if targets.shape != (2, 3):
+        raise ValueError(f"Expected two three-dimensional socket targets, got shape {tuple(targets.shape)}.")
+    socket_vectors = tail_to_tcp_hand_vectors(env, asset_cfgs, left_robot_cfg, right_robot_cfg)
+    socket_errors = torch.linalg.vector_norm(socket_vectors - targets.unsqueeze(0), dim=-1)
+    return grasped & (socket_errors <= maximum_socket_error)
 
 
 def pull_directions(reference: torch.Tensor) -> torch.Tensor:

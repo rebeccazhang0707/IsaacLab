@@ -9,11 +9,21 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from isaaclab.envs.mdp.actions import DifferentialInverseKinematicsActionCfg
+from isaaclab.envs.mdp.actions import BinaryJointPositionActionCfg, DifferentialInverseKinematicsActionCfg
 from isaaclab.utils.configclass import configclass
 
 if TYPE_CHECKING:
-    from .actions import EMADifferentialInverseKinematicsAction
+    from .actions import EMADifferentialInverseKinematicsAction, RateLimitedBinaryJointPositionAction
+
+
+@configclass
+class RateLimitedBinaryJointPositionActionCfg(BinaryJointPositionActionCfg):
+    """Configuration for :class:`RateLimitedBinaryJointPositionAction`."""
+
+    maximum_velocity: float = 0.2
+    """Maximum target-position velocity [m or rad, depending on joint type]."""
+
+    class_type: type[RateLimitedBinaryJointPositionAction] | str = "{DIR}.actions:RateLimitedBinaryJointPositionAction"
 
 
 @configclass

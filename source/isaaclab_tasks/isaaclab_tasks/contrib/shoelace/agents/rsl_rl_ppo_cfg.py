@@ -15,6 +15,8 @@ class ShoelaceHybridActionDistributionCfg(RslRlMLPModelCfg.GaussianDistributionC
     class_name: str = "isaaclab_tasks.contrib.shoelace.agents.models:ShoelaceHybridActionDistribution"
     arm_action_scale: float = 0.7
     gripper_logit_scale: float = 2.0
+    learn_std: bool = True
+    """Whether to optimize the Gaussian arm-action standard deviation."""
 
 
 @configclass
