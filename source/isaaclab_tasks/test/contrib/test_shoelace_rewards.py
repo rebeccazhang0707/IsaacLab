@@ -36,7 +36,10 @@ def _termination_manager(num_envs: int) -> SimpleNamespace:
 
 
 @pytest.mark.parametrize("legacy", [False, True])
-def test_dense_reward_orders_approach_contact_grasp_and_pull(monkeypatch: pytest.MonkeyPatch, legacy: bool) -> None:
+@pytest.mark.parametrize("tail_distance", [0.0, 0.02])
+def test_dense_reward_orders_approach_contact_grasp_and_pull(
+    monkeypatch: pytest.MonkeyPatch, legacy: bool, tail_distance: float
+) -> None:
     """Acquisition and pulling should pay for progress, with no net credit for a closed state cycle."""
     tail_vectors = torch.full((1, 6), 0.05)
     signed_distance = torch.full((1, 4), CONTACT_DISTANCE_CAP)
@@ -99,6 +102,9 @@ def test_dense_reward_orders_approach_contact_grasp_and_pull(monkeypatch: pytest
     assert env.extras["log"]["Metrics/shoelace/approach_distance_m"].item() == 0.0
     assert initial_log["Metrics/shoelace/approach_distance_m"].item() > 0.0
 
+    # A physical grasp can leave the tail center offset from the nominal TCP.
+    tail_vectors[:, ::3] = tail_distance
+    compute()
     robots["robot_left"].data.joint_pos.torch.fill_(0.001)
     robots["robot_right"].data.joint_pos.torch.fill_(0.001)
     assert abs(compute().item()) < 1.0e-5
@@ -109,7 +115,7 @@ def test_dense_reward_orders_approach_contact_grasp_and_pull(monkeypatch: pytest
     assert abs(compute().item()) < 1.0e-5
 
     signed_distance[:, :2].zero_()
-    # At perfect approach, acquiring either arm earns half the acquisition budget left after approach.
+    # Each arm earns half the grasp budget independently of its TCP-to-tail distance.
     acquisition_gain = 0.175 if legacy else 0.105
     assert compute().item() * env.step_dt == pytest.approx(acquisition_gain, abs=1.0e-5)
     assert env.extras["log"]["Metrics/shoelace/grasp_left"].item() > 0.99
@@ -122,6 +128,16 @@ def test_dense_reward_orders_approach_contact_grasp_and_pull(monkeypatch: pytest
     assert abs(compute().item()) < 1.0e-5
 
     signed_distance.zero_()
+    assert compute().item() * env.step_dt == pytest.approx(acquisition_gain, abs=1.0e-5)
+
+    # Either hand can be acquired first; releasing and reacquiring cannot accumulate credit.
+    signed_distance[:, :2].fill_(CONTACT_DISTANCE_CAP)
+    assert compute().item() * env.step_dt == pytest.approx(-acquisition_gain, abs=1.0e-5)
+    signed_distance[:, 2:].fill_(CONTACT_DISTANCE_CAP)
+    assert compute().item() * env.step_dt == pytest.approx(-acquisition_gain, abs=1.0e-5)
+    signed_distance[:, 2:].zero_()
+    assert compute().item() * env.step_dt == pytest.approx(acquisition_gain, abs=1.0e-5)
+    signed_distance[:, :2].zero_()
     assert compute().item() * env.step_dt == pytest.approx(acquisition_gain, abs=1.0e-5)
 
     x_separation.fill_(0.18)

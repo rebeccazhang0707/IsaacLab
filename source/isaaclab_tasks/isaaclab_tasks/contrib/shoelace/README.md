@@ -20,16 +20,29 @@ Hamacher soft-AND, `A` the per-arm TCP proximity, `G` the filtered per-arm grasp
 X-separation progress from the first valid post-reset sample to the 0.18 m success threshold. The default is:
 
 ```python
-acquire = H(A, 0.3 + 0.7 * G).mean(dim=-1)
+acquire = H(A, 0.3).mean(dim=-1) + 0.7 * G.mean(dim=-1)
 pull = H(H(G[:, 0], G[:, 1]), X)
 potential = 0.3 * acquire + 0.7 * pull
 reward_rate = (potential - previous_potential) / step_dt
 ```
 
-`approach_fraction=0.3` provides partial acquisition credit before contact. Grasping either tail increases
-acquisition, so there is no separate grasp bonus. Each grasp requires both finger surfaces near contact, actual
-gripper closure, and low tail-TCP slip. The 0.10 s filter smooths contact flicker and also delays the response to
-release. Pulling has no approach floor: its score combines both grasp qualities with achieved separation.
+`approach_fraction=0.3` provides partial acquisition credit before contact. The remaining acquisition budget
+rewards the two grasps independently and additively, without scaling their credit by TCP proximity. Each grasp
+requires both finger surfaces near contact, actual gripper closure, and low tail-TCP slip. The 0.10 s filter
+smooths contact flicker and also delays the response to release. Pulling has no approach floor: its score
+combines both grasp qualities with achieved separation.
+
+At fixed approach and zero pulling progress, the default grasp contribution to the weighted potential is
+`1.05 * (G_left + G_right)`: one perfect grasp contributes 1.05 and two contribute 2.10. Partial grasps earn
+proportional credit, and either hand can be acquired first. These are cumulative gains as grasp quality rises,
+not a reward paid every step for holding still. Releasing a grasp removes its credit through the same signed
+potential difference.
+
+Previously, grasp quality was inside `H(A, 0.3 + 0.7 * G)`, which reduced grasp gains when the tail center was
+offset from the TCP even with good physical contact. The new formula keeps the no-grasp approach potential
+and maximum stage budgets, but changes intermediate rewards. Existing configurations and checkpoints remain
+loadable; re-evaluate or retrain policies under this objective and compare grasp quality and success rather
+than comparing old and new reward curves directly.
 
 `acquisition_weight=0.3` allocates 30% of the potential to acquisition and 70% to pulling. The manager multiplies
 the returned rate by `step_dt` and the overall reward weight (10). Only one potential is differenced, without

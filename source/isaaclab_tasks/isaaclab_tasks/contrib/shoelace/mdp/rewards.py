@@ -53,9 +53,10 @@ def arm_action_rate_l2(env: ManagerBasedRLEnv) -> torch.Tensor:
 class dense_task_reward(ManagerTermBase):
     """Reward acquiring both tails and pulling them apart through one potential difference.
 
-    For each arm, acquisition combines TCP proximity with contact-aware grasp quality using a Hamacher
-    soft-AND. Partial approach credit keeps acquisition learnable before contact, and averaging the two
-    arms rewards acquiring either tail first. Pulling combines both grasps with reset-relative X separation.
+    Acquisition adds partial TCP-proximity credit to the mean contact-aware grasp quality of the two
+    arms. Each grasp contributes independently of TCP proximity and the other arm, so acquiring both
+    tails earns twice the grasp credit of acquiring one. Pulling combines both grasps with reset-relative
+    X separation using a Hamacher soft-AND.
 
     The term stores filtered grasp qualities, the initial separation, and one previous potential per
     environment. Invalid samples return zero without advancing this state. The first valid evaluation
@@ -113,10 +114,11 @@ class dense_task_reward(ManagerTermBase):
         With ``H`` denoting Hamacher soft-AND, ``A`` per-arm approach, ``G`` filtered per-arm grasp quality,
         and ``X`` normalized separation progress, the potential is::
 
-            acquire = mean(H(A, approach_fraction + (1 - approach_fraction) * G))
+            acquire = mean(H(A, approach_fraction)) + (1 - approach_fraction) * mean(G)
             pull = H(H(G_left, G_right), X)
             potential = acquisition_weight * acquire + (1 - acquisition_weight) * pull
 
+        Each arm earns half the grasp budget without requiring its tail center to coincide with the TCP.
         Both phases remain active: losing grasp lowers acquisition and suppresses pulling. The separation
         progress starts at the first valid post-reset separation and reaches one at ``success_x_separation``.
         Each grasp soft-ANDs two finger-contact qualities, actual closure, and low tail-TCP slip. Grasp
@@ -148,7 +150,8 @@ class dense_task_reward(ManagerTermBase):
             acquisition_weight: Fraction of the potential allocated to acquisition in ``[0, 1]``.
                 Pulling receives the remainder.
             approach_fraction: Fraction of acquisition available before grasping in ``[0, 1]``.
-                A value strictly between zero and one gives feedback for both approaching and grasping.
+                The remainder rewards each grasp independently of TCP proximity. A value strictly
+                between zero and one gives feedback for both approaching and grasping.
 
         Returns:
             Reward rates [1/s], shape [N]. With the new parameters, each potential lies in ``[0, 1]``.
@@ -217,9 +220,9 @@ class dense_task_reward(ManagerTermBase):
             torch.where(finite.unsqueeze(1), filtered_per_gripper_grasp, self._filtered_per_gripper_grasp)
         )
         bilateral_grasp = _hamacher_product(filtered_per_gripper_grasp[:, 0], filtered_per_gripper_grasp[:, 1])
-        acquire = _hamacher_product(
-            approach, approach_fraction + (1.0 - approach_fraction) * filtered_per_gripper_grasp
-        ).mean(dim=1)
+        # Keep approach credit while allowing either physical grasp to earn its full share.
+        acquire = _hamacher_product(approach, approach_fraction).mean(dim=1)
+        acquire += (1.0 - approach_fraction) * filtered_per_gripper_grasp.mean(dim=1)
 
         unseeded_baseline = ~torch.isfinite(self._baseline_x_separation)
         self._baseline_x_separation.copy_(
@@ -292,6 +295,6 @@ def _gripper_closed_fraction(
     return ((open_position - positions) / max(open_position - closed_position, 1.0e-6)).clamp(0.0, 1.0)
 
 
-def _hamacher_product(a: torch.Tensor, b: torch.Tensor, eps: float = 1.0e-6) -> torch.Tensor:
+def _hamacher_product(a: torch.Tensor, b: torch.Tensor | float, eps: float = 1.0e-6) -> torch.Tensor:
     """Return the Hamacher soft-AND of two values in ``[0, 1]``."""
     return (a * b) / (a + b - a * b + eps)
