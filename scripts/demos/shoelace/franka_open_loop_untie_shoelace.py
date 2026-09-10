@@ -9,6 +9,11 @@ This demo directly builds the shoe, shoelace, and two Franka robots.
 A batched state machine approaches both tails, closes the grippers, holds the
 contacts, pulls in opposing directions, and releases the shoelace.
 
+``--cable_inertia_regularization`` adds isotropic proxy inertia [kg*m^2] to dynamic
+cable segments only (default: 1e-6). It leaves masses and anchors unchanged. Zero
+disables this addition, not Newton's own validation. Changing it requires renewed
+settling and grasp/pull validation with the cached initial poses.
+
 .. code-block:: bash
 
     uv run --frozen python scripts/demos/shoelace/franka_open_loop_untie_shoelace.py \\
@@ -315,6 +320,9 @@ class OpenLoopEnvCfg(ManagerBasedEnvCfg):
     lace_mu = shoelace.LACE_MU
     shoe_mu = shoelace.SHOE_MU
 
+    cable_inertia_regularization: float = shoelace.CABLE_INERTIA_REGULARIZATION
+    """Isotropic inertia added to each dynamic cable segment [kg*m^2], without changing its mass."""
+
 
 class OpenLoopShoelacePhysics:
     """Configure the independent Newton cable model before solver construction."""
@@ -328,6 +336,7 @@ class OpenLoopShoelacePhysics:
         finger_mu: float,
         lace_mu: float,
         shoe_mu: float,
+        cable_inertia_regularization: float = shoelace.CABLE_INERTIA_REGULARIZATION,
     ) -> None:
         self.centerline = centerline
         self.cable_radius = cable_radius
@@ -336,6 +345,7 @@ class OpenLoopShoelacePhysics:
         self.finger_mu = finger_mu
         self.lace_mu = lace_mu
         self.shoe_mu = shoe_mu
+        self.cable_inertia_regularization = cable_inertia_regularization
         self.cable_joints: list[list[int]] = []
 
     def register(self) -> None:
@@ -363,6 +373,7 @@ class OpenLoopShoelacePhysics:
             self.num_envs,
             lace_mu=self.lace_mu,
             shoe_mu=self.shoe_mu,
+            cable_inertia_regularization=self.cable_inertia_regularization,
         )
         self.cable_joints = [left + right for left, right in build.joint_chains]
         for shape, label in enumerate(builder.shape_label):
@@ -403,6 +414,7 @@ class OpenLoopShoelaceEnv(ManagerBasedEnv):
             finger_mu=cfg.finger_mu,
             lace_mu=cfg.lace_mu,
             shoe_mu=cfg.shoe_mu,
+            cable_inertia_regularization=cfg.cable_inertia_regularization,
         )
         super().__init__(cfg)
         self._install_settled_default_state()
@@ -537,6 +549,7 @@ def _set_tcp_translation(actions: torch.Tensor, env: ManagerBasedEnv, displaceme
 
 def _make_cfg(args: argparse.Namespace) -> OpenLoopEnvCfg:
     cfg = OpenLoopEnvCfg()
+    cfg.cable_inertia_regularization = args.cable_inertia_regularization
     cfg.seed = SEED
     cfg.scene.num_envs = args.num_envs
     cfg.scene.env_spacing = ENV_SPACING
@@ -610,6 +623,12 @@ def run_state_machine(env: ManagerBasedEnv, args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--num_envs", type=int, default=4)
+    parser.add_argument(
+        "--cable_inertia_regularization",
+        type=float,
+        default=shoelace.CABLE_INERTIA_REGULARIZATION,
+        help="Isotropic proxy inertia added per dynamic cable segment [kg*m^2].",
+    )
     parser.add_argument("--approach_steps", type=int, default=80)
     parser.add_argument("--approach_speed", type=float, default=0.08, help="Maximum TCP approach speed [m/s].")
     parser.add_argument("--approach_tolerance", type=float, default=0.007, help="TCP-to-tail tolerance [m].")

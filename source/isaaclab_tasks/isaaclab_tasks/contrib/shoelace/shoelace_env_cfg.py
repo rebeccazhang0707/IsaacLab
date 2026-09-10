@@ -337,3 +337,6 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
     finger_mu: float = 40.0
     lace_mu: float = physics.LACE_MU
     shoe_mu: float = physics.SHOE_MU
+
+    cable_inertia_regularization: float = physics.CABLE_INERTIA_REGULARIZATION
+    """Isotropic inertia added to each dynamic cable segment [kg*m^2], without changing its mass."""

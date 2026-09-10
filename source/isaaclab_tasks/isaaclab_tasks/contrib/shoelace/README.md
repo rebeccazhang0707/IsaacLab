@@ -49,6 +49,21 @@ fractions above are independent of that compatibility mapping.
 
 The task uses the assets in `scripts/demos/shoelace/assets`.
 
+## Explicit proxy inertia
+
+`ShoelaceEnvCfg.cable_inertia_regularization` defaults to `1e-6` [kg*m^2]. Before Newton
+finalization, each dynamic cable segment receives `I_effective = I_geometry + regularization * identity`
+after capsule mass/radius correction and anchor pinning. Its inverse inertia is updated too. Masses,
+fixed anchors, shoe and robot inertias are unchanged. This is an intentional approximation of rotational
+dynamics for the current solver budget, not extra damping or a change to the cable's material stiffness.
+The default approximates the previously used effective inertia without depending on Newton's automatic repair.
+
+Override it with `env.cable_inertia_regularization=3e-7` appended to the training command below.
+Values must be finite and nonnegative. Zero disables only the task-local addition: Newton's normal validation
+still applies and may enlarge very small inertias. Recheck passive settling, contact penetration and scripted
+grasp/pull behavior when changing this value; previous settled states and policies may behave differently.
+The standalone demos expose the same setting as `--cable_inertia_regularization`.
+
 ```bash
 uv run isaaclab random_agent --task IsaacContrib-Shoelace-DualFranka --num_envs 4 --device cuda:0
 uv run isaaclab train --rl_library rsl_rl --task IsaacContrib-Shoelace-DualFranka \

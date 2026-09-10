@@ -41,6 +41,7 @@ PINNED_TUBE_SIDES = 6
 
 # Shared Franka-validated cable material and contact defaults.
 CABLE_DENSITY = 1150.0
+CABLE_INERTIA_REGULARIZATION = 1.0e-6  # Additive isotropic proxy inertia [kg*m^2].
 STRETCH_STIFFNESS = 1.0e7
 STRETCH_DAMPING = 2.0e2
 BEND_STIFFNESS = 5.0
@@ -349,6 +350,7 @@ def configure_shoelace_builder(
     lace_mu: float = LACE_MU,
     shoe_mu: float = SHOE_MU,
     write_shape_colors: bool = False,
+    cable_inertia_regularization: float = CABLE_INERTIA_REGULARIZATION,
 ) -> ShoelaceBuild:
     """Configure shared cable frames, contacts, anchors, and collision filters.
 
@@ -362,6 +364,7 @@ def configure_shoelace_builder(
         lace_mu: Cable and pinned-span friction coefficient.
         shoe_mu: Shoe and tongue friction coefficient.
         write_shape_colors: Whether to override imported Newton shape colors.
+        cable_inertia_regularization: Isotropic inertia added to each dynamic cable segment [kg*m^2].
 
     Returns:
         Ordered body and joint chains plus the mean segment length.
@@ -468,7 +471,37 @@ def configure_shoelace_builder(
         for shape in (*chain_shapes[0][-neighbor_window:], *chain_shapes[1][:neighbor_window]):
             builder.add_shape_collision_filter_pair(shape, pinned_shape)
 
+        configure_cable_inertia(builder, world_bodies[0] + world_bodies[1], cable_inertia_regularization)
+
     return ShoelaceBuild(body_chains, joint_chains, mean_segment_length)
+
+
+def configure_cable_inertia(builder: ModelBuilder, cable_bodies: list[int], regularization: float) -> None:
+    """Add explicit proxy inertia to dynamic cable segments before model finalization.
+
+    Applies ``I_effective = I_geometry + regularization * identity`` once, after
+    capsule mass/radius corrections and anchor pinning. Masses are unchanged;
+    zero-mass anchors and bodies outside ``cable_bodies`` are untouched.
+    This changes rotational dynamics, not material stiffness or damping.
+
+    Args:
+        builder: Newton builder with geometric cable mass properties.
+        cable_bodies: Cable body indices, optionally including zero-mass anchors.
+        regularization: Finite, nonnegative isotropic addition [kg*m^2]. Zero skips
+            this addition but does not disable Newton's own inertia validation.
+
+    Raises:
+        ValueError: If regularization is negative or nonfinite.
+    """
+    if not math.isfinite(regularization) or regularization < 0.0:
+        raise ValueError("Cable inertia regularization must be finite and nonnegative")
+    if regularization == 0.0:
+        return
+    addition = wp.mat33(np.eye(3, dtype=np.float32) * regularization)
+    for body in cable_bodies:
+        if builder.body_mass[body] > 0.0:
+            builder.body_inertia[body] += addition
+            builder.body_inv_inertia[body] = wp.inverse(builder.body_inertia[body])
 
 
 def cable_joint_dof_slice(builder: ModelBuilder, joints: list[int]) -> slice:

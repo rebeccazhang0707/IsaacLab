@@ -145,6 +145,7 @@ class _ShoelacePhysics:
         finger_mu: float,
         lace_mu: float,
         shoe_mu: float,
+        cable_inertia_regularization: float = physics.CABLE_INERTIA_REGULARIZATION,
     ) -> None:
         self.centerline = centerline
         self.cable_radius = cable_radius
@@ -153,6 +154,7 @@ class _ShoelacePhysics:
         self.finger_mu = finger_mu
         self.lace_mu = lace_mu
         self.shoe_mu = shoe_mu
+        self.cable_inertia_regularization = cable_inertia_regularization
         self.cable_joints: list[list[int]] = []
         self.finger_tail_signed_distance: torch.Tensor | None = None
         self._finger_slot_by_shape: wp.array | None = None
@@ -193,6 +195,7 @@ class _ShoelacePhysics:
             self.num_envs,
             lace_mu=self.lace_mu,
             shoe_mu=self.shoe_mu,
+            cable_inertia_regularization=self.cable_inertia_regularization,
         )
         self.cable_joints = [left + right for left, right in build.joint_chains]
         self._configure_contact_shape_maps(builder, build)
@@ -350,6 +353,7 @@ class ShoelaceEnv(ManagerBasedRLEnv):
             finger_mu=cfg.finger_mu,
             lace_mu=cfg.lace_mu,
             shoe_mu=cfg.shoe_mu,
+            cable_inertia_regularization=cfg.cable_inertia_regularization,
         )
         super().__init__(cfg, render_mode, **kwargs)
         self._install_settled_default_state()

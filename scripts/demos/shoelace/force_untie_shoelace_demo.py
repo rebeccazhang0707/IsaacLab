@@ -9,6 +9,10 @@ Only the virtual fingertip forces are scripted. The bow loops and tails stay dyn
 or velocity target is tracked. Two fixed endpoint segments anchor the eyelet-held span, whose
 interior uses one visible static collision mesh.
 
+``--cable_inertia_regularization`` adds isotropic proxy inertia [kg*m^2] to dynamic
+cable segments only (default: 1e-6), including randomized-radius segments. It leaves
+masses and anchors unchanged. Zero disables this addition, not Newton's own validation.
+
 .. code-block:: bash
 
     # Run the complete 12 second sequence with the Newton visualizer.
@@ -38,6 +42,12 @@ parser = argparse.ArgumentParser(description="Force-controlled Newton VBD shoela
 parser.add_argument("--max_steps", type=int, default=720, help="Number of 60 Hz simulation steps.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of isolated Newton worlds.")
 parser.add_argument(
+    "--cable_inertia_regularization",
+    type=float,
+    default=1.0e-6,
+    help="Isotropic proxy inertia added per dynamic cable segment [kg*m^2].",
+)
+parser.add_argument(
     "--randomize",
     action="store_true",
     help="Randomize shoe color, cable color, and cable radius once per environment at startup.",
@@ -55,6 +65,7 @@ from _newton_force_schedule import BodyForceMove, OpenLoopBodyForceSchedule
 from _newton_shoelace import (
     BEND_DAMPING,
     BEND_STIFFNESS,
+    CABLE_INERTIA_REGULARIZATION,
     CONTACT_GAP,
     CONTACT_KD,
     CONTACT_KE,
@@ -176,6 +187,7 @@ class ShoelaceController:
         num_envs: Number of isolated Newton worlds.
         cable_radii: Optional randomized cable radii [m], shape [num_envs].
         cable_colors: Optional randomized linear RGB colors, shape [num_envs, 3].
+        cable_inertia_regularization: Isotropic proxy inertia added per dynamic segment [kg*m^2].
     """
 
     def __init__(
@@ -185,11 +197,13 @@ class ShoelaceController:
         num_envs: int,
         cable_radii: np.ndarray | None = None,
         cable_colors: np.ndarray | None = None,
+        cable_inertia_regularization: float = CABLE_INERTIA_REGULARIZATION,
     ) -> None:
         """Initialize authored geometry and optional per-environment variations."""
         self.centerline = centerline
         self.cable_radius = cable_radius
         self.num_envs = num_envs
+        self.cable_inertia_regularization = cable_inertia_regularization
         self.cable_radii = None if cable_radii is None else np.asarray(cable_radii, dtype=np.float64)
         if self.cable_radii is not None and self.cable_radii.shape != (num_envs,):
             raise ValueError(f"Expected {num_envs} cable radii, got shape {self.cable_radii.shape}")
@@ -220,6 +234,7 @@ class ShoelaceController:
             self.cable_radii,
             self.cable_colors,
             write_shape_colors=True,
+            cable_inertia_regularization=self.cable_inertia_regularization,
         )
         self.cable_bodies = [left + right for left, right in build.body_chains]
         self.cable_joints = [left + right for left, right in build.joint_chains]
@@ -439,7 +454,14 @@ def main() -> None:
         shoe_colors, cable_colors, cable_radii = _sample_randomization(
             args_cli.num_envs, cable_radius, args_cli.randomization_seed
         )
-    controller = ShoelaceController(centerline, cable_radius, args_cli.num_envs, cable_radii, cable_colors)
+    controller = ShoelaceController(
+        centerline,
+        cable_radius,
+        args_cli.num_envs,
+        cable_radii,
+        cable_colors,
+        cable_inertia_regularization=args_cli.cable_inertia_regularization,
+    )
 
     with launch_simulation(cfg=PhysicsCfg(), launcher_args=args_cli) as physics_cfg:
         if not isinstance(physics_cfg, NewtonCfg) or not isinstance(physics_cfg.solver_cfg, VBDSolverCfg):
