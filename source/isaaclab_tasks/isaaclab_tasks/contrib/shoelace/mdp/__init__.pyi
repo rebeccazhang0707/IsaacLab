@@ -4,6 +4,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 __all__ = [
+    "arm_action_l2",
+    "arm_action_rate_l2",
     "dense_task_reward",
     "finger_tail_signed_distance",
     "gripper_close_error",
@@ -13,6 +15,6 @@ __all__ = [
 ]
 
 from .observations import finger_tail_signed_distance, gripper_close_error, tail_tcp_relative_speed, tails_to_tcp
-from .rewards import dense_task_reward
+from .rewards import arm_action_l2, arm_action_rate_l2, dense_task_reward
 from .terminations import tail_x_separation_success
 from isaaclab.envs.mdp import *

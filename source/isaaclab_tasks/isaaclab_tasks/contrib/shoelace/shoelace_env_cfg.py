@@ -231,7 +231,7 @@ class EventsCfg:
 
 @configclass
 class RewardsCfg:
-    """One acquisition-and-pull potential; grasping is part of acquisition and gates pulling."""
+    """Acquisition-and-pull progress with small arm motion and action-change penalties."""
 
     dense_task = RewTerm(
         func=mdp.dense_task_reward,
@@ -250,6 +250,8 @@ class RewardsCfg:
             "robot_cfgs": ROBOT_CFGS,
         },
     )
+    arm_action_rate = RewTerm(func=mdp.arm_action_rate_l2, weight=-0.01)
+    arm_action_magnitude = RewTerm(func=mdp.arm_action_l2, weight=-0.001)
 
 
 @configclass

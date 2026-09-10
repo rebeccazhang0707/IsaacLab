@@ -24,6 +24,32 @@ if TYPE_CHECKING:
     from isaaclab.managers import RewardTermCfg, SceneEntityCfg
 
 
+def arm_action_l2(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Return squared normalized arm commands, excluding binary gripper commands.
+
+    Args:
+        env: Task environment with ``left_arm`` and ``right_arm`` action terms.
+
+    Returns:
+        Sum of squared arm commands before Cartesian scaling, shape [N].
+    """
+    return _arm_action_squared_sum(env, env.action_manager.action)
+
+
+def arm_action_rate_l2(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Return squared changes in normalized arm commands, excluding gripper changes.
+
+    Args:
+        env: Task environment with ``left_arm`` and ``right_arm`` action terms.
+
+    Returns:
+        Sum of squared differences from the previous policy step, shape [N]. This is not divided by
+        the step duration. The action manager clears history to zero on reset.
+    """
+    delta = env.action_manager.action - env.action_manager.prev_action
+    return _arm_action_squared_sum(env, delta)
+
+
 class dense_task_reward(ManagerTermBase):
     """Reward acquiring both tails and pulling them apart through one potential difference.
 
@@ -34,6 +60,10 @@ class dense_task_reward(ManagerTermBase):
     The term stores filtered grasp qualities, the initial separation, and one previous potential per
     environment. Invalid samples return zero without advancing this state. The first valid evaluation
     after reset seeds it and returns zero.
+
+    Each evaluation logs phase metrics under ``Metrics/shoelace/``. Geometric and grasp metrics average
+    only valid environments. Success rate uses each environment's most recent completed episode, excluding
+    environments with no completed episode; it is zero until the first completion.
     """
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv) -> None:
@@ -41,6 +71,8 @@ class dense_task_reward(ManagerTermBase):
         self._filtered_per_gripper_grasp = torch.full((env.num_envs, 2), torch.nan, device=env.device)
         self._baseline_x_separation = torch.full((env.num_envs,), torch.nan, device=env.device)
         self._previous_potential = torch.full((env.num_envs,), torch.nan, device=env.device)
+        self._last_episode_success = torch.full((env.num_envs,), torch.nan, device=env.device)
+        self._metrics: dict[str, torch.Tensor] = {}
         self._warned_legacy_params = False
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
@@ -53,6 +85,8 @@ class dense_task_reward(ManagerTermBase):
         self._filtered_per_gripper_grasp[selected] = torch.nan
         self._baseline_x_separation[selected] = torch.nan
         self._previous_potential[selected] = torch.nan
+        # ManagerBasedRLEnv replaces the log dictionary before resetting reward terms.
+        self._env.extras.setdefault("log", {}).update(self._metrics)
 
     def __call__(
         self,
@@ -196,10 +230,52 @@ class dense_task_reward(ManagerTermBase):
         pull = _hamacher_product(bilateral_grasp, x_progress)
         potential = potential_scale * (acquisition_weight * acquire + (1.0 - acquisition_weight) * pull)
 
+        metric_values = {
+            "approach_distance_m": tail_distances.mean(dim=1),
+            "approach_score": approach.mean(dim=1),
+            "grasp_left": filtered_per_gripper_grasp[:, 0],
+            "grasp_right": filtered_per_gripper_grasp[:, 1],
+            "grasp_both": bilateral_grasp,
+            "grasp_slip_mps": relative_speed.mean(dim=1),
+            "pull_x_separation_m": x_separation,
+            "pull_progress": x_progress,
+            "pull_score": pull,
+        }
+        samples = torch.stack(tuple(metric_values.values()), dim=-1)
+        means = torch.where(finite.unsqueeze(1), samples, 0.0).sum(dim=0) / finite.sum().clamp_min(1)
+        self._metrics = {
+            f"Metrics/shoelace/{name}": value.detach() for name, value in zip(metric_values, means, strict=True)
+        }
+        self._metrics["Metrics/shoelace/valid_fraction"] = finite.float().mean()
+        self._last_episode_success.copy_(
+            torch.where(
+                env.termination_manager.dones,
+                env.termination_manager.get_term("success").float(),
+                self._last_episode_success,
+            )
+        )
+        self._metrics["Metrics/shoelace/success_rate"] = self._last_episode_success.nan_to_num().sum() / (
+            torch.isfinite(self._last_episode_success).sum().clamp_min(1)
+        )
+        # RSL-RL retains each step's dictionary until logging the training iteration.
+        env.extras["log"] = {**env.extras.get("log", {}), **self._metrics}
+
         valid = finite & torch.isfinite(self._previous_potential)
         progress = torch.where(valid, potential - self._previous_potential, torch.zeros_like(potential))
         self._previous_potential.copy_(torch.where(finite, potential, self._previous_potential))
         return progress / env.step_dt
+
+
+def _arm_action_squared_sum(env: ManagerBasedRLEnv, actions: torch.Tensor) -> torch.Tensor:
+    """Select arm commands by name so action reordering cannot include grippers."""
+    term_slices: dict[str, slice] = {}
+    start = 0
+    for name, dim in zip(env.action_manager.active_terms, env.action_manager.action_term_dim, strict=True):
+        term_slices[name] = slice(start, start + dim)
+        start += dim
+    return actions[:, term_slices["left_arm"]].square().sum(dim=-1) + actions[:, term_slices["right_arm"]].square().sum(
+        dim=-1
+    )
 
 
 def _gripper_closed_fraction(

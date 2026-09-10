@@ -3,7 +3,8 @@
 `IsaacContrib-Shoelace-DualFranka` exposes the standalone Newton shoelace scene as a manager-based RL
 environment. The initial interface intentionally includes only dual-arm Cartesian actions, binary gripper
 actions, proprioceptive and tail observations, compact finger-tail signed-distance history, deterministic resets,
-a unified dense task reward, and episode timeouts. The compact contact-related policy input contains:
+a unified dense task reward, small arm action penalties, and episode timeouts. The compact contact-related policy
+input contains:
 
 - four finger-tail signed surface distances, clipped to +/-2 mm and stacked over the current and previous two
   policy steps (12 values, oldest to newest); positive means separation, zero means touching, and negative means
@@ -32,10 +33,59 @@ release. Pulling has no approach floor: its score combines both grasp qualities 
 
 `acquisition_weight=0.3` allocates 30% of the potential to acquisition and 70% to pulling. The manager multiplies
 the returned rate by `step_dt` and the overall reward weight (10). Only one potential is differenced, without
-rate clipping or a stage-switch gate. A closed cycle of the full reward state has zero undiscounted total reward;
-stationary states give zero once the grasp filter settles. Invalid samples do not advance the reward state, and
-the first valid sample after each reset gives no reward. These are progress rewards, not a claim of optimal-policy
-invariance under discounting.
+rate clipping or a stage-switch gate. For this dense term, a closed cycle of its full state has zero undiscounted
+total reward; stationary states give zero once the grasp filter settles. Invalid samples do not advance its
+state, and the first valid sample after each reset gives no dense reward. These are progress rewards, not a claim
+of optimal-policy invariance under discounting.
+
+Two independent penalties regularize the 12 normalized arm commands before Cartesian scaling. Both select the
+`left_arm` and `right_arm` action terms by name and exclude binary gripper commands:
+
+- `arm_action_rate` has weight `-0.01` and sums squared changes from the previous policy step to discourage
+  jitter and frequent direction changes. This is a step difference, without division by `step_dt`.
+- `arm_action_magnitude` has weight `-0.001` and sums squared commands to discourage unnecessary motion,
+  including constant commands that incur no action-change cost.
+
+The reward manager multiplies both penalties by `step_dt`, so the total per-step reward is:
+
+```python
+reward = 10.0 * (potential - previous_potential) - step_dt * (
+    0.01 * (arm_action - previous_arm_action).square().sum(dim=-1)
+    + 0.001 * arm_action.square().sum(dim=-1)
+)
+```
+
+The dense contribution is zero on its first valid sample as described above; action penalties still apply.
+Action history resets to zero per environment, so the first command is compared with zero. The total reward
+therefore no longer has the dense term's zero-return closed-cycle property. These small initial weights have
+not been tuned through training. Adjust them independently with `env.rewards.arm_action_rate.weight` and
+`env.rewards.arm_action_magnitude.weight`; set both to zero to restore the previous reward objective.
+
+The dense term also writes phase metrics to `extras["log"]` on every policy step. RSL-RL prints their rollout
+averages in each training iteration and writes the same tags to TensorBoard:
+
+| Tag under `Metrics/shoelace/` | Interpretation |
+| --- | --- |
+| `approach_distance_m` | Mean TCP-to-tail distance across both arms [m]; lower is better. |
+| `approach_score` | Mean proximity score in [0, 1]; higher is better. |
+| `grasp_left`, `grasp_right` | Filtered contact, closure, and low-slip grasp quality for each arm in [0, 1]. |
+| `grasp_both` | Hamacher soft-AND of both filtered grasp qualities in [0, 1]. |
+| `grasp_slip_mps` | Mean tail-to-TCP relative speed across both arms [m/s]; lower is better while grasping. |
+| `pull_x_separation_m` | Absolute two-tail X separation [m]; success starts at 0.18 m. |
+| `pull_progress` | Reset-relative separation progress in [0, 1], independent of grasp quality. |
+| `pull_score` | Separation progress combined with both grasps in [0, 1]. |
+| `success_rate` | Mean success over each environment's most recent completed episode. |
+| `valid_fraction` | Fraction of environments with finite reward inputs in the current step. |
+
+Phase metrics average over valid environments before automatic reset. When no environment is valid, those
+metrics are zero and `valid_fraction=0` identifies that case. `success_rate` uses the actual `success` termination
+flag, excludes environments that have not finished an episode, and is zero until the first completion. These
+continuous grasp scores are contact-based proxies, not discrete stage-completion labels. For example, high
+`pull_progress` with low `grasp_both` means the tails separated without both grasps being maintained. Metrics are
+computed by the dense reward term and require its weight to remain nonzero.
+
+The reward manager separately logs the weighted penalties as `Episode_Reward/arm_action_rate` and
+`Episode_Reward/arm_action_magnitude` when episodes reset.
 
 Success checks only absolute two-tail X-position separation reaching 0.18 m; it does not require grasping or
 prove that the knot is topologically untied. The dense pulling score still requires both grasps.
