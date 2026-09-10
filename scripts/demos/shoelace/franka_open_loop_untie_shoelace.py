@@ -267,7 +267,7 @@ class OpenLoopEnvCfg(ManagerBasedEnvCfg):
                         name="robots",
                         solver_cfg=MJWarpSolverCfg(
                             cone="elliptic",
-                            ls_iterations=20,
+                            ls_iterations=40,
                             integrator="implicitfast",
                             njmax=2048,
                             nconmax=256,
