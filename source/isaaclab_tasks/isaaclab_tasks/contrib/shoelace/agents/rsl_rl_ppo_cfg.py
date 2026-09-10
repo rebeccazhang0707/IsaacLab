@@ -22,7 +22,7 @@ class ShoelacePPORunnerCfg(RslRlOnPolicyRunnerCfg):
         hidden_dims=[256, 256],
         activation="elu",
         obs_normalization=True,
-        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=0.3),
+        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=1.0),
     )
     critic = RslRlMLPModelCfg(
         hidden_dims=[256, 256],
