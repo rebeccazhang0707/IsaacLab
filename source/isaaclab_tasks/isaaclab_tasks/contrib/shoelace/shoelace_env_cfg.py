@@ -250,7 +250,7 @@ class RewardsCfg:
             "robot_cfgs": ROBOT_CFGS,
         },
     )
-    arm_action_rate = RewTerm(func=mdp.arm_action_rate_l2, weight=-0.01)
+    arm_action_rate = RewTerm(func=mdp.arm_action_rate_l2, weight=-0.001)
     arm_action_magnitude = RewTerm(func=mdp.arm_action_l2, weight=-0.001)
 
 
