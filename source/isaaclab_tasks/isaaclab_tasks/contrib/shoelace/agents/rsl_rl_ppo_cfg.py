@@ -12,20 +12,20 @@ from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPp
 class ShoelacePPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """RSL-RL PPO configuration for the dual-Franka shoelace environment."""
 
-    num_steps_per_env = 16
-    max_iterations = 1000
+    num_steps_per_env = 8
+    max_iterations = 5000
     save_interval = 50
     experiment_name = "shoelace_dual_franka"
     clip_actions = 1.0
     obs_groups = {"actor": ["policy"], "critic": ["policy"]}
     actor = RslRlMLPModelCfg(
-        hidden_dims=[256, 256],
+        hidden_dims=[512, 256, 128],
         activation="elu",
         obs_normalization=True,
         distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=1.0),
     )
     critic = RslRlMLPModelCfg(
-        hidden_dims=[256, 256],
+        hidden_dims=[512, 256, 128],
         activation="elu",
         obs_normalization=True,
     )
