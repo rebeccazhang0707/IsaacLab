@@ -24,6 +24,30 @@ from isaaclab_tasks.contrib.shoelace.shoelace_env import ShoelaceEnv
 from isaaclab_tasks.contrib.shoelace.shoelace_env_cfg import ShoelaceEnvCfg
 
 
+@pytest.mark.parametrize(("num_envs", "override"), [(4, None), (1024, None), (1024, 1_024_000)])
+def test_runtime_contact_capacity_scales_and_preserves_overrides(num_envs: int, override: int | None) -> None:
+    cfg = ShoelaceEnvCfg()
+    cfg.scene.num_envs = num_envs
+    outer_override = 16_777_216 if override is not None else 0
+    if override is not None:
+        cfg.sim.physics.collision_cfg.max_triangle_pairs = outer_override
+        cfg.sim.physics.solver_cfg.contact_max_triangle_pairs = override
+        cfg.sim.physics.solver_cfg.contact_reduction_hashtable_size_factor = 4.0
+    env = object.__new__(ShoelaceEnv)
+    env._centerline, env._cable_radius, segment_length = shoelace_physics.load_shoelace()
+
+    env._configure_runtime_cfg(cfg, segment_length)
+
+    required = max(shoelace_physics.MIN_TRIANGLE_PAIRS, shoelace_physics.TRIANGLE_PAIRS_PER_ENV * num_envs)
+    expected = max(required, outer_override)
+    assert cfg.sim.physics.collision_cfg.max_triangle_pairs == expected
+    internal_capacity = max(shoelace_physics.MIN_TRIANGLE_PAIRS, override or 0)
+    assert cfg.sim.physics.solver_cfg.contact_max_triangle_pairs == internal_capacity
+    assert cfg.sim.physics.solver_cfg.contact_reduction_hashtable_size_factor == max(
+        4.0 if override is not None else 0.25, required * 0.25 / internal_capacity
+    )
+
+
 @pytest.fixture(params=["task", "demo"])
 def physics(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     """Exercise the self-contained task and demo physics implementations."""

@@ -308,6 +308,8 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
         gravity=(0.0, 0.0, -9.81),
         physics=NewtonCfg(
             solver_cfg=CouplerAdmmCfg(
+                contact_max_triangle_pairs=physics.MIN_TRIANGLE_PAIRS,
+                contact_reduction_hashtable_size_factor=0.25,
                 entries=[
                     CouplerEntryCfg(
                         name="robots",
