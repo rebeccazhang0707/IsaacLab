@@ -20,7 +20,7 @@ from isaaclab_newton.sim.spawners.materials import NewtonMaterialCfg
 from pxr import Gf, Usd, UsdGeom
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import AssetBaseCfg
+from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.sim.spawners.materials import UsdPhysicsRigidBodyMaterialCfg
 
 if TYPE_CHECKING:
@@ -217,9 +217,9 @@ def rigid_material(friction: float, damping: float) -> list[UsdPhysicsRigidBodyM
     ]
 
 
-def shoe_asset_cfg(visible: bool = True) -> AssetBaseCfg:
-    """Build the environment-local static shoe collider asset."""
-    return AssetBaseCfg(
+def shoe_asset_cfg(visible: bool = True) -> RigidObjectCfg:
+    """Build the environment-local kinematic shoe with a resettable root pose."""
+    return RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Shoe",
         spawn=sim_utils.UsdFileCfg(
             usd_path=str(COLLIDER_ASSET),
@@ -406,7 +406,7 @@ def configure_shoelace_builder(
         shoe_body = _label_index(body_by_label, root)
         shoe_collider = _label_index(shape_by_label, f"{root}/Collider")
         tongue_collider = _label_index(shape_by_label, f"{root}/TongueUpper/geometry/mesh")
-        pinned_shape = _label_index(shape_by_label, f"/World/envs/env_{world}/ShoelacePinned/geometry/mesh")
+        pinned_shape = _label_index(shape_by_label, f"{root}/ShoelacePinned/geometry/mesh")
         if builder.shape_world[pinned_shape] != world:
             raise RuntimeError(f"Pinned mesh is not local to Newton world {world}")
         shoe_parts.append((shoe_collider, tongue_collider, pinned_shape))

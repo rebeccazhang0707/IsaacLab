@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Tests for explicit cable-only proxy inertia in the task and standalone demos."""
+"""Tests for shoelace proxy inertia and physically consistent randomized resets."""
 
 import importlib
 import warnings
@@ -13,9 +13,14 @@ from types import ModuleType
 import newton
 import numpy as np
 import pytest
+import torch
 import warp as wp
+from isaaclab_newton.physics import NewtonManager
+
+from isaaclab.app import launch_simulation
 
 from isaaclab_tasks.contrib.shoelace import shoelace_physics
+from isaaclab_tasks.contrib.shoelace.shoelace_env import ShoelaceEnv
 from isaaclab_tasks.contrib.shoelace.shoelace_env_cfg import ShoelaceEnvCfg
 
 
@@ -82,3 +87,108 @@ def test_invalid_proxy_inertia_is_rejected(physics: ModuleType, regularization: 
     """Reject negative and nonfinite regularization before editing body properties."""
     with pytest.raises(ValueError, match="finite and nonnegative"):
         physics.configure_cable_inertia(newton.ModelBuilder(), [], regularization)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="The coupled MJWarp/VBD rollout requires CUDA")
+@torch.inference_mode()
+def test_randomized_resets_preserve_shoe_lace_alignment_and_other_environments() -> None:
+    """Resample selected starts without drift, stale targets, or displaced cable anchors."""
+    cfg = ShoelaceEnvCfg()
+    cfg.scene.num_envs = 4
+    cfg.sim.device = "cuda:0"
+    with launch_simulation(cfg, {"visualizer": None, "visualizer_explicit": True}):
+        env = ShoelaceEnv(cfg)
+        try:
+            env.reset()
+            shoe = env.scene["shoe"]
+            all_ids = torch.arange(env.num_envs, device=env.device)
+            selected = all_ids[::2]
+            untouched = all_ids[1::2]
+            robots = [env.scene[name] for name in ("robot_left", "robot_right")]
+            cables = [env.scene[name] for name in ("shoelace_left", "shoelace_right")]
+            arm_events = [cfg.events.reset_left_arm, cfg.events.reset_right_arm]
+            model = NewtonManager.get_model()
+            for world in range(env.num_envs):
+                root = f"/World/envs/env_{world}/Shoe"
+                body = model.body_label.index(root)
+                # All shoe geometry must follow the same body, including the pinned lace span.
+                for suffix in ("/Collider", "/TongueUpper/geometry/mesh", "/ShoelacePinned/geometry/mesh"):
+                    shape = model.shape_label.index(root + suffix)
+                    assert model.shape_body.numpy()[shape] == body
+
+            for _ in range(3):
+                shoe_before = shoe.data.root_pose_w.torch.clone()
+                robot_before = [robot.data.joint_pos.torch.clone() for robot in robots]
+                cable_before = [cable.data.segment_pose_w.torch.clone() for cable in cables]
+                env.reset(env_ids=selected)
+                shoe_pose = shoe.data.root_pose_w.torch
+                offset = shoe_pose[:, :3] - shoe.data.default_root_pose.torch[:, :3] - env.scene.env_origins
+                assert not torch.equal(shoe_pose[selected], shoe_before[selected])
+                assert not torch.equal(offset[selected[0]], offset[selected[1]])
+                torch.testing.assert_close(shoe_pose[untouched], shoe_before[untouched], rtol=0, atol=0)
+                torch.testing.assert_close(offset[:, 2], torch.zeros_like(offset[:, 2]))
+                torch.testing.assert_close(shoe_pose[:, 3:], shoe.data.default_root_pose.torch[:, 3:])
+                for axis, key in enumerate(("x", "y")):
+                    lower, upper = cfg.events.reset_shoe.params["position_range"][key]
+                    assert torch.all((offset[:, axis] >= lower - 1.0e-6) & (offset[:, axis] <= upper + 1.0e-6))
+
+                for robot, before, event in zip(robots, robot_before, arm_events, strict=True):
+                    joints = event.params["asset_cfg"].joint_ids
+                    positions = robot.data.joint_pos.torch
+                    defaults = robot.data.default_joint_pos.torch
+                    delta = positions[selected][:, joints] - defaults[selected][:, joints]
+                    lower, upper = event.params["position_range"]
+                    assert torch.all((delta >= lower - 1.0e-6) & (delta <= upper + 1.0e-6))
+                    assert not torch.equal(positions[selected], before[selected])
+                    torch.testing.assert_close(positions[untouched], before[untouched], rtol=0, atol=0)
+                    torch.testing.assert_close(
+                        robot.actuators.target_command.position.torch[selected], positions[selected]
+                    )
+                    fingers, _ = robot.find_joints("panda_finger_joint.*")
+                    torch.testing.assert_close(positions[selected][:, fingers], defaults[selected][:, fingers])
+                    torch.testing.assert_close(
+                        robot.data.joint_vel.torch[selected], robot.data.default_joint_vel.torch[selected]
+                    )
+
+                for cable, before in zip(cables, cable_before, strict=True):
+                    expected = cable.data.default_segment_pose_w.torch[selected].clone()
+                    expected[..., :3] += offset[selected].unsqueeze(1)
+                    torch.testing.assert_close(cable.data.segment_pose_w.torch[selected], expected)
+                    torch.testing.assert_close(
+                        cable.data.segment_pose_w.torch[untouched], before[untouched], rtol=0, atol=0
+                    )
+                    torch.testing.assert_close(
+                        cable.data.segment_velocity_w.torch[selected],
+                        cable.data.default_segment_velocity_w.torch[selected],
+                    )
+
+                # Advance through the captured coupled solver and verify both zero-mass anchors stay put.
+                shoe_start = shoe.data.root_pose_w.torch.clone()
+                anchors = [
+                    cables[0].data.segment_pose_w.torch[:, -1].clone(),
+                    cables[1].data.segment_pose_w.torch[:, 0].clone(),
+                ]
+                actions = torch.zeros((env.num_envs, env.action_manager.total_action_dim), device=env.device)
+                actions[:, [6, 13]] = 1.0
+                for _ in range(10):
+                    observations, *_ = env.step(actions)
+                    assert torch.isfinite(observations["policy"]).all()
+                torch.testing.assert_close(shoe.data.root_pose_w.torch, shoe_start)
+                for cable, segment, anchor in zip(cables, (-1, 0), anchors, strict=True):
+                    torch.testing.assert_close(cable.data.segment_pose_w.torch[:, segment], anchor)
+
+            # Zero-width ranges recover the settled defaults after previously randomized episodes.
+            for name in ("reset_left_arm", "reset_right_arm", "reset_shoe"):
+                term = env.event_manager.get_term_cfg(name)
+                term.params["position_range"] = {} if name == "reset_shoe" else (0.0, 0.0)
+                env.event_manager.set_term_cfg(name, term)
+            env.reset()
+            torch.testing.assert_close(
+                shoe.data.root_pos_w.torch, shoe.data.default_root_pose.torch[:, :3] + env.scene.env_origins
+            )
+            for robot in robots:
+                torch.testing.assert_close(robot.data.joint_pos.torch, robot.data.default_joint_pos.torch)
+            for cable in cables:
+                torch.testing.assert_close(cable.data.segment_pose_w.torch, cable.data.default_segment_pose_w.torch)
+        finally:
+            env.close()

@@ -2,7 +2,7 @@
 
 `IsaacContrib-Shoelace-DualFranka` exposes the standalone Newton shoelace scene as a manager-based RL
 environment. The initial interface intentionally includes only dual-arm Cartesian actions, binary gripper
-actions, proprioceptive and tail observations, compact finger-tail signed-distance history, deterministic resets,
+actions, proprioceptive and tail observations, compact finger-tail signed-distance history, randomized resets,
 a unified dense task reward, small arm action penalties, and episode timeouts. The compact contact-related policy
 input contains:
 
@@ -111,6 +111,34 @@ old reward trajectory: the acquisition formula and treatment of regressions have
 fractions above are independent of that compatibility mapping.
 
 The task uses the assets in `scripts/demos/shoelace/assets`.
+
+## Reset randomization
+
+Each episode independently samples uniform offsets for every selected environment:
+
+- Each of the seven joints on each arm starts within +/-0.02 rad (about 1.15 degrees) of its nominal
+  pregrasp position, clamped to the soft joint limits. Finger positions stay at the default open position.
+  Joint velocities stay at their defaults, and arm position targets match the sampled positions.
+- The shoe moves by up to +/-0.02 m along each of X and Y; its height and orientation stay unchanged.
+  Both settled laces, including their fixed anchor segments, receive the same translation. The shoe collider,
+  tongue, visual mesh and pinned lace mesh move with the kinematic shoe, which stays fixed during the episode.
+
+These conservative ranges vary the initial approach without changing the knot geometry. They help diversify
+training starts; broader generalization still needs evaluation on held-out starts.
+
+The ranges live in `EventsCfg.reset_left_arm`, `reset_right_arm`, and `reset_shoe` in `shoelace_env_cfg.py`.
+To restore the previous deterministic starts, keep `reset_scene` and disable the three randomization terms
+before constructing the environment:
+
+```python
+cfg.events.reset_left_arm = None
+cfg.events.reset_right_arm = None
+cfg.events.reset_shoe = None
+```
+
+`shoe_asset_cfg()` now returns a `RigidObjectCfg` for the kinematic shoe. The pinned mesh prim moved from
+`{ENV_REGEX_NS}/ShoelacePinned` to `{ENV_REGEX_NS}/Shoe/ShoelacePinned`; update custom prim-path lookups accordingly.
+The scene entity name `shoelace_pinned_visual` is unchanged.
 
 ## Explicit proxy inertia
 

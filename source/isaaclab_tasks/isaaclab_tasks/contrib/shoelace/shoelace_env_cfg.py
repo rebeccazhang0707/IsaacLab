@@ -89,7 +89,7 @@ def _franka_cfg(
     rotation: tuple[float, float, float, float],
     arm_joint_positions: dict[str, float],
 ) -> ArticulationCfg:
-    """Build one fixed-base Franka in the deterministic open-pregrasp pose."""
+    """Build one fixed-base Franka in the nominal open-pregrasp pose."""
     robot = FrankaSoftSceneCfg().default.robot.replace(prim_path=prim_path)
     robot.init_state.pos = position
     robot.init_state.rot = rotation
@@ -137,7 +137,7 @@ class ShoelaceSceneCfg(InteractiveSceneCfg):
     shoe_visual = physics.shoe_visual_asset_cfg("/World/ShoeMaterials/shoes")
     tongue_upper = physics.tongue_upper_asset_cfg()
     shoelace_left = _cable_cfg("{ENV_REGEX_NS}/ShoelaceLeft")
-    shoelace_pinned_visual = AssetBaseCfg(prim_path="{ENV_REGEX_NS}/ShoelacePinned")
+    shoelace_pinned_visual = AssetBaseCfg(prim_path="{ENV_REGEX_NS}/Shoe/ShoelacePinned")
     shoelace_right = _cable_cfg("{ENV_REGEX_NS}/ShoelaceRight")
     ground = physics.ground_asset_cfg(10.0)
     light = physics.light_asset_cfg()
@@ -220,12 +220,33 @@ class ObservationsCfg:
 
 @configclass
 class EventsCfg:
-    """Restore all assets to their deterministic default states."""
+    """Restore defaults, then perturb arm joints and translate the shoe with its laces."""
 
     reset_scene = EventTerm(
         func=env_mdp.reset_scene_to_default,
         mode="reset",
         params={"reset_joint_targets": True},
+    )
+    reset_left_arm = EventTerm(
+        func=mdp.reset_arm_joints,
+        mode="reset",
+        params={
+            "position_range": (-0.02, 0.02),
+            "asset_cfg": SceneEntityCfg("robot_left", joint_names=["panda_joint[1-7]"]),
+        },
+    )
+    reset_right_arm = EventTerm(
+        func=mdp.reset_arm_joints,
+        mode="reset",
+        params={
+            "position_range": (-0.02, 0.02),
+            "asset_cfg": SceneEntityCfg("robot_right", joint_names=["panda_joint[1-7]"]),
+        },
+    )
+    reset_shoe = EventTerm(
+        func=mdp.reset_shoe_position,
+        mode="reset",
+        params={"position_range": {"x": (-0.02, 0.02), "y": (-0.02, 0.02)}},
     )
 
 
