@@ -1,5 +1,5 @@
 Changed
-~~~~~~~
+^^^^^^^
 
 * Randomized dual-Franka shoelace episode starts with arm joint offsets of up to 0.02 rad and shared shoe/lace
   X/Y translations of up to 0.02 m. Kept grippers open, synchronized arm position targets, and preserved cable

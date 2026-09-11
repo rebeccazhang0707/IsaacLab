@@ -301,7 +301,7 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
 
     seed: int | None = 42
     decimation: int = 4
-    episode_length_s: float = 20.0
+    episode_length_s: float = 10.0
     sim: SimulationCfg = SimulationCfg(
         dt=1.0 / 120.0,
         render_interval=decimation,
