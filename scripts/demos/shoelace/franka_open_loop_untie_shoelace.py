@@ -82,8 +82,8 @@ GRIPPER_STIFFNESS = 8000.0
 NEWTON_NUM_SUBSTEPS = 10
 NEWTON_COLLISION_DECIMATION = 2
 VBD_ITERATIONS = 12
-ADMM_ITERATIONS = 5
-ADMM_RHO = 400.0
+ADMM_ITERATIONS = 2
+ADMM_RHO = 500.0
 ADMM_BAUMGARTE = 0.5
 ADMM_CONTACT_MATCHING = "latest"
 
@@ -633,8 +633,8 @@ def main() -> None:
     parser.add_argument("--approach_speed", type=float, default=0.08, help="Maximum TCP approach speed [m/s].")
     parser.add_argument("--approach_tolerance", type=float, default=0.007, help="TCP-to-tail tolerance [m].")
     parser.add_argument("--close_steps", type=int, default=2)
-    parser.add_argument("--pull_steps", type=int, default=100)
-    parser.add_argument("--pull_speed", type=float, default=0.1, help="Commanded TCP pull speed [m/s].")
+    parser.add_argument("--pull_steps", type=int, default=16)
+    parser.add_argument("--pull_speed", type=float, default=1.0, help="Commanded TCP pull speed [m/s].")
     add_launcher_args(parser)
     args = parser.parse_args()
     cfg = _make_cfg(args)
