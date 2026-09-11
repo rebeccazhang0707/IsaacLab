@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import math
-import warnings
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -17,7 +16,7 @@ import torch
 from isaaclab.managers import ManagerTermBase
 
 from .observations import finger_tail_signed_distance, tail_tcp_relative_speed, tails_to_tcp
-from .utils import tail_x_separation
+from .utils import tail_outward_x, tail_x_separation
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -51,30 +50,24 @@ def arm_action_rate_l2(env: ManagerBasedRLEnv) -> torch.Tensor:
 
 
 class dense_task_reward(ManagerTermBase):
-    """Reward acquiring both tails and pulling them apart through one potential difference.
+    """Stateful progress reward for acquiring and pulling the two free tails.
 
-    Acquisition adds partial TCP-proximity credit to the mean contact-aware grasp quality of the two
-    arms. Each grasp contributes independently of TCP proximity and the other arm, so acquiring both
-    tails earns twice the grasp credit of acquiring one. Pulling combines both grasps with reset-relative
-    X separation using a Hamacher soft-AND.
+    Maintains per-environment grasp filters, initial tail offsets, and the previous potential.
 
-    The term stores filtered grasp qualities, the initial separation, and one previous potential per
-    environment. Invalid samples return zero without advancing this state. The first valid evaluation
-    after reset seeds it and returns zero.
-
-    Each evaluation logs phase metrics under ``Metrics/shoelace/``. Geometric and grasp metrics average
-    only valid environments. Success rate uses each environment's most recent completed episode, excluding
-    environments with no completed episode; it is zero until the first completion.
+    Notes:
+        - Phase metrics under ``Metrics/shoelace/`` average only environments with finite reward inputs.
+        - ``valid_fraction`` measures numerical input validity, not grasp quality or task success.
+        - ``success_rate`` averages the latest completed result per environment, excluding those with
+          no completed episode. It is zero until the first completion.
     """
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv) -> None:
         super().__init__(cfg, env)
         self._filtered_per_gripper_grasp = torch.full((env.num_envs, 2), torch.nan, device=env.device)
-        self._baseline_x_separation = torch.full((env.num_envs,), torch.nan, device=env.device)
+        self._baseline_outward_x = torch.full((env.num_envs, 2), torch.nan, device=env.device)
         self._previous_potential = torch.full((env.num_envs,), torch.nan, device=env.device)
         self._last_episode_success = torch.full((env.num_envs,), torch.nan, device=env.device)
         self._metrics: dict[str, torch.Tensor] = {}
-        self._warned_legacy_params = False
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         """Clear episode state so the next valid evaluation gives no reset credit.
@@ -84,7 +77,7 @@ class dense_task_reward(ManagerTermBase):
         """
         selected = slice(None) if env_ids is None else env_ids
         self._filtered_per_gripper_grasp[selected] = torch.nan
-        self._baseline_x_separation[selected] = torch.nan
+        self._baseline_outward_x[selected] = torch.nan
         self._previous_potential[selected] = torch.nan
         # ManagerBasedRLEnv replaces the log dictionary before resetting reward terms.
         self._env.extras.setdefault("log", {}).update(self._metrics)
@@ -99,115 +92,88 @@ class dense_task_reward(ManagerTermBase):
         open_position: float,
         closed_position: float,
         success_x_separation: float,
-        maximum_progress_rate: float | None = None,
-        approach_weight: float | None = None,
-        grasp_weight: float | None = None,
-        task_weight: float | None = None,
         cable_cfgs: tuple[SceneEntityCfg, SceneEntityCfg] | None = None,
         robot_cfgs: tuple[SceneEntityCfg, SceneEntityCfg] | None = None,
         *,
         acquisition_weight: float = 0.3,
         approach_fraction: float = 0.3,
+        bilateral_pull_fraction: float = 0.2,
     ) -> torch.Tensor:
         """Return the signed rate of acquisition-and-pull progress [1/s].
 
-        With ``H`` denoting Hamacher soft-AND, ``A`` per-arm approach, ``G`` filtered per-arm grasp quality,
-        and ``X`` normalized separation progress, the potential is::
+        Reward composition:
+            1. Acquisition: approach credit plus independent, filtered grasp qualities. Each grasp
+               combines two-finger contact, actual closure, and low tail-TCP slip.
+            2. Pulling: each tail's outward progress gated by its own grasp, plus a bilateral bonus.
+            3. Feedback: signed potential difference divided by ``step_dt``; holding still pays zero
+               once filters settle. The reward manager multiplies by ``step_dt`` and the term weight.
 
-            acquire = mean(H(A, approach_fraction)) + (1 - approach_fraction) * mean(G)
-            pull = H(H(G_left, G_right), X)
-            potential = acquisition_weight * acquire + (1 - acquisition_weight) * pull
-
-        Each arm earns half the grasp budget without requiring its tail center to coincide with the TCP.
-        Both phases remain active: losing grasp lowers acquisition and suppresses pulling. The separation
-        progress starts at the first valid post-reset separation and reaches one at ``success_x_separation``.
-        Each grasp soft-ANDs two finger-contact qualities, actual closure, and low tail-TCP slip. Grasp
-        filtering smooths contact flicker, so release reduces the score over the filter time constant.
-
-        The return value is ``(potential - previous_potential) / env.step_dt``. It is not clipped, so gains
-        and losses cancel over a closed cycle of the complete reward state in the undiscounted sum. Once
-        the filtered state settles, holding still gives zero. The reward manager applies the term weight
-        and multiplies by ``env.step_dt``. This is a progress objective, not a guarantee of policy-invariant
-        shaping for a discounted MDP.
+        Notes:
+            - Reset: the first finite sample seeds state and returns zero; regrasping never resets references.
+            - Pull progress: starts at 0.5 and changes smoothly on either side of the initial tail position.
+              This also gives grasp credit at the initial position. Equations are in the task README.
+            - Invalid inputs: return zero and preserve reward history; excluded from phase metric averages.
+            - Cycles: signed gains and losses cancel over a full reward-state cycle without discounting.
+              This does not guarantee policy invariance under discounting.
 
         Args:
             env: The task environment.
             reach_std: Tail-to-TCP approach-distance width [m].
-            contact_std: Signed-distance width around zero contact [m]. Gaps and deep penetrations both
-                lower the grasp quality.
+            contact_std: Contact-distance width [m]; gaps and deep penetration reduce grasp quality.
             relative_speed_std: Tail-TCP slip-speed width [m/s].
             grasp_filter_time_constant: Grasp-quality low-pass time constant [s].
             open_position: Driven finger-joint position when open [m].
             closed_position: Driven finger-joint position when closed [m].
-            success_x_separation: Successful absolute two-tail X separation [m].
-            maximum_progress_rate: Deprecated rate limit [1/s]. Accepted but ignored; remove it from configs.
-            approach_weight: Deprecated approach budget. Legacy budgets override the new stage fractions;
-                migrate as described in the task README.
-            grasp_weight: Deprecated grasp budget, folded into acquisition with ``approach_weight``.
-            task_weight: Deprecated pull budget. The sum of legacy budgets preserves the potential scale.
+            success_x_separation: X-separation target for the pull scale [m]; success is checked separately.
             cable_cfgs: Required left and right cable scene entities.
             robot_cfgs: Required left and right robot hand and finger scene entities.
-            acquisition_weight: Fraction of the potential allocated to acquisition in ``[0, 1]``.
-                Pulling receives the remainder.
-            approach_fraction: Fraction of acquisition available before grasping in ``[0, 1]``.
-                The remainder rewards each grasp independently of TCP proximity. A value strictly
-                between zero and one gives feedback for both approaching and grasping.
+            acquisition_weight: Acquisition fraction in [0, 1]; pulling receives the remainder.
+            approach_fraction: Approach share of acquisition in [0, 1]; grasps receive the remainder.
+            bilateral_pull_fraction: Bilateral share of pulling in [0, 1]; zero disables the bonus.
 
         Returns:
-            Reward rates [1/s], shape [N]. With the new parameters, each potential lies in ``[0, 1]``.
+            Signed reward rates [1/s], shape [N]. The potential is bounded in [0, 1].
 
         Raises:
-            ValueError: If scene entities are omitted or stage budgets are invalid.
+            ValueError: If scene entities, reward budgets, or the separation target are invalid.
         """
         if cable_cfgs is None or robot_cfgs is None:
             raise ValueError("dense_task_reward requires cable_cfgs and robot_cfgs")
-        potential_scale = 1.0
-        legacy_weights = (approach_weight, grasp_weight, task_weight)
-        if maximum_progress_rate is not None or any(weight is not None for weight in legacy_weights):
-            if not self._warned_legacy_params:
-                warnings.warn(
-                    "dense_task_reward: maximum_progress_rate is ignored and the three legacy weights are"
-                    " deprecated. Use acquisition_weight and approach_fraction; see the shoelace README.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-                self._warned_legacy_params = True
-            if any(weight is not None for weight in legacy_weights):
-                approach_budget, grasp_budget, pull_budget = (
-                    default if weight is None else weight
-                    for weight, default in zip(legacy_weights, (0.15, 0.35, 1.0), strict=True)
-                )
-                budgets = (approach_budget, grasp_budget, pull_budget)
-                potential_scale = sum(budgets)
-                if not all(math.isfinite(budget) and budget >= 0.0 for budget in budgets) or potential_scale <= 0.0:
-                    raise ValueError("Legacy reward budgets must be finite, nonnegative, and have a positive sum")
-                acquisition_budget = approach_budget + grasp_budget
-                acquisition_weight = acquisition_budget / potential_scale
-                approach_fraction = approach_budget / acquisition_budget if acquisition_budget > 0.0 else 0.0
         if not 0.0 <= acquisition_weight <= 1.0 or not 0.0 <= approach_fraction <= 1.0:
             raise ValueError("acquisition_weight and approach_fraction must be in [0, 1]")
+        if not 0.0 <= bilateral_pull_fraction <= 1.0:
+            raise ValueError("bilateral_pull_fraction must be in [0, 1]")
+        if not math.isfinite(success_x_separation) or success_x_separation <= 0.0:
+            raise ValueError("success_x_separation must be finite and positive")
 
+        # Per-arm tensors follow robot order (left, right), which is opposite to the cable naming.
         tail_vectors = tails_to_tcp(env, cable_cfgs, robot_cfgs).reshape(env.num_envs, 2, 3)
         tail_distances = torch.linalg.vector_norm(tail_vectors, dim=-1)
         signed_distance = finger_tail_signed_distance(env).reshape(env.num_envs, 2, 2)
         relative_speed = tail_tcp_relative_speed(env, cable_cfgs, robot_cfgs)
         closure = _gripper_closed_fraction(env, robot_cfgs, open_position, closed_position)
         x_separation = tail_x_separation(env, cable_cfgs)
+        outward_x = tail_outward_x(env, cable_cfgs)
+        # Per-environment numerical mask for reward inputs; this does not assess grasp or task success.
         finite = (
             torch.isfinite(tail_distances).all(dim=1)
             & torch.isfinite(signed_distance).all(dim=(1, 2))
             & torch.isfinite(relative_speed).all(dim=1)
             & torch.isfinite(closure).all(dim=1)
             & torch.isfinite(x_separation)
+            & torch.isfinite(outward_x).all(dim=1)
         )
 
         approach = 1.0 - torch.tanh(tail_distances / max(reach_std, 1.0e-6))
+        # Require both fingers of each gripper near contact; gaps and deep penetration lower quality.
         finger_contact = torch.exp(-torch.square(signed_distance / max(contact_std, 1.0e-6)))
         bilateral_finger_contact = _hamacher_product(finger_contact[:, :, 0], finger_contact[:, :, 1])
         per_gripper_grasp = _hamacher_product(bilateral_finger_contact, closure)
+        # Closure and contact alone can mistake a slipping tail for a retained grasp.
         motion_match = 1.0 - torch.tanh(relative_speed / max(relative_speed_std, 1.0e-6))
         per_gripper_grasp = _hamacher_product(per_gripper_grasp, motion_match)
 
+        # Use a time-based filter for contact flicker; seed from the first sample to avoid a reset ramp.
         filter_time = max(grasp_filter_time_constant, 1.0e-6)
         filter_alpha = 1.0 - math.exp(-env.step_dt / filter_time)
         unseeded_grasp = ~torch.isfinite(self._filtered_per_gripper_grasp)
@@ -224,32 +190,39 @@ class dense_task_reward(ManagerTermBase):
         acquire = _hamacher_product(approach, approach_fraction).mean(dim=1)
         acquire += (1.0 - approach_fraction) * filtered_per_gripper_grasp.mean(dim=1)
 
-        unseeded_baseline = ~torch.isfinite(self._baseline_x_separation)
-        self._baseline_x_separation.copy_(
-            torch.where(finite & unseeded_baseline, x_separation, self._baseline_x_separation)
+        # Keep each reference fixed until episode reset; releasing/regrasping must not renew pull credit.
+        unseeded_baseline = ~torch.isfinite(self._baseline_outward_x)
+        self._baseline_outward_x.copy_(
+            torch.where(finite.unsqueeze(1) & unseeded_baseline, outward_x, self._baseline_outward_x)
         )
-        x_progress_range = (success_x_separation - self._baseline_x_separation).clamp_min(1.0e-6)
-        x_progress = ((x_separation - self._baseline_x_separation) / x_progress_range).clamp(0.0, 1.0)
-        pull = _hamacher_product(bilateral_grasp, x_progress)
-        potential = potential_scale * (acquisition_weight * acquire + (1.0 - acquisition_weight) * pull)
+        initial_separation = self._baseline_outward_x.sum(dim=1).abs()
+        # Split the remaining target separation between arms; the 1 cm floor avoids a near-zero scale.
+        pull_scale = (0.5 * (success_x_separation - initial_separation)).clamp_min(0.01)
+        # Start at 0.5 so outward motion below the reset baseline still changes the potential smoothly.
+        per_arm_progress = 0.5 * (1.0 + torch.tanh((outward_x - self._baseline_outward_x) / pull_scale.unsqueeze(1)))
+        # Gate each tail by its own grasp; the bilateral term is a bonus, not a prerequisite for pulling.
+        per_arm_pull = _hamacher_product(filtered_per_gripper_grasp, per_arm_progress)
+        bilateral_pull = _hamacher_product(per_arm_pull[:, 0], per_arm_pull[:, 1])
+        pull = (1.0 - bilateral_pull_fraction) * per_arm_pull.mean(dim=1) + bilateral_pull_fraction * bilateral_pull
+        potential = acquisition_weight * acquire + (1.0 - acquisition_weight) * pull
 
         metric_values = {
             "approach_distance_m": tail_distances.mean(dim=1),
-            "approach_score": approach.mean(dim=1),
             "grasp_left": filtered_per_gripper_grasp[:, 0],
             "grasp_right": filtered_per_gripper_grasp[:, 1],
             "grasp_both": bilateral_grasp,
-            "grasp_slip_mps": relative_speed.mean(dim=1),
             "pull_x_separation_m": x_separation,
-            "pull_progress": x_progress,
-            "pull_score": pull,
+            "pull_left": per_arm_pull[:, 0],
+            "pull_right": per_arm_pull[:, 1],
         }
         samples = torch.stack(tuple(metric_values.values()), dim=-1)
         means = torch.where(finite.unsqueeze(1), samples, 0.0).sum(dim=0) / finite.sum().clamp_min(1)
         self._metrics = {
             f"Metrics/shoelace/{name}": value.detach() for name, value in zip(metric_values, means, strict=True)
         }
+        # Fraction of environments passing the NaN/Inf check this step; normally 1.0.
         self._metrics["Metrics/shoelace/valid_fraction"] = finite.float().mean()
+        # Retain each environment's latest completed result; exclude environments with no finished episode.
         self._last_episode_success.copy_(
             torch.where(
                 env.termination_manager.dones,
@@ -263,9 +236,11 @@ class dense_task_reward(ManagerTermBase):
         # RSL-RL retains each step's dictionary until logging the training iteration.
         env.extras["log"] = {**env.extras.get("log", {}), **self._metrics}
 
+        # Seed without reset credit, and keep negative changes so full-state cycles cancel without discounting.
         valid = finite & torch.isfinite(self._previous_potential)
         progress = torch.where(valid, potential - self._previous_potential, torch.zeros_like(potential))
         self._previous_potential.copy_(torch.where(finite, potential, self._previous_potential))
+        # RewardManager multiplies by step_dt, leaving the weighted potential difference per policy step.
         return progress / env.step_dt
 
 

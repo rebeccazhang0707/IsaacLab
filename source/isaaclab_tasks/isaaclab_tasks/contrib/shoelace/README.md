@@ -30,13 +30,19 @@ input contains:
 The signed-distance history is derived directly from Newton collision candidates because coupled solvers do not
 expose the standard contact-force sensor. A pair without a collision candidate uses the positive 2 mm cap.
 
-One reward covers two phases: acquiring the tails and pulling them apart while holding both. Let `H` be the
-Hamacher soft-AND, `A` the per-arm TCP proximity, `G` the filtered per-arm grasp quality, and `X` the normalized
-X-separation progress from the first valid post-reset sample to the 0.18 m success threshold. The default is:
+One reward covers acquiring the tails and pulling each outward with its corresponding grasp. Let `H` be the
+Hamacher soft-AND, `A` the per-arm TCP proximity, `G` the filtered per-arm grasp quality, and `d` each tail's
+outward X displacement from the first valid post-reset sample. The left arm pulls toward negative X, and the
+right arm toward positive X. Positions are relative to the fixed cable seam midpoint, so translating the shoe
+or the whole environment does not create progress. The default is:
 
 ```python
 acquire = H(A, 0.3).mean(dim=-1) + 0.7 * G.mean(dim=-1)
-pull = H(H(G[:, 0], G[:, 1]), X)
+scale = max((0.18 - initial_x_separation) / 2, 0.01)  # per environment, metres
+P = 0.5 * (1 + tanh(d / scale))
+per_arm_pull = H(G, P)
+bilateral_pull = H(per_arm_pull[:, 0], per_arm_pull[:, 1])
+pull = 0.8 * per_arm_pull.mean(dim=-1) + 0.2 * bilateral_pull
 potential = 0.3 * acquire + 0.7 * pull
 reward_rate = (potential - previous_potential) / step_dt
 ```
@@ -44,19 +50,25 @@ reward_rate = (potential - previous_potential) / step_dt
 `approach_fraction=0.3` provides partial acquisition credit before contact. The remaining acquisition budget
 rewards the two grasps independently and additively, without scaling their credit by TCP proximity. Each grasp
 requires both finger surfaces near contact, actual gripper closure, and low tail-TCP slip. The 0.10 s filter
-smooths contact flicker and also delays the response to release. Pulling has no approach floor: its score
-combines both grasp qualities with achieved separation.
+smooths contact flicker and also delays the response to release. Each arm's pull score uses only its own
+grasp and tail position. Moving the ungrasped tail cannot earn the other arm's pull credit.
 
-At fixed approach and zero pulling progress, the default grasp contribution to the weighted potential is
+At fixed approach, the acquisition grasp contribution to the weighted potential is
 `1.05 * (G_left + G_right)`: one perfect grasp contributes 1.05 and two contribute 2.10. Partial grasps earn
 proportional credit, and either hand can be acquired first. These are cumulative gains as grasp quality rises,
 not a reward paid every step for holding still. Releasing a grasp removes its credit through the same signed
-potential difference.
+potential difference. Pulling also contributes grasp credit because `P=0.5` at the initial tail position.
+This positive, smooth progress value gives feedback while pulling outward even below the reset baseline.
+It approaches one as the tail moves outward, rather than declaring the knot untied at a target distance.
+`bilateral_pull_fraction=0.2` reserves 20% of the pulling budget for the bilateral bonus; the other 80% is
+available independently to the two arms. Both grasping and actual outward motion increase the bilateral
+score, while stationary states stop earning reward once filtering settles. Set the fraction to zero to
+disable the bonus. References remain fixed throughout the episode, including releases and regrasping.
 
-Previously, grasp quality was inside `H(A, 0.3 + 0.7 * G)`, which reduced grasp gains when the tail center was
-offset from the TCP even with good physical contact. The new formula keeps the no-grasp approach potential
-and maximum stage budgets, but changes intermediate rewards. Existing configurations and checkpoints remain
-loadable; re-evaluate or retrain policies under this objective and compare grasp quality and success rather
+Previously, the pulling score required both grasps and clamped separation progress to zero below its reset
+baseline. The new formula changes intermediate rewards while preserving maximum phase budgets. Current
+phase-fraction configurations and policy checkpoints remain loadable; migrate deprecated parameters as
+described below. Re-evaluate or retrain policies and compare grasp quality and geometric success rather
 than comparing old and new reward curves directly.
 
 `acquisition_weight=0.3` allocates 30% of the potential to acquisition and 70% to pulling. The manager multiplies
@@ -69,7 +81,7 @@ of optimal-policy invariance under discounting.
 Two independent penalties regularize the 12 normalized arm commands before Cartesian scaling. Both select the
 `left_arm` and `right_arm` action terms by name and exclude binary gripper commands:
 
-- `arm_action_rate` has weight `-0.01` and sums squared changes from the previous policy step to discourage
+- `arm_action_rate` has weight `-0.001` and sums squared changes from the previous policy step to discourage
   jitter and frequent direction changes. This is a step difference, without division by `step_dt`.
 - `arm_action_magnitude` has weight `-0.001` and sums squared commands to discourage unnecessary motion,
   including constant commands that incur no action-change cost.
@@ -78,7 +90,7 @@ The reward manager multiplies both penalties by `step_dt`, so the total per-step
 
 ```python
 reward = 10.0 * (potential - previous_potential) - step_dt * (
-    0.01 * (arm_action - previous_arm_action).square().sum(dim=-1)
+    0.001 * (arm_action - previous_arm_action).square().sum(dim=-1)
     + 0.001 * arm_action.square().sum(dim=-1)
 )
 ```
@@ -89,41 +101,77 @@ therefore no longer has the dense term's zero-return closed-cycle property. Thes
 not been tuned through training. Adjust them independently with `env.rewards.arm_action_rate.weight` and
 `env.rewards.arm_action_magnitude.weight`; set both to zero to restore the previous reward objective.
 
-The dense term also writes phase metrics to `extras["log"]` on every policy step. RSL-RL prints their rollout
+The dense term writes nine phase metrics to `extras["log"]` on every policy step. RSL-RL prints their rollout
 averages in each training iteration and writes the same tags to TensorBoard:
 
 | Tag under `Metrics/shoelace/` | Interpretation |
 | --- | --- |
 | `approach_distance_m` | Mean TCP-to-tail distance across both arms [m]; lower is better. |
-| `approach_score` | Mean proximity score in [0, 1]; higher is better. |
 | `grasp_left`, `grasp_right` | Filtered contact, closure, and low-slip grasp quality for each arm in [0, 1]. |
 | `grasp_both` | Hamacher soft-AND of both filtered grasp qualities in [0, 1]. |
-| `grasp_slip_mps` | Mean tail-to-TCP relative speed across both arms [m/s]; lower is better while grasping. |
-| `pull_x_separation_m` | Absolute two-tail X separation [m]; success starts at 0.18 m. |
-| `pull_progress` | Reset-relative separation progress in [0, 1], independent of grasp quality. |
-| `pull_score` | Separation progress combined with both grasps in [0, 1]. |
+| `pull_x_separation_m` | Absolute two-tail X separation [m]; 0.18 m is one necessary success condition. |
+| `pull_left`, `pull_right` | Each tail's progress gated by its own filtered grasp. |
 | `success_rate` | Mean success over each environment's most recent completed episode. |
-| `valid_fraction` | Fraction of environments with finite reward inputs in the current step. |
+| `valid_fraction` | Fraction of environments whose checked reward inputs contain no NaN/Inf; normally 1.0. |
+
+`finite` is the internal per-environment numerical mask. It checks tail-to-TCP distances, finger-tail signed
+distances, relative speeds, closure fractions, tail X separation, and outward tail offsets. If any checked
+value is NaN or infinite, that environment's dense reward is zero and its reward history is preserved.
+`valid_fraction = finite.float().mean()` reports the fraction passing this check in the current step.
+For example, 1023 valid environments out of 1024 gives approximately 0.9990. This checks the numerical
+validity of these reward inputs; it does not measure grasp validity, task success, or physical plausibility.
 
 Phase metrics average over valid environments before automatic reset. When no environment is valid, those
 metrics are zero and `valid_fraction=0` identifies that case. `success_rate` uses the actual `success` termination
 flag, excludes environments that have not finished an episode, and is zero until the first completion. These
 continuous grasp scores are contact-based proxies, not discrete stage-completion labels. For example, high
-`pull_progress` with low `grasp_both` means the tails separated without both grasps being maintained. Metrics are
+`pull_x_separation_m` with low `grasp_both` indicates separated tails without strong simultaneous grasps. Metrics are
 computed by the dense reward term and require its weight to remain nonzero.
+
+`grasp_both` averages the per-environment joint grasp quality. It cannot be recovered by combining the logged
+averages of `grasp_left` and `grasp_right`: different environments may hold different single tails.
+
+The log was reduced to nine metrics by removing `approach_score`, `grasp_slip_mps`, `pull_progress`, and
+`pull_score`, and adding the per-arm `pull_left` and `pull_right` scores. Update dashboards to use the
+physical approach distance, per-arm grasp/pull scores, actual separation, and success rate above. These are
+diagnostic replacements, not numerically equivalent signals. Reward calculations, including slip-sensitive
+grasp quality and the bilateral pull bonus, are unchanged by this logging reduction.
 
 The reward manager separately logs the weighted penalties as `Episode_Reward/arm_action_rate` and
 `Episode_Reward/arm_action_magnitude` when episodes reset.
 
-Success checks only absolute two-tail X-position separation reaching 0.18 m; it does not require grasping or
-prove that the knot is topologically untied. The dense pulling score still requires both grasps.
+Success now uses `mdp.shoelace_success` and requires all of the following:
 
-Earlier three-stage configs remain accepted with a deprecation warning. To migrate weights `a` (approach), `g`
-(grasp), and `p` (task), set `acquisition_weight=(a+g)/(a+g+p)` and `approach_fraction=a/(a+g)`, and multiply the
-manager's overall weight by `a+g+p` to preserve the potential scale. If `a+g` is zero, use zero for
-`approach_fraction`. Remove `maximum_progress_rate`, which is now ignored. This preserves stage budgets, not the
-old reward trajectory: the acquisition formula and treatment of regressions have changed. The new default
-fractions above are independent of that compatibility mapping.
+- no more than 52 free cable segments inside a sphere of radius 0.025 m around the fixed seam midpoint;
+- both tail centers at least 0.09 m from that midpoint;
+- absolute two-tail X separation of at least 0.18 m; and
+- finite cable segment positions and velocities.
+
+The throat and tail-distance criteria follow `reb/newton_shoelace_demo`. The midpoint is the average of the
+left cable's last segment and the right cable's first segment. These two fixed anchors are excluded from
+the throat count; the remaining 156 segment centers are counted. The region follows shoe translations.
+This rejects separation-only success while a dense knot remains in the throat or one tail stays near it.
+It is a regional geometry heuristic, not a general topological proof of untying: changes to the cable asset,
+segment resolution or knot geometry require revalidating the radius and count threshold. Unlike the old
+branch, success does not require both grippers to remain closed; cooperation is rewarded through the bonus.
+
+The previous `mdp.tail_x_separation_success` helper remains available for custom distance-only evaluations.
+Custom tasks should switch to `mdp.shoelace_success` with the four thresholds in `TerminationsCfg.success`.
+Historical success rates from the distance-only criterion are not comparable to the new rates.
+
+The deprecated `maximum_progress_rate`, `approach_weight`, `grasp_weight`, and `task_weight` parameters
+have been removed. If only `maximum_progress_rate` was used, delete that key. Configurations using any
+of the three old weights must be migrated before loading:
+
+1. For old weights `a` (approach), `g` (grasp), and `p` (task), set
+   `acquisition_weight=(a+g)/(a+g+p)` and `approach_fraction=a/(a+g)`; use zero for the latter if `a+g=0`.
+   Omitted old weights defaulted to `a=0.15`, `g=0.35`, and `p=1.0`.
+2. Multiply the reward manager's overall term weight by `a+g+p` to preserve the potential scale.
+3. Delete all four deprecated parameters. The ignored `maximum_progress_rate` has no replacement.
+
+Pass `cable_cfgs` and `robot_cfgs` by keyword in direct calls; removing the old parameters changed their
+positional indices. The migration preserves phase budgets, not historical reward trajectories. Current
+task defaults already use `acquisition_weight`, `approach_fraction`, and `bilateral_pull_fraction`.
 
 The task uses the assets in `scripts/demos/shoelace/assets`.
 

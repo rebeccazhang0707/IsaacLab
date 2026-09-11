@@ -35,22 +35,47 @@ def _termination_manager(num_envs: int) -> SimpleNamespace:
     )
 
 
-@pytest.mark.parametrize("legacy", [False, True])
+def _cables(tail_x: torch.Tensor) -> dict[str, SimpleNamespace]:
+    """Build translated cable states in robot-arm order, including fixed seam anchors."""
+    cables = {}
+    for name, arm, tail_slice in (("shoelace_left", 1, slice(0, 3)), ("shoelace_right", 0, slice(-3, None))):
+        poses = torch.zeros((len(tail_x), 79, 7))
+        poses[:, :, 3] = 1.0
+        poses[:, tail_slice, 0] = tail_x[:, arm, None]
+        cables[name] = SimpleNamespace(
+            data=SimpleNamespace(
+                segment_pose_w=_proxy(poses), segment_velocity_w=_proxy(torch.zeros_like(poses[:, :, :6]))
+            )
+        )
+    return cables
+
+
 @pytest.mark.parametrize("tail_distance", [0.0, 0.02])
+@pytest.mark.parametrize("first_arm", [0, 1])
 def test_dense_reward_orders_approach_contact_grasp_and_pull(
-    monkeypatch: pytest.MonkeyPatch, legacy: bool, tail_distance: float
+    monkeypatch: pytest.MonkeyPatch, tail_distance: float, first_arm: int
 ) -> None:
     """Acquisition and pulling should pay for progress, with no net credit for a closed state cycle."""
     tail_vectors = torch.full((1, 6), 0.05)
     signed_distance = torch.full((1, 4), CONTACT_DISTANCE_CAP)
     relative_speed = torch.zeros((1, 2))
-    x_separation = torch.tensor([0.10])
+    tail_x = torch.tensor([[-0.05, 0.05]])
+    translation = torch.zeros(3)
+    other_arm = 1 - first_arm
+    first_contact = slice(2 * first_arm, 2 * first_arm + 2)
+    other_contact = slice(2 * other_arm, 2 * other_arm + 2)
+    outward_sign = (-1.0, 1.0)
     robots = {
         "robot_left": SimpleNamespace(data=SimpleNamespace(joint_pos=_proxy(torch.tensor([[0.01]])))),
         "robot_right": SimpleNamespace(data=SimpleNamespace(joint_pos=_proxy(torch.tensor([[0.01]])))),
     }
     env = SimpleNamespace(
-        num_envs=1, device="cpu", step_dt=0.1, scene=robots, extras={}, termination_manager=_termination_manager(1)
+        num_envs=1,
+        device="cpu",
+        step_dt=0.1,
+        scene={**robots, **_cables(tail_x)},
+        extras={},
+        termination_manager=_termination_manager(1),
     )
     robot_cfgs = (
         SimpleNamespace(name="robot_left", joint_ids=[0]),
@@ -59,19 +84,13 @@ def test_dense_reward_orders_approach_contact_grasp_and_pull(
     monkeypatch.setattr(shoelace_rewards, "tails_to_tcp", lambda *args: tail_vectors)
     monkeypatch.setattr(shoelace_rewards, "finger_tail_signed_distance", lambda *args: signed_distance)
     monkeypatch.setattr(shoelace_rewards, "tail_tcp_relative_speed", lambda *args: relative_speed)
-    monkeypatch.setattr(shoelace_rewards, "tail_x_separation", lambda *args: x_separation)
     term = shoelace_rewards.dense_task_reward(None, env)
     reward_history = []
-    stage_params = {"acquisition_weight": 0.3, "approach_fraction": 0.3}
-    if legacy:
-        stage_params = {
-            "maximum_progress_rate": 3.0,
-            "approach_weight": 0.15,
-            "grasp_weight": 0.35,
-            "task_weight": 1.0,
-        }
 
     def compute() -> torch.Tensor:
+        env.scene.update(_cables(tail_x))
+        for cable_cfg in CABLE_CFGS:
+            env.scene[cable_cfg.name].data.segment_pose_w.torch[:, :, :3] += translation
         reward = term(
             env,
             reach_std=0.05,
@@ -83,16 +102,13 @@ def test_dense_reward_orders_approach_contact_grasp_and_pull(
             success_x_separation=0.18,
             cable_cfgs=CABLE_CFGS,
             robot_cfgs=robot_cfgs,
-            **stage_params,
+            acquisition_weight=0.3,
+            approach_fraction=0.3,
         )
         reward_history.append(reward.clone())
         return reward
 
-    if legacy:
-        with pytest.warns(DeprecationWarning, match="acquisition_weight and approach_fraction"):
-            initial_reward = compute()
-    else:
-        initial_reward = compute()
+    initial_reward = compute()
     torch.testing.assert_close(initial_reward, torch.zeros(1))
     initial_log = env.extras["log"]
     assert initial_log["Metrics/shoelace/approach_distance_m"].item() > 0.0
@@ -105,45 +121,63 @@ def test_dense_reward_orders_approach_contact_grasp_and_pull(
     # A physical grasp can leave the tail center offset from the nominal TCP.
     tail_vectors[:, ::3] = tail_distance
     compute()
+    translation[:] = torch.tensor([1.52, -0.02, 0.1])
+    assert abs(compute().item()) < 1.0e-5
     robots["robot_left"].data.joint_pos.torch.fill_(0.001)
     robots["robot_right"].data.joint_pos.torch.fill_(0.001)
     assert abs(compute().item()) < 1.0e-5
 
-    x_separation.fill_(0.18)
+    tail_x[:] = torch.tensor([[-0.09, 0.09]])
     assert abs(compute().item()) < 1.0e-5
-    x_separation.fill_(0.10)
+    tail_x[:] = torch.tensor([[-0.05, 0.05]])
     assert abs(compute().item()) < 1.0e-5
 
-    signed_distance[:, :2].zero_()
-    # Each arm earns half the grasp budget independently of its TCP-to-tail distance.
-    acquisition_gain = 0.175 if legacy else 0.105
-    assert compute().item() * env.step_dt == pytest.approx(acquisition_gain, abs=1.0e-5)
-    assert env.extras["log"]["Metrics/shoelace/grasp_left"].item() > 0.99
-    assert env.extras["log"]["Metrics/shoelace/grasp_right"].item() < 1.0e-5
+    signed_distance[:, first_contact].zero_()
+    assert compute().item() > 0.0
+    assert env.extras["log"][f"Metrics/shoelace/grasp_{('left', 'right')[first_arm]}"].item() > 0.99
+    assert env.extras["log"][f"Metrics/shoelace/grasp_{('left', 'right')[other_arm]}"].item() < 1.0e-5
     assert env.extras["log"]["Metrics/shoelace/grasp_both"].item() < 1.0e-5
 
-    x_separation.fill_(0.18)
+    # The ungrasped arm's tail cannot pay the grasped arm's pull reward.
+    tail_x[:, other_arm] += outward_sign[other_arm] * 0.04
     assert abs(compute().item()) < 1.0e-5
-    x_separation.fill_(0.10)
+    tail_x[:, other_arm] -= outward_sign[other_arm] * 0.04
     assert abs(compute().item()) < 1.0e-5
+
+    # A single grasp connects directly to pulling, including below the reset separation.
+    tail_x[:, first_arm] -= outward_sign[first_arm] * 0.02
+    assert compute().item() < 0.0
+    tail_x[:, first_arm] += outward_sign[first_arm] * 0.01
+    assert compute().item() > 0.0
+    tail_x[:, first_arm] += outward_sign[first_arm] * 0.05
+    assert compute().item() > 0.0
+    first_pull_key = f"Metrics/shoelace/pull_{('left', 'right')[first_arm]}"
+    other_pull_key = f"Metrics/shoelace/pull_{('left', 'right')[other_arm]}"
+    single_pull = env.extras["log"][first_pull_key].clone()
+    assert single_pull.item() > 0.5
+    assert env.extras["log"][other_pull_key].item() < 1.0e-5
 
     signed_distance.zero_()
-    assert compute().item() * env.step_dt == pytest.approx(acquisition_gain, abs=1.0e-5)
+    assert compute().item() > 0.0
+    tail_x[:, other_arm] += outward_sign[other_arm] * 0.04
+    assert compute().item() > 0.0
+    torch.testing.assert_close(env.extras["log"][first_pull_key], single_pull)
+    assert env.extras["log"][other_pull_key].item() > 0.5
 
     # Either hand can be acquired first; releasing and reacquiring cannot accumulate credit.
-    signed_distance[:, :2].fill_(CONTACT_DISTANCE_CAP)
-    assert compute().item() * env.step_dt == pytest.approx(-acquisition_gain, abs=1.0e-5)
-    signed_distance[:, 2:].fill_(CONTACT_DISTANCE_CAP)
-    assert compute().item() * env.step_dt == pytest.approx(-acquisition_gain, abs=1.0e-5)
-    signed_distance[:, 2:].zero_()
-    assert compute().item() * env.step_dt == pytest.approx(acquisition_gain, abs=1.0e-5)
-    signed_distance[:, :2].zero_()
-    assert compute().item() * env.step_dt == pytest.approx(acquisition_gain, abs=1.0e-5)
+    signed_distance[:, first_contact].fill_(CONTACT_DISTANCE_CAP)
+    release_left = compute()
+    assert release_left.item() < 0.0
+    signed_distance[:, other_contact].fill_(CONTACT_DISTANCE_CAP)
+    release_right = compute()
+    assert release_right.item() < 0.0
+    signed_distance[:, other_contact].zero_()
+    torch.testing.assert_close(compute(), -release_right)
+    signed_distance[:, first_contact].zero_()
+    torch.testing.assert_close(compute(), -release_left)
 
-    x_separation.fill_(0.18)
-    assert compute().item() * env.step_dt == pytest.approx(1.0 if legacy else 0.7, abs=1.0e-5)
-    assert env.extras["log"]["Metrics/shoelace/pull_progress"].item() == pytest.approx(1.0)
-    assert env.extras["log"]["Metrics/shoelace/pull_score"].item() > 0.99
+    assert 0.5 < env.extras["log"][first_pull_key].item() < 1.0
+    assert 0.5 < env.extras["log"][other_pull_key].item() < 1.0
     assert abs(compute().item()) < 1.0e-6
 
     signed_distance.fill_(-4.0e-3)
@@ -151,7 +185,7 @@ def test_dense_reward_orders_approach_contact_grasp_and_pull(
 
     tail_vectors.fill_(0.05)
     signed_distance.fill_(CONTACT_DISTANCE_CAP)
-    x_separation.fill_(0.10)
+    tail_x[:] = torch.tensor([[-0.05, 0.05]])
     for robot in robots.values():
         robot.data.joint_pos.torch.fill_(0.01)
     compute()
@@ -159,13 +193,38 @@ def test_dense_reward_orders_approach_contact_grasp_and_pull(
 
 
 def test_success_is_only_finite_absolute_tail_x_separation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The requested success contract should have one geometric threshold."""
+    """The legacy distance-only helper remains available for custom configurations."""
     separation = torch.tensor([0.179, 0.18, 0.25, torch.nan])
     monkeypatch.setattr(shoelace_terminations, "tail_x_separation", lambda *args: separation)
 
     success = shoelace_terminations.tail_x_separation_success(None, threshold=0.18, cable_cfgs=None)
 
     torch.testing.assert_close(success, torch.tensor([False, True, True, False]))
+
+
+def test_success_requires_cleared_throat_and_both_tails_away_from_anchors() -> None:
+    """Reject distance-only hacks, uncleared throats and invalid internal cable states."""
+    # Two anchors do not count; exactly 52 free segments in the throat is accepted.
+    cables = _cables(torch.tensor([[-0.10, 0.10]]).repeat(8, 1))
+    left = cables["shoelace_left"].data.segment_pose_w.torch
+    right = cables["shoelace_right"].data.segment_pose_w.torch
+    left[:, 3:-1, 0] = 0.04
+    right[:, 1:-3, 0] = -0.04
+    left[:, 3:55, 0] = 0.0
+    left[1, 55, 0] = 0.0  # 53 free segments: knot still occupies the throat.
+    right[2, -3:, 0] = -0.05
+    left[2, :3, 0] = 0.15  # 20 cm separation, but one tail remains too close.
+    left[3, 60, 0] = torch.nan  # Invalid internal segment, even with finite tails.
+    right[4, 0, 0] = torch.inf  # Invalid anchor cannot look like an empty throat.
+    cables["shoelace_left"].data.segment_velocity_w.torch[5, 60, 0] = torch.nan
+    left[6, :3, :3] = torch.tensor([0.08, 0.06, 0.0])
+    right[6, -3:, :3] = torch.tensor([-0.08, -0.06, 0.0])  # Long 3D distance, insufficient X separation.
+    # A different environment origin and randomized shoe translation preserve the classification.
+    for cable in cables.values():
+        cable.data.segment_pose_w.torch[7, :, :3] += torch.tensor([1.52, -2.98, 0.2])
+    cfg = TerminationsCfg().success
+    success = cfg.func(SimpleNamespace(scene=cables), **cfg.params)
+    torch.testing.assert_close(success, torch.tensor([True, False, False, False, False, False, False, True]))
 
 
 def test_dense_reward_filters_contact_and_resets_only_selected_envs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -193,11 +252,31 @@ def test_dense_reward_filters_contact_and_resets_only_selected_envs(monkeypatch:
     monkeypatch.setattr(shoelace_rewards, "finger_tail_signed_distance", lambda *args: signed_distance)
     monkeypatch.setattr(shoelace_rewards, "tail_tcp_relative_speed", lambda *args: relative_speed)
     monkeypatch.setattr(shoelace_rewards, "tail_x_separation", lambda *args: x_separation)
+    monkeypatch.setattr(
+        shoelace_rewards,
+        "tail_outward_x",
+        lambda *args: x_separation[:, None].expand(-1, 2) / 2.0,
+        raising=False,
+    )
 
     def compute() -> torch.Tensor:
         return term(env, **cfg.params)
 
     torch.testing.assert_close(compute(), torch.zeros(num_envs))
+    assert set(env.extras["log"]) == {
+        f"Metrics/shoelace/{name}"
+        for name in (
+            "approach_distance_m",
+            "grasp_left",
+            "grasp_right",
+            "grasp_both",
+            "pull_left",
+            "pull_right",
+            "pull_x_separation_m",
+            "success_rate",
+            "valid_fraction",
+        )
+    }
     signed_distance.zero_()
     assert (compute() > 0.0).all()
     assert (compute() > 0.0).all()
@@ -212,15 +291,17 @@ def test_dense_reward_filters_contact_and_resets_only_selected_envs(monkeypatch:
     assert (compute() > 0.0).all()
 
     term.reset([0])
+    x_separation[0] = 0.08
     reward = compute()
     assert reward[0].item() == 0.0
     assert reward[1].item() > 0.0
 
     x_separation.fill_(0.14)
     assert (compute() > 0.0).all()
+    grasp_before_slip = env.extras["log"]["Metrics/shoelace/grasp_both"].clone()
     relative_speed.fill_(0.8)
     assert (compute() < 0.0).all()
-    assert env.extras["log"]["Metrics/shoelace/grasp_slip_mps"].item() == pytest.approx(0.8)
+    assert env.extras["log"]["Metrics/shoelace/grasp_both"] < grasp_before_slip
 
     x_separation[:] = torch.tensor([0.18, 0.10])
     env.termination_manager.dones[0] = True
@@ -301,7 +382,7 @@ def test_arm_action_penalties_exclude_grippers_and_distinguish_steady_motion(ter
 
 
 def test_task_config_uses_arm_penalties_and_matching_success_threshold() -> None:
-    """Keep the geometric objective while enabling weaker magnitude than action-change costs."""
+    """Enable independent pulling with a smaller bilateral bonus and geometric untying success."""
     cfg = ShoelaceEnvCfg()
 
     assert [field.name for field in dataclasses.fields(RewardsCfg)] == [
@@ -310,16 +391,17 @@ def test_task_config_uses_arm_penalties_and_matching_success_threshold() -> None
         "arm_action_magnitude",
     ]
     assert cfg.rewards.arm_action_rate.func is shoelace_rewards.arm_action_rate_l2
-    assert cfg.rewards.arm_action_rate.weight == pytest.approx(-0.01)
+    assert cfg.rewards.arm_action_rate.weight == pytest.approx(-0.001)
     assert cfg.rewards.arm_action_magnitude.func is shoelace_rewards.arm_action_l2
     assert cfg.rewards.arm_action_magnitude.weight == pytest.approx(-0.001)
     assert [field.name for field in dataclasses.fields(TerminationsCfg)] == ["success", "time_out"]
     assert cfg.rewards.dense_task.func is shoelace_rewards.dense_task_reward
     assert cfg.rewards.dense_task.params["acquisition_weight"] == pytest.approx(0.3)
     assert cfg.rewards.dense_task.params["approach_fraction"] == pytest.approx(0.3)
-    assert "maximum_progress_rate" not in cfg.rewards.dense_task.params
+    assert cfg.rewards.dense_task.params["bilateral_pull_fraction"] == pytest.approx(0.2)
     assert cfg.rewards.dense_task.params["success_x_separation"] == pytest.approx(TAIL_SUCCESS_X_SEPARATION)
     assert cfg.terminations.success.params["threshold"] == pytest.approx(TAIL_SUCCESS_X_SEPARATION)
+    assert cfg.terminations.success.func is shoelace_terminations.shoelace_success
 
 
 if __name__ == "__main__":

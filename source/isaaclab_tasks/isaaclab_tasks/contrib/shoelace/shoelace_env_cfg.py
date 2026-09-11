@@ -46,6 +46,9 @@ GRIPPER_CLOSED_POSITION = 0.001
 GRIPPER_STIFFNESS = 8000.0
 CONTACT_OBSERVATION_HISTORY_LENGTH = 3
 TAIL_SUCCESS_X_SEPARATION = 0.18
+THROAT_RADIUS = 0.025
+MAXIMUM_THROAT_SEGMENTS = 52
+TAIL_SUCCESS_DISTANCE = 0.09
 
 NEWTON_NUM_SUBSTEPS = 10
 NEWTON_COLLISION_DECIMATION = 2
@@ -267,6 +270,7 @@ class RewardsCfg:
             "success_x_separation": TAIL_SUCCESS_X_SEPARATION,
             "acquisition_weight": 0.3,
             "approach_fraction": 0.3,
+            "bilateral_pull_fraction": 0.2,
             "cable_cfgs": CABLE_CFGS,
             "robot_cfgs": ROBOT_CFGS,
         },
@@ -277,11 +281,17 @@ class RewardsCfg:
 
 @configclass
 class TerminationsCfg:
-    """Two-tail X-separation success and episode timeout."""
+    """Cleared knot throat with separated tails, and episode timeout."""
 
     success = DoneTerm(
-        func=mdp.tail_x_separation_success,
-        params={"threshold": TAIL_SUCCESS_X_SEPARATION, "cable_cfgs": CABLE_CFGS},
+        func=mdp.shoelace_success,
+        params={
+            "threshold": TAIL_SUCCESS_X_SEPARATION,
+            "throat_radius": THROAT_RADIUS,
+            "maximum_throat_segments": MAXIMUM_THROAT_SEGMENTS,
+            "tail_success_distance": TAIL_SUCCESS_DISTANCE,
+            "cable_cfgs": CABLE_CFGS,
+        },
     )
     time_out = DoneTerm(func=env_mdp.time_out, time_out=True)
 
