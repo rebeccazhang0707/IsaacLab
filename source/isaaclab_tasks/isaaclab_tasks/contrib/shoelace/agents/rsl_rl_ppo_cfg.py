@@ -12,7 +12,7 @@ from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPp
 class ShoelacePPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """RSL-RL PPO configuration for the dual-Franka shoelace environment."""
 
-    num_steps_per_env = 32
+    num_steps_per_env = 16
     max_iterations = 1000
     save_interval = 50
     experiment_name = "shoelace_dual_franka"

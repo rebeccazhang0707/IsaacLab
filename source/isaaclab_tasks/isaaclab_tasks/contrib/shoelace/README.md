@@ -1,5 +1,20 @@
 # Dual-Franka shoelace task
 
+For multi-GPU training, `--num_envs` is the number of environments on each GPU.
+RSL-RL collects 16 steps per environment before each PPO update. With 8 GPUs and
+1024 environments per GPU, each iteration collects 131,072 transitions in total.
+Use `agent.num_steps_per_env=32` to restore the previous rollout length.
+The outer Newton collision pipeline reserves at least `max(1_000_000, 8192 * num_envs)`
+triangle pairs per process. The internal ADMM pipeline keeps 1,000,000 triangle pairs
+and scales its contact-reduction hashtable factor to reserve at least 2048 slots per
+environment. At 1024 environments per GPU, the factor is 2.097152 and the hashtable
+has 2,097,152 slots. Larger explicit budgets and factors are preserved.
+Override the internal budget with `env.sim.physics.solver_cfg.contact_max_triangle_pairs`
+and its table factor with `env.sim.physics.solver_cfg.contact_reduction_hashtable_size_factor`.
+These affect memory allocation at startup; they do not change the solver timestep or contact material.
+Contact matching remains enabled. Newton 1.6 requires the internal triangle-pair
+budget to stay below `2**20` in this mode; increase the hashtable factor for table warnings.
+
 `IsaacContrib-Shoelace-DualFranka` exposes the standalone Newton shoelace scene as a manager-based RL
 environment. The initial interface intentionally includes only dual-arm Cartesian actions, binary gripper
 actions, proprioceptive and tail observations, compact finger-tail signed-distance history, randomized resets,

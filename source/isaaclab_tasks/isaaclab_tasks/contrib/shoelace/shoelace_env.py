@@ -391,8 +391,19 @@ class ShoelaceEnv(ManagerBasedRLEnv):
             raise TypeError("The dual-Franka shoelace task requires Newton physics")
         physics_cfg.collision_cfg.rigid_contact_max = physics.CONTACTS_PER_ENV * cfg.scene.num_envs
         physics_cfg.collision_cfg.max_triangle_pairs = max(
+            physics_cfg.collision_cfg.max_triangle_pairs,
             physics.MIN_TRIANGLE_PAIRS,
             physics.TRIANGLE_PAIRS_PER_ENV * cfg.scene.num_envs,
+        )
+        solver_cfg = physics_cfg.solver_cfg
+        solver_cfg.contact_max_triangle_pairs = max(
+            solver_cfg.contact_max_triangle_pairs or 0, physics.MIN_TRIANGLE_PAIRS
+        )
+        # Contact matching requires a triangle budget below 2**20 in Newton 1.6.
+        # Scale only the reduction hashtable to retain matching at large batch sizes.
+        solver_cfg.contact_reduction_hashtable_size_factor = max(
+            solver_cfg.contact_reduction_hashtable_size_factor or 0.25,
+            0.25 * physics.TRIANGLE_PAIRS_PER_ENV * cfg.scene.num_envs / solver_cfg.contact_max_triangle_pairs,
         )
 
     def _install_settled_default_state(self) -> None:
