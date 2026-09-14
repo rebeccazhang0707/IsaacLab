@@ -255,26 +255,43 @@ class EventsCfg:
 
 @configclass
 class RewardsCfg:
-    """Acquisition-and-pull progress with small arm motion and action-change penalties."""
+    """Cooperative progress, sustained grasping, and completion with small arm motion penalties."""
 
     dense_task = RewTerm(
         func=mdp.dense_task_reward,
         weight=10.0,
         params={
-            "reach_std": 0.05,
+            "reach_std": 0.08,
             "contact_std": 5.0e-4,
             "relative_speed_std": 0.08,
             "grasp_filter_time_constant": 0.10,
             "open_position": GRIPPER_OPEN_POSITION,
             "closed_position": GRIPPER_CLOSED_POSITION,
             "success_x_separation": TAIL_SUCCESS_X_SEPARATION,
-            "acquisition_weight": 0.3,
-            "approach_fraction": 0.3,
-            "bilateral_pull_fraction": 0.2,
+            "acquisition_weight": 0.6,
+            "approach_fraction": 0.5,
+            "bilateral_approach_fraction": 0.5,
+            "bilateral_grasp_fraction": 0.7,
+            "bilateral_pull_fraction": 0.8,
             "cable_cfgs": CABLE_CFGS,
             "robot_cfgs": ROBOT_CFGS,
         },
     )
+    grasp_hold = RewTerm(
+        func=mdp.grasp_hold_reward,
+        weight=0.2,
+        params={
+            "contact_std": 5.0e-4,
+            "relative_speed_std": 0.08,
+            "grasp_filter_time_constant": 0.10,
+            "open_position": GRIPPER_OPEN_POSITION,
+            "closed_position": GRIPPER_CLOSED_POSITION,
+            "bilateral_grasp_fraction": 0.8,
+            "cable_cfgs": CABLE_CFGS,
+            "robot_cfgs": ROBOT_CFGS,
+        },
+    )
+    success = RewTerm(func=mdp.shoelace_success_reward, weight=5.0)
     arm_action_rate = RewTerm(func=mdp.arm_action_rate_l2, weight=-0.001)
     arm_action_magnitude = RewTerm(func=mdp.arm_action_l2, weight=-0.001)
 

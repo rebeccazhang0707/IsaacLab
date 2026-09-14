@@ -56,7 +56,7 @@ def test_dense_reward_orders_approach_contact_grasp_and_pull(
     monkeypatch: pytest.MonkeyPatch, tail_distance: float, first_arm: int
 ) -> None:
     """Acquisition and pulling should pay for progress, with no net credit for a closed state cycle."""
-    tail_vectors = torch.full((1, 6), 0.05)
+    tail_vectors = torch.full((1, 6), 1.0)
     signed_distance = torch.full((1, 4), CONTACT_DISTANCE_CAP)
     relative_speed = torch.zeros((1, 2))
     tail_x = torch.tensor([[-0.05, 0.05]])
@@ -84,27 +84,17 @@ def test_dense_reward_orders_approach_contact_grasp_and_pull(
     monkeypatch.setattr(shoelace_rewards, "tails_to_tcp", lambda *args: tail_vectors)
     monkeypatch.setattr(shoelace_rewards, "finger_tail_signed_distance", lambda *args: signed_distance)
     monkeypatch.setattr(shoelace_rewards, "tail_tcp_relative_speed", lambda *args: relative_speed)
-    term = shoelace_rewards.dense_task_reward(None, env)
+    cfg = RewardsCfg().dense_task
+    cfg.params["robot_cfgs"] = robot_cfgs
+    cfg.params["grasp_filter_time_constant"] = 1.0e-6
+    term = shoelace_rewards.dense_task_reward(cfg, env)
     reward_history = []
 
     def compute() -> torch.Tensor:
         env.scene.update(_cables(tail_x))
         for cable_cfg in CABLE_CFGS:
             env.scene[cable_cfg.name].data.segment_pose_w.torch[:, :, :3] += translation
-        reward = term(
-            env,
-            reach_std=0.05,
-            contact_std=5.0e-4,
-            relative_speed_std=0.08,
-            grasp_filter_time_constant=1.0e-6,
-            open_position=0.01,
-            closed_position=0.001,
-            success_x_separation=0.18,
-            cable_cfgs=CABLE_CFGS,
-            robot_cfgs=robot_cfgs,
-            acquisition_weight=0.3,
-            approach_fraction=0.3,
-        )
+        reward = term(env, **cfg.params)
         reward_history.append(reward.clone())
         return reward
 
@@ -113,8 +103,13 @@ def test_dense_reward_orders_approach_contact_grasp_and_pull(
     initial_log = env.extras["log"]
     assert initial_log["Metrics/shoelace/approach_distance_m"].item() > 0.0
     assert initial_log["Metrics/shoelace/grasp_both"].item() == 0.0
-    tail_vectors.zero_()
-    assert compute().item() > 0.0
+    tail_vectors.reshape(1, 2, 3)[:, first_arm].zero_()
+    first_approach = compute().item() * env.step_dt * cfg.weight
+    tail_vectors.reshape(1, 2, 3)[:, other_arm].zero_()
+    second_approach = compute().item() * env.step_dt * cfg.weight
+    # The 3-point approach budget gives 0.75 to one arm and the remaining 2.25 to the other.
+    assert first_approach == pytest.approx(0.75, abs=1.0e-5)
+    assert second_approach == pytest.approx(2.25, abs=1.0e-5)
     assert env.extras["log"]["Metrics/shoelace/approach_distance_m"].item() == 0.0
     assert initial_log["Metrics/shoelace/approach_distance_m"].item() > 0.0
 
@@ -133,10 +128,20 @@ def test_dense_reward_orders_approach_contact_grasp_and_pull(
     assert abs(compute().item()) < 1.0e-5
 
     signed_distance[:, first_contact].zero_()
-    assert compute().item() > 0.0
+    first_grasp = compute().item() * env.step_dt * cfg.weight
+    # A single grasp earns 0.45 acquisition credit plus 0.20 initial-position pull credit.
+    assert first_grasp == pytest.approx(0.65, abs=1.0e-5)
     assert env.extras["log"][f"Metrics/shoelace/grasp_{('left', 'right')[first_arm]}"].item() > 0.99
     assert env.extras["log"][f"Metrics/shoelace/grasp_{('left', 'right')[other_arm]}"].item() < 1.0e-5
     assert env.extras["log"]["Metrics/shoelace/grasp_both"].item() < 1.0e-5
+
+    signed_distance[:, other_contact].zero_()
+    second_grasp = compute().item() * env.step_dt * cfg.weight
+    # At the initial positions, H(0.5, 0.5) = 1/3 and both grasps receive the full acquisition budget.
+    both_grasp_credit = 3.0 + 4.0 * (0.2 * 0.5 + 0.8 / 3.0)
+    assert first_grasp + second_grasp == pytest.approx(both_grasp_credit, abs=3.0e-5)
+    signed_distance[:, other_contact].fill_(CONTACT_DISTANCE_CAP)
+    assert compute().item() * env.step_dt * cfg.weight == pytest.approx(-second_grasp, abs=1.0e-5)
 
     # The ungrasped arm's tail cannot pay the grasped arm's pull reward.
     tail_x[:, other_arm] += outward_sign[other_arm] * 0.04
@@ -183,7 +188,7 @@ def test_dense_reward_orders_approach_contact_grasp_and_pull(
     signed_distance.fill_(-4.0e-3)
     assert compute().item() < 0.0
 
-    tail_vectors.fill_(0.05)
+    tail_vectors.fill_(1.0)
     signed_distance.fill_(CONTACT_DISTANCE_CAP)
     tail_x[:] = torch.tensor([[-0.05, 0.05]])
     for robot in robots.values():
@@ -225,6 +230,16 @@ def test_success_requires_cleared_throat_and_both_tails_away_from_anchors() -> N
     cfg = TerminationsCfg().success
     success = cfg.func(SimpleNamespace(scene=cables), **cfg.params)
     torch.testing.assert_close(success, torch.tensor([True, False, False, False, False, False, False, True]))
+    reward_cfg = RewardsCfg().success
+    for step_dt in (1.0 / 30.0, 1.0 / 60.0):
+        env = SimpleNamespace(
+            step_dt=step_dt,
+            termination_manager=SimpleNamespace(
+                get_term=lambda name: success if name == "success" else torch.zeros_like(success)
+            ),
+        )
+        reward = reward_cfg.func(env, **reward_cfg.params) * reward_cfg.weight * step_dt
+        torch.testing.assert_close(reward, 5.0 * success.float())
 
 
 def test_dense_reward_filters_contact_and_resets_only_selected_envs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -381,12 +396,76 @@ def test_arm_action_penalties_exclude_grippers_and_distinguish_steady_motion(ter
         assert (penalty * term.weight <= 0.0).all()
 
 
+@pytest.mark.parametrize("step_dt", [1.0 / 30.0, 1.0 / 60.0])
+def test_grasp_hold_rewards_duration_and_cooperation_without_dense_term(
+    monkeypatch: pytest.MonkeyPatch, step_dt: float
+) -> None:
+    """Pay for retained physical grasps, preserving filters across invalid samples and selective resets."""
+    signed_distance = torch.full((4, 4), CONTACT_DISTANCE_CAP)
+    signed_distance[0].zero_()
+    signed_distance[1, :2].zero_()
+    signed_distance[2, 2:].zero_()
+    relative_speed = torch.zeros((4, 2))
+    robots = {
+        name: SimpleNamespace(data=SimpleNamespace(joint_pos=_proxy(torch.full((4, 1), 0.001))))
+        for name in ("robot_left", "robot_right")
+    }
+    env = SimpleNamespace(num_envs=4, device="cpu", step_dt=step_dt, scene=robots)
+    cfg = RewardsCfg().grasp_hold
+    cfg.params["robot_cfgs"] = tuple(SimpleNamespace(name=name, joint_ids=[0]) for name in robots)
+    monkeypatch.setattr(shoelace_rewards, "finger_tail_signed_distance", lambda *args: signed_distance)
+    monkeypatch.setattr(shoelace_rewards, "tail_tcp_relative_speed", lambda *args: relative_speed)
+    term = cfg.func(cfg, env)
+
+    def compute() -> torch.Tensor:
+        return term(env, **cfg.params) * cfg.weight * env.step_dt
+
+    stable_reward = compute()
+    duration_steps = round(1.0 / step_dt)
+    stable_total = torch.stack([compute() for _ in range(duration_steps)]).sum(dim=0)
+    # After the manager applies dt and weight, one second pays 0.2 for both and 0.02 for either alone.
+    torch.testing.assert_close(stable_total, torch.tensor([0.2, 0.02, 0.02, 0.0]), atol=1.0e-6, rtol=1.0e-4)
+
+    signed_distance[0] = torch.nan
+    relative_speed[1] = torch.inf
+    invalid_reward = compute()
+    torch.testing.assert_close(invalid_reward[:2], torch.zeros(2))
+    signed_distance[0].zero_()
+    relative_speed.zero_()
+    torch.testing.assert_close(compute(), stable_reward)
+
+    # Opening empty or occupied grippers does not earn hold credit; contact chatter pays less than retention.
+    chatter_rewards = []
+    for step in range(duration_steps):
+        for robot in robots.values():
+            robot.data.joint_pos.torch[0] = 0.01 if step % 2 == 0 else 0.001
+        chatter_rewards.append(compute()[0])
+    assert torch.stack(chatter_rewards).sum() < stable_total[0]
+
+    for robot in robots.values():
+        robot.data.joint_pos.torch[0] = 0.01
+    before_reset = compute()
+    term.reset([0])
+    after_reset = compute()
+    assert after_reset[0].item() == 0.0
+    torch.testing.assert_close(after_reset[1:], before_reset[1:])
+
+    # Sustained slip and deep penetration remove the remaining physical grasp credit.
+    relative_speed[1] = 0.8
+    signed_distance[2] = -0.004
+    for _ in range(duration_steps):
+        after_loss = compute()
+    assert (after_loss < 1.0e-5).all()
+
+
 def test_task_config_uses_arm_penalties_and_matching_success_threshold() -> None:
-    """Enable independent pulling with a smaller bilateral bonus and geometric untying success."""
+    """Budget cooperative progress, time-based retention, and geometric completion separately."""
     cfg = ShoelaceEnvCfg()
 
     assert [field.name for field in dataclasses.fields(RewardsCfg)] == [
         "dense_task",
+        "grasp_hold",
+        "success",
         "arm_action_rate",
         "arm_action_magnitude",
     ]
@@ -396,9 +475,14 @@ def test_task_config_uses_arm_penalties_and_matching_success_threshold() -> None
     assert cfg.rewards.arm_action_magnitude.weight == pytest.approx(-0.001)
     assert [field.name for field in dataclasses.fields(TerminationsCfg)] == ["success", "time_out"]
     assert cfg.rewards.dense_task.func is shoelace_rewards.dense_task_reward
-    assert cfg.rewards.dense_task.params["acquisition_weight"] == pytest.approx(0.3)
-    assert cfg.rewards.dense_task.params["approach_fraction"] == pytest.approx(0.3)
-    assert cfg.rewards.dense_task.params["bilateral_pull_fraction"] == pytest.approx(0.2)
+    assert cfg.rewards.dense_task.params["reach_std"] == pytest.approx(0.08)
+    assert cfg.rewards.dense_task.params["acquisition_weight"] == pytest.approx(0.6)
+    assert cfg.rewards.dense_task.params["approach_fraction"] == pytest.approx(0.5)
+    assert cfg.rewards.dense_task.params["bilateral_approach_fraction"] == pytest.approx(0.5)
+    assert cfg.rewards.dense_task.params["bilateral_grasp_fraction"] == pytest.approx(0.7)
+    assert cfg.rewards.dense_task.params["bilateral_pull_fraction"] == pytest.approx(0.8)
+    assert cfg.rewards.grasp_hold.weight == pytest.approx(0.2)
+    assert cfg.rewards.grasp_hold.params["bilateral_grasp_fraction"] == pytest.approx(0.8)
     assert cfg.rewards.dense_task.params["success_x_separation"] == pytest.approx(TAIL_SUCCESS_X_SEPARATION)
     assert cfg.terminations.success.params["threshold"] == pytest.approx(TAIL_SUCCESS_X_SEPARATION)
     assert cfg.terminations.success.func is shoelace_terminations.shoelace_success

@@ -18,7 +18,8 @@ budget to stay below `2**20` in this mode; increase the hashtable factor for tab
 `IsaacContrib-Shoelace-DualFranka` exposes the standalone Newton shoelace scene as a manager-based RL
 environment. The initial interface intentionally includes only dual-arm Cartesian actions, binary gripper
 actions, proprioceptive and tail observations, compact finger-tail signed-distance history, randomized resets,
-a unified dense task reward, small arm action penalties, and episode timeouts. The compact contact-related policy
+a dense progress reward, grasp retention and success rewards, small arm action penalties, and episode timeouts.
+The compact contact-related policy
 input contains:
 
 - four finger-tail signed surface distances, clipped to +/-2 mm and stacked over the current and previous two
@@ -30,53 +31,79 @@ input contains:
 The signed-distance history is derived directly from Newton collision candidates because coupled solvers do not
 expose the standard contact-force sensor. A pair without a collision candidate uses the positive 2 mm cap.
 
-One reward covers acquiring the tails and pulling each outward with its corresponding grasp. Let `H` be the
-Hamacher soft-AND, `A` the per-arm TCP proximity, `G` the filtered per-arm grasp quality, and `d` each tail's
+The dense reward covers approaching, grasping, and pulling the tails, with independent credit and a bilateral
+bonus in each phase. Let `H(a, b) = a * b / (a + b - a * b + 1e-6)` be the Hamacher soft-AND,
+`A` the per-arm TCP proximity, `G` the filtered per-arm grasp quality, and `d` each tail's
 outward X displacement from the first valid post-reset sample. The left arm pulls toward negative X, and the
 right arm toward positive X. Positions are relative to the fixed cable seam midpoint, so translating the shoe
 or the whole environment does not create progress. The default is:
 
 ```python
-acquire = H(A, 0.3).mean(dim=-1) + 0.7 * G.mean(dim=-1)
+A = 1 - tanh(tail_tcp_distance / 0.08)  # metres
+approach = 0.5 * A.mean(dim=-1) + 0.5 * H(A[:, 0], A[:, 1])
+grasp = 0.3 * G.mean(dim=-1) + 0.7 * H(G[:, 0], G[:, 1])
 scale = max((0.18 - initial_x_separation) / 2, 0.01)  # per environment, metres
 P = 0.5 * (1 + tanh(d / scale))
 per_arm_pull = H(G, P)
 bilateral_pull = H(per_arm_pull[:, 0], per_arm_pull[:, 1])
-pull = 0.8 * per_arm_pull.mean(dim=-1) + 0.2 * bilateral_pull
-potential = 0.3 * acquire + 0.7 * pull
+pull = 0.2 * per_arm_pull.mean(dim=-1) + 0.8 * bilateral_pull
+potential = 0.3 * approach + 0.3 * grasp + 0.4 * pull
 reward_rate = (potential - previous_potential) / step_dt
 ```
 
-`approach_fraction=0.3` provides partial acquisition credit before contact. The remaining acquisition budget
-rewards the two grasps independently and additively, without scaling their credit by TCP proximity. Each grasp
-requires both finger surfaces near contact, actual gripper closure, and low tail-TCP slip. The 0.10 s filter
-smooths contact flicker and also delays the response to release. Each arm's pull score uses only its own
-grasp and tail position. Moving the ungrasped tail cannot earn the other arm's pull credit.
+`acquisition_weight=0.6` and `approach_fraction=0.5` divide the potential into 30% approach, 30% grasp, and
+40% pull. The manager multiplies the returned rate by `step_dt` and the overall weight (10), giving maximum
+progress budgets of 3, 3, and 4. `bilateral_approach_fraction=0.5` and `bilateral_grasp_fraction=0.7` reserve
+half the approach budget and 70% of grasp acquisition for cooperation. Independent credit starts either arm;
+bringing the other arm into the same phase earns a larger increment. With ideal scores, one approached arm
+earns 0.75 of the approach budget and approaching the other adds 2.25. One grasp earns 0.45 of the acquisition
+grasp budget; both grasps earn 3. These are potential gains, not rewards paid on every stationary step.
 
-At fixed approach, the acquisition grasp contribution to the weighted potential is
-`1.05 * (G_left + G_right)`: one perfect grasp contributes 1.05 and two contribute 2.10. Partial grasps earn
-proportional credit, and either hand can be acquired first. These are cumulative gains as grasp quality rises,
-not a reward paid every step for holding still. Releasing a grasp removes its credit through the same signed
-potential difference. Pulling also contributes grasp credit because `P=0.5` at the initial tail position.
-This positive, smooth progress value gives feedback while pulling outward even below the reset baseline.
-It approaches one as the tail moves outward, rather than declaring the knot untied at a target distance.
-`bilateral_pull_fraction=0.2` reserves 20% of the pulling budget for the bilateral bonus; the other 80% is
-available independently to the two arms. Both grasping and actual outward motion increase the bilateral
-score, while stationary states stop earning reward once filtering settles. Set the fraction to zero to
-disable the bonus. References remain fixed throughout the episode, including releases and regrasping.
+Grasp credit remains independent of TCP proximity. Each grasp requires both finger surfaces near contact,
+actual gripper closure, and low tail-TCP slip. The 0.10 s filter smooths contact flicker and also delays the
+response to release. Each arm's pull score uses only its own grasp and tail position. Moving the ungrasped
+tail cannot earn the other arm's pull credit.
 
-Previously, the pulling score required both grasps and clamped separation progress to zero below its reset
-baseline. The new formula changes intermediate rewards while preserving maximum phase budgets. Current
-phase-fraction configurations and policy checkpoints remain loadable; migrate deprecated parameters as
-described below. Re-evaluate or retrain policies and compare grasp quality and geometric success rather
-than comparing old and new reward curves directly.
+`bilateral_pull_fraction=0.8` reserves 80% of pulling for cooperation and leaves 20% available independently.
+The smooth `P=0.5` at the initial tail position preserves outward feedback even below the reset baseline.
+It still grants some pull credit on acquisition: with the other hand ungrasped, one perfect stationary grasp
+adds 0.20 weighted pull potential, down from 1.40 in the previous defaults. It does not imply successful
+pulling. References remain fixed throughout the episode, including releases and regrasping. Each bilateral
+fraction can be set to zero to use only the corresponding per-arm mean.
 
-`acquisition_weight=0.3` allocates 30% of the potential to acquisition and 70% to pulling. The manager multiplies
-the returned rate by `step_dt` and the overall reward weight (10). Only one potential is differenced, without
-rate clipping or a stage-switch gate. For this dense term, a closed cycle of its full state has zero undiscounted
-total reward; stationary states give zero once the grasp filter settles. Invalid samples do not advance its
-state, and the first valid sample after each reset gives no dense reward. These are progress rewards, not a claim
-of optimal-policy invariance under discounting.
+Only the dense potential is differenced, without rate clipping or a stage-switch gate. A closed cycle of its
+full state has zero undiscounted dense reward; stationary states give zero once the filter settles. Invalid
+samples do not advance its state, and the first valid sample after reset gives no dense reward. This is a
+progress objective, not a claim of optimal-policy invariance under discounting.
+
+The independent `grasp_hold` term rewards time spent retaining physical grasps:
+
+```python
+hold = 0.2 * G.mean(dim=-1) + 0.8 * H(G[:, 0], G[:, 1])
+hold_reward = 0.2 * step_dt * hold
+```
+
+Its weight is a maximum reward rate of 0.2 per second: ideal bilateral retention pays 0.20 per second and
+one-sided retention pays 0.02. Empty closure earns approximately zero. It owns its filter, so disabling or
+reordering `dense_task` does not change retention evaluation. Invalid contact, closure, or slip inputs earn
+zero and preserve filter history; reset clears only the selected environments. When tuning contact or filter
+parameters, update both `dense_task.params` and `grasp_hold.params` to keep their grasp definitions aligned.
+Set `env.rewards.grasp_hold.weight=0` for a progress-only ablation.
+
+The `success` reward pays +5 on the existing geometric success termination, including success on the timeout
+step. Timeout alone pays no success reward. `mdp.shoelace_success_reward` divides the success flag by
+`step_dt`, so the manager's timestep multiplication leaves +5 per event. The environment then resets.
+Ideal retention throughout the current 10-second episode can contribute at most 2; completion earns a
+separate event reward. These are initial shaping budgets, not a guarantee that training will learn to pull.
+Evaluate simultaneous approach, continuous grasp duration, gripper switching, outward displacement, and
+geometric success when comparing runs.
+
+**Migration:** The observation/action interface is unchanged, but the reward objective and defaults changed.
+`approach_fraction` now linearly divides acquisition between the cooperative approach and grasp scores;
+the previous `H(A, approach_fraction)` saturation was removed. Existing parameter names remain accepted,
+but restoring their old values does not reproduce the old reward formula. Re-evaluate or retrain policies,
+configure the new bilateral fractions explicitly for custom tasks, and disable `grasp_hold` and `success`
+independently for ablations. Historical reward curves are not directly comparable.
 
 Two independent penalties regularize the 12 normalized arm commands before Cartesian scaling. Both select the
 `left_arm` and `right_arm` action terms by name and exclude binary gripper commands:
@@ -89,17 +116,17 @@ Two independent penalties regularize the 12 normalized arm commands before Carte
 The reward manager multiplies both penalties by `step_dt`, so the total per-step reward is:
 
 ```python
-reward = 10.0 * (potential - previous_potential) - step_dt * (
+reward = 10.0 * (potential - previous_potential) + hold_reward + 5.0 * success - step_dt * (
     0.001 * (arm_action - previous_arm_action).square().sum(dim=-1)
     + 0.001 * arm_action.square().sum(dim=-1)
 )
 ```
 
-The dense contribution is zero on its first valid sample as described above; action penalties still apply.
+The dense contribution is zero on its first valid sample as described above; other reward terms still apply.
 Action history resets to zero per environment, so the first command is compared with zero. The total reward
-therefore no longer has the dense term's zero-return closed-cycle property. These small initial weights have
+therefore does not have the dense term's zero-return closed-cycle property. These small initial weights have
 not been tuned through training. Adjust them independently with `env.rewards.arm_action_rate.weight` and
-`env.rewards.arm_action_magnitude.weight`; set both to zero to restore the previous reward objective.
+`env.rewards.arm_action_magnitude.weight`.
 
 The dense term writes nine phase metrics to `extras["log"]` on every policy step. RSL-RL prints their rollout
 averages in each training iteration and writes the same tags to TensorBoard:
@@ -137,8 +164,9 @@ physical approach distance, per-arm grasp/pull scores, actual separation, and su
 diagnostic replacements, not numerically equivalent signals. Reward calculations, including slip-sensitive
 grasp quality and the bilateral pull bonus, are unchanged by this logging reduction.
 
-The reward manager separately logs the weighted penalties as `Episode_Reward/arm_action_rate` and
-`Episode_Reward/arm_action_magnitude` when episodes reset.
+The reward manager separately logs `Episode_Reward/grasp_hold`, `Episode_Reward/success`,
+`Episode_Reward/arm_action_rate`, and `Episode_Reward/arm_action_magnitude` when episodes reset.
+These are episode sums divided by the configured episode duration, not raw event rewards.
 
 Success now uses `mdp.shoelace_success` and requires all of the following:
 
