@@ -18,7 +18,8 @@ budget to stay below `2**20` in this mode; increase the hashtable factor for tab
 `IsaacContrib-Shoelace-DualFranka` exposes the standalone Newton shoelace scene as a manager-based RL
 environment. The initial interface intentionally includes only dual-arm Cartesian actions, binary gripper
 actions, proprioceptive and tail observations, compact finger-tail signed-distance history, randomized resets,
-a dense progress reward, grasp retention and success rewards, small arm action penalties, and episode timeouts.
+dense task and pregrasp progress rewards, grasp retention and success rewards, small arm action penalties,
+and episode timeouts.
 The compact contact-related policy
 input contains:
 
@@ -71,10 +72,43 @@ adds 0.20 weighted pull potential, down from 1.40 in the previous defaults. It d
 pulling. References remain fixed throughout the episode, including releases and regrasping. Each bilateral
 fraction can be set to zero to use only the corresponding per-arm mean.
 
-Only the dense potential is differenced, without rate clipping or a stage-switch gate. A closed cycle of its
+The `dense_task` term differences one potential, without rate clipping or a stage-switch gate. A closed cycle of its
 full state has zero undiscounted dense reward; stationary states give zero once the filter settles. Invalid
 samples do not advance its state, and the first valid sample after reset gives no dense reward. This is a
 progress objective, not a claim of optimal-policy invariance under discounting.
+
+The independent `pregrasp` progress term bridges coarse approach and the first physical grasp. It uses the same
+three-segment tail centers and TCP positions as the policy's `tails_to_tcp` observation:
+
+```python
+alignment = exp(-(tail_tcp_distance / 0.015)**2)
+closure_gate = maximum(1 - (tail_tcp_distance / 0.01)**2, 0)**2
+closure = clip((0.01 - actual_finger_position) / (0.01 - 0.001), 0, 1)
+pregrasp_potential = (0.75 * alignment + 0.25 * closure_gate * closure).mean(dim=-1)
+pregrasp_reward = pregrasp_potential - previous_pregrasp_potential  # manager weight = 1
+```
+
+The 15 mm Gaussian width adds fine positional guidance inside the broader 80 mm approach scale. The closure
+gate is exactly zero at and beyond 10 mm and rises smoothly toward the TCP, so closing far from the tail adds
+no credit. Both terms reward each arm independently: ideal alignment contributes at most 0.375 per arm, and
+nearby actual closure adds at most 0.125 per arm. Their combined maximum potential is 1 across both arms,
+smaller than the existing physical grasp and pull budgets. A close command without actual joint motion does
+not change the closure score. The gate does not shrink as the gripper closes.
+
+This is a TCP-centered positional heuristic, not a test of tail orientation, collision-free capture, or physical
+grasping. Empty closure inside the gate can earn a small, bounded progress increment; it earns no repeated
+pregrasp reward for holding still and does not count as contact-based grasp, retention, or success. Opening or
+moving away removes the corresponding potential. Closed state cycles have zero undiscounted pregrasp return;
+discounted optimal-policy invariance is not claimed. Invalid distances or finger positions return zero without
+advancing history; the first valid sample after a per-environment reset seeds history without reset credit.
+
+The two components can be ablated without rescaling the other: set
+`env.rewards.pregrasp.params.closure_weight=0` for fine positional guidance alone, or set `alignment_weight=0`
+for gated closure alone. Set `env.rewards.pregrasp.weight=0` to recover the previous reward objective with all
+other terms unchanged. The default combines both components as an initial shaping candidate, not a trained
+result. Compare near-tail close-command frequency, contact-based grasp quality, and continuous retention
+duration; change one component at a time in follow-up experiments. Observation, action, and PPO interfaces
+are unchanged, so checkpoints remain loadable but need re-evaluation under the new objective.
 
 The independent `grasp_hold` term rewards time spent retaining physical grasps:
 
@@ -116,13 +150,13 @@ Two independent penalties regularize the 12 normalized arm commands before Carte
 The reward manager multiplies both penalties by `step_dt`, so the total per-step reward is:
 
 ```python
-reward = 10.0 * (potential - previous_potential) + hold_reward + 5.0 * success - step_dt * (
+reward = 10.0 * (potential - previous_potential) + pregrasp_reward + hold_reward + 5.0 * success - step_dt * (
     0.001 * (arm_action - previous_arm_action).square().sum(dim=-1)
     + 0.001 * arm_action.square().sum(dim=-1)
 )
 ```
 
-The dense contribution is zero on its first valid sample as described above; other reward terms still apply.
+Both progress terms are zero on their first valid samples as described above; other reward terms still apply.
 Action history resets to zero per environment, so the first command is compared with zero. The total reward
 therefore does not have the dense term's zero-return closed-cycle property. These small initial weights have
 not been tuned through training. Adjust them independently with `env.rewards.arm_action_rate.weight` and
@@ -164,7 +198,7 @@ physical approach distance, per-arm grasp/pull scores, actual separation, and su
 diagnostic replacements, not numerically equivalent signals. Reward calculations, including slip-sensitive
 grasp quality and the bilateral pull bonus, are unchanged by this logging reduction.
 
-The reward manager separately logs `Episode_Reward/grasp_hold`, `Episode_Reward/success`,
+The reward manager separately logs `Episode_Reward/pregrasp`, `Episode_Reward/grasp_hold`, `Episode_Reward/success`,
 `Episode_Reward/arm_action_rate`, and `Episode_Reward/arm_action_magnitude` when episodes reset.
 These are episode sums divided by the configured episode duration, not raw event rewards.
 

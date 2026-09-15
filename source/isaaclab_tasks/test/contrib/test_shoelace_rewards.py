@@ -6,6 +6,7 @@
 """Tests for the unified shoelace task reward and success condition."""
 
 import dataclasses
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -458,12 +459,132 @@ def test_grasp_hold_rewards_duration_and_cooperation_without_dense_term(
     assert (after_loss < 1.0e-5).all()
 
 
+@pytest.mark.parametrize("step_dt", [1.0 / 30.0, 1.0 / 60.0])
+@pytest.mark.parametrize("first_arm", [0, 1])
+def test_pregrasp_rewards_fine_alignment_and_only_nearby_actual_closure(
+    monkeypatch: pytest.MonkeyPatch, step_dt: float, first_arm: int
+) -> None:
+    """Either arm can earn bounded pregrasp progress without credit for far closure or repeated cycles."""
+    vectors = torch.full((1, 2, 3), 1.0)
+    robots = {
+        name: SimpleNamespace(data=SimpleNamespace(joint_pos=_proxy(torch.full((1, 1), 0.01))))
+        for name in ("robot_left", "robot_right")
+    }
+    env = SimpleNamespace(num_envs=1, device="cpu", step_dt=step_dt, scene=robots)
+    cfg = RewardsCfg().pregrasp
+    cfg.params["robot_cfgs"] = tuple(SimpleNamespace(name=name, joint_ids=[0]) for name in robots)
+    monkeypatch.setattr(shoelace_rewards, "tails_to_tcp", lambda *args: vectors.flatten(start_dim=1))
+    term = cfg.func(cfg, env)
+    positions = [robot.data.joint_pos.torch for robot in robots.values()]
+    history = []
+
+    def compute() -> float:
+        reward = (term(env, **cfg.params) * cfg.weight * step_dt).item()
+        history.append(reward)
+        return reward
+
+    assert compute() == 0.0
+    positions[first_arm].fill_(0.001)
+    assert compute() == 0.0  # Closing away from the tail has no pregrasp value.
+    positions[first_arm].fill_(0.01)
+    assert compute() == 0.0
+
+    vectors[0, first_arm] = torch.tensor([0.012, 0.0, 0.0])
+    expected_alignment = 0.375 * math.exp(-((0.012 / cfg.params["alignment_std"]) ** 2))
+    assert compute() == pytest.approx(expected_alignment)
+    positions[first_arm].fill_(0.001)
+    assert compute() == 0.0
+    positions[first_arm].fill_(0.01)
+    assert compute() == 0.0
+
+    vectors[0, first_arm, 0] = cfg.params["closure_radius"]
+    assert compute() > 0.0
+    positions[first_arm].fill_(0.001)
+    assert compute() == 0.0  # The compact closure gate is zero at its boundary.
+    positions[first_arm].fill_(0.01)
+    assert compute() == 0.0
+
+    vectors[0, first_arm, 0] = cfg.params["closure_radius"] / 2
+    assert compute() > 0.0
+    positions[first_arm].fill_(0.001)
+    # At half the radius, the gate is (1 - 1/4)^2 = 9/16.
+    assert compute() == pytest.approx(0.125 * 9 / 16, abs=1.0e-7)
+    assert compute() == 0.0  # Holding the same state does not earn an attempt reward repeatedly.
+    positions[first_arm].fill_(0.01)
+    assert compute() == pytest.approx(-0.125 * 9 / 16, abs=1.0e-7)
+
+    vectors[0, first_arm].zero_()
+    assert compute() > 0.0
+    assert sum(history) == pytest.approx(0.375, abs=1.0e-6)
+    positions[first_arm].fill_(0.001)
+    assert compute() == pytest.approx(0.125)
+    vectors[0, 1 - first_arm].zero_()
+    assert compute() == pytest.approx(0.375)
+    positions[1 - first_arm].fill_(0.001)
+    assert compute() == pytest.approx(0.125)
+    assert sum(history) == pytest.approx(1.0, abs=1.0e-6)
+
+    vectors.fill_(1.0)
+    for position in positions:
+        position.fill_(0.01)
+    assert compute() == pytest.approx(-1.0)
+    assert sum(history) == pytest.approx(0.0, abs=1.0e-6)
+
+
+def test_pregrasp_preserves_invalid_samples_and_resets_selected_envs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Invalid geometry or joint state cannot advance progress, and reset gives no new acquisition credit."""
+    vectors = torch.full((3, 6), 1.0)
+    robots = {
+        name: SimpleNamespace(data=SimpleNamespace(joint_pos=_proxy(torch.full((3, 1), 0.01))))
+        for name in ("robot_left", "robot_right")
+    }
+    env = SimpleNamespace(num_envs=3, device="cpu", step_dt=0.1, scene=robots)
+    cfg = RewardsCfg().pregrasp
+    cfg.params["robot_cfgs"] = tuple(SimpleNamespace(name=name, joint_ids=[0]) for name in robots)
+    monkeypatch.setattr(shoelace_rewards, "tails_to_tcp", lambda *args: vectors)
+    term = cfg.func(cfg, env)
+
+    def compute() -> torch.Tensor:
+        return term(env, **cfg.params) * cfg.weight * env.step_dt
+
+    torch.testing.assert_close(compute(), torch.zeros(3))
+    vectors.zero_()
+    torch.testing.assert_close(compute(), torch.full((3,), 0.75))
+    vectors[0] = torch.nan
+    for robot in robots.values():
+        robot.data.joint_pos.torch[1] = torch.inf
+        robot.data.joint_pos.torch[2] = 0.001
+    torch.testing.assert_close(compute(), torch.tensor([0.0, 0.0, 0.25]))
+    vectors[0].zero_()
+    for robot in robots.values():
+        robot.data.joint_pos.torch[1] = 0.01
+    torch.testing.assert_close(compute(), torch.zeros(3))
+
+    vectors[[0, 2]] = 1.0
+    term.reset([0])
+    torch.testing.assert_close(compute(), torch.tensor([0.0, 0.0, -1.0]))
+    for robot in robots.values():
+        robot.data.joint_pos.torch[1] = 0.001
+    torch.testing.assert_close(compute(), torch.tensor([0.0, 0.25, 0.0]))
+    term.reset()
+    torch.testing.assert_close(compute(), torch.zeros(3))
+
+    # Disabling closure leaves the alignment budget unchanged for a focused ablation.
+    cfg.params["closure_weight"] = 0.0
+    term.reset()
+    compute()
+    for robot in robots.values():
+        robot.data.joint_pos.torch[1] = 0.01
+    torch.testing.assert_close(compute(), torch.zeros(3))
+
+
 def test_task_config_uses_arm_penalties_and_matching_success_threshold() -> None:
     """Budget cooperative progress, time-based retention, and geometric completion separately."""
     cfg = ShoelaceEnvCfg()
 
     assert [field.name for field in dataclasses.fields(RewardsCfg)] == [
         "dense_task",
+        "pregrasp",
         "grasp_hold",
         "success",
         "arm_action_rate",
@@ -475,6 +596,12 @@ def test_task_config_uses_arm_penalties_and_matching_success_threshold() -> None
     assert cfg.rewards.arm_action_magnitude.weight == pytest.approx(-0.001)
     assert [field.name for field in dataclasses.fields(TerminationsCfg)] == ["success", "time_out"]
     assert cfg.rewards.dense_task.func is shoelace_rewards.dense_task_reward
+    assert cfg.rewards.pregrasp.func is shoelace_rewards.pregrasp_progress_reward
+    assert cfg.rewards.pregrasp.weight == pytest.approx(1.0)
+    assert cfg.rewards.pregrasp.params["alignment_std"] == pytest.approx(0.015)
+    assert cfg.rewards.pregrasp.params["closure_radius"] == pytest.approx(0.01)
+    assert cfg.rewards.pregrasp.params["alignment_weight"] == pytest.approx(0.75)
+    assert cfg.rewards.pregrasp.params["closure_weight"] == pytest.approx(0.25)
     assert cfg.rewards.dense_task.params["reach_std"] == pytest.approx(0.08)
     assert cfg.rewards.dense_task.params["acquisition_weight"] == pytest.approx(0.6)
     assert cfg.rewards.dense_task.params["approach_fraction"] == pytest.approx(0.5)

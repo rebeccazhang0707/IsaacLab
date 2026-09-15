@@ -309,6 +309,90 @@ class grasp_hold_reward(ManagerTermBase):
         return torch.where(finite, _bilateral_score(filtered, bilateral_grasp_fraction), 0.0)
 
 
+class pregrasp_progress_reward(ManagerTermBase):
+    """Bridge coarse approach and physical grasping with fine TCP alignment and gated closure.
+
+    This is a positional pregrasp heuristic, not evidence of contact or tail-orientation alignment.
+    Each arm earns progress independently; stationary states pay zero and releases remove closure
+    credit. The contact-based grasp and retention terms remain responsible for physical grasp quality.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv) -> None:
+        super().__init__(cfg, env)
+        self._previous_potential = torch.full((env.num_envs,), torch.nan, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        """Clear selected baselines so the next valid sample gives no reset credit.
+
+        Args:
+            env_ids: Environments to reset. ``None`` resets all environments.
+        """
+        self._previous_potential[slice(None) if env_ids is None else env_ids] = torch.nan
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        alignment_std: float,
+        closure_radius: float,
+        open_position: float,
+        closed_position: float,
+        cable_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
+        robot_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
+        alignment_weight: float = 0.75,
+        closure_weight: float = 0.25,
+    ) -> torch.Tensor:
+        """Return the signed rate of fine alignment and nearby actual closure [1/s].
+
+        Args:
+            env: Task environment.
+            alignment_std: Gaussian width for TCP-to-tail-center distance [m].
+            closure_radius: TCP-centered radius beyond which closure earns no credit [m].
+                The gate is ``max(1 - (distance / radius)**2, 0)**2`` and is smooth at its boundary.
+            open_position: Driven finger-joint position when open [m].
+            closed_position: Driven finger-joint position when closed [m].
+            cable_cfgs: Left and right cable scene entities.
+            robot_cfgs: Left and right hand and finger scene entities.
+            alignment_weight: Nonnegative fine-alignment potential budget, averaged over the two arms.
+            closure_weight: Nonnegative gated-closure potential budget, averaged over the two arms.
+                Zero disables closure shaping without changing the alignment budget.
+
+        Returns:
+            Signed progress rates [1/s], shape [N]. The manager's ``step_dt`` multiplication cancels
+            the timestep division. The potential is bounded by the sum of the two component weights.
+            Invalid inputs pay zero and preserve history; the first valid sample after reset pays zero.
+
+        Raises:
+            ValueError: If widths are not finite and positive, component weights are not finite and
+                nonnegative, or the open position does not exceed the closed position.
+        """
+        if not all(math.isfinite(value) and value > 0.0 for value in (alignment_std, closure_radius)):
+            raise ValueError("alignment_std and closure_radius must be finite and positive")
+        if not all(math.isfinite(value) and value >= 0.0 for value in (alignment_weight, closure_weight)):
+            raise ValueError("alignment_weight and closure_weight must be finite and nonnegative")
+        if (
+            not all(math.isfinite(value) for value in (open_position, closed_position))
+            or open_position <= closed_position
+        ):
+            raise ValueError("Gripper positions must be finite with open_position greater than closed_position")
+
+        vectors = tails_to_tcp(env, cable_cfgs, robot_cfgs).reshape(env.num_envs, 2, 3)
+        distance = torch.linalg.vector_norm(vectors, dim=-1)
+        positions = torch.stack(
+            [env.scene[cfg.name].data.joint_pos.torch[:, cfg.joint_ids[0]] for cfg in robot_cfgs], dim=1
+        )
+        finite = torch.isfinite(distance).all(dim=1) & torch.isfinite(positions).all(dim=1)
+        closure = ((open_position - positions) / (open_position - closed_position)).clamp(0.0, 1.0)
+        alignment = torch.exp(-torch.square(distance / alignment_std))
+        # A compact positional gate cannot reward closing far away, even before contact is observable.
+        closure_gate = (1.0 - torch.square(distance / closure_radius)).clamp_min(0.0).square()
+        potential = (alignment_weight * alignment + closure_weight * closure_gate * closure).mean(dim=1)
+
+        valid = finite & torch.isfinite(self._previous_potential)
+        progress = torch.where(valid, potential - self._previous_potential, 0.0)
+        self._previous_potential.copy_(torch.where(finite, potential, self._previous_potential))
+        return progress / env.step_dt
+
+
 def _arm_action_squared_sum(env: ManagerBasedRLEnv, actions: torch.Tensor) -> torch.Tensor:
     """Select arm commands by name so action reordering cannot include grippers."""
     term_slices: dict[str, slice] = {}

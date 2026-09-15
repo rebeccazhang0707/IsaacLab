@@ -277,6 +277,20 @@ class RewardsCfg:
             "robot_cfgs": ROBOT_CFGS,
         },
     )
+    pregrasp = RewTerm(
+        func=mdp.pregrasp_progress_reward,
+        weight=1.0,
+        params={
+            "alignment_std": 0.015,
+            "closure_radius": 0.01,
+            "alignment_weight": 0.75,
+            "closure_weight": 0.25,
+            "open_position": GRIPPER_OPEN_POSITION,
+            "closed_position": GRIPPER_CLOSED_POSITION,
+            "cable_cfgs": CABLE_CFGS,
+            "robot_cfgs": ROBOT_CFGS,
+        },
+    )
     grasp_hold = RewTerm(
         func=mdp.grasp_hold_reward,
         weight=0.2,
