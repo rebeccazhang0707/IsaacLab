@@ -50,16 +50,19 @@ or the whole environment does not create progress. The default is:
 A = 1 - tanh(tail_tcp_distance / 0.08)  # metres
 approach = 0.5 * A.mean(dim=-1) + 0.5 * H(A[:, 0], A[:, 1])
 grasp = 0.3 * G.mean(dim=-1) + 0.7 * H(G[:, 0], G[:, 1])
+acquisition_potential = 0.3 * approach + 0.3 * grasp
 scale = max((0.18 - initial_x_separation) / 2, 0.01)  # per environment, metres
-P = 0.5 * (1 + tanh(d / scale))
-per_arm_pull = H(G, P)
-bilateral_pull = H(per_arm_pull[:, 0], per_arm_pull[:, 1])
-pull = 0.2 * per_arm_pull.mean(dim=-1) + 0.8 * bilateral_pull
-potential = 0.3 * approach + 0.3 * grasp + 0.4 * pull
-reward_rate = (potential - previous_potential) / step_dt
+P = clip(d / scale, 0, 1)
+records = concatenate((P, H(P[:, 0], P[:, 1])[:, None]), dim=1)
+new_records = maximum(records - best_records, 0)
+eligible = (raw_grasp >= 0.2) & (G >= 0.2)
+pull_increment = 0.2 * (new_records[:, :2] * eligible).mean(dim=-1)
+pull_increment += 0.8 * new_records[:, 2] * eligible.all(dim=-1)
+best_records = maximum(best_records, records)  # also advance without grasps
+reward_rate = (acquisition_potential - previous_acquisition_potential + 0.4 * pull_increment) / step_dt
 ```
 
-`acquisition_weight=0.6` and `approach_fraction=0.5` divide the potential into 30% approach, 30% grasp, and
+`acquisition_weight=0.6` and `approach_fraction=0.5` divide the progress budget into 30% approach, 30% grasp, and
 40% pull. The manager multiplies the returned rate by `step_dt` and the overall weight (10), giving maximum
 progress budgets of 3, 3, and 4. `bilateral_approach_fraction=0.5` and `bilateral_grasp_fraction=0.7` reserve
 half the approach budget and 70% of grasp acquisition for cooperation. Independent credit starts either arm;
@@ -68,21 +71,35 @@ earns 0.75 of the approach budget and approaching the other adds 2.25. One grasp
 grasp budget; both grasps earn 3. These are potential gains, not rewards paid on every stationary step.
 
 Grasp credit remains independent of TCP proximity. Each grasp requires both finger surfaces near contact,
-actual gripper closure, and low tail-TCP slip. The 0.10 s filter smooths contact flicker and also delays the
-response to release. Each arm's pull score uses only its own grasp and tail position. Moving the ungrasped
-tail cannot earn the other arm's pull credit.
+actual gripper closure, and low tail-TCP slip. Contact scoring tolerates up to 1 mm of negative signed distance
+(`contact_penetration_tolerance=0.001`) to avoid penalizing bounded contact-solver penetration under load:
+
+```python
+error = maximum(signed_distance, 0) + maximum(-signed_distance - 0.001, 0)
+finger_contact = exp(-(error / 0.0005)**2)
+```
+
+Positive gaps and penetration beyond the tolerance still reduce the score. The tolerance is a task-local
+calibration for the current coupled solver, not proof of force closure or permission to accept arbitrary
+penetration. Changing the cable geometry or solver requires checking it again. Empty closure, a missing
+finger contact, and high relative slip remain insufficient. The 0.10 s grasp filter smooths contact flicker;
+pull eligibility additionally checks current raw quality so a stale filtered grasp cannot pay for release motion.
 
 `bilateral_pull_fraction=0.8` reserves 80% of pulling for cooperation and leaves 20% available independently.
-The smooth `P=0.5` at the initial tail position preserves outward feedback even below the reset baseline.
-It still grants some pull credit on acquisition: with the other hand ungrasped, one perfect stationary grasp
-adds 0.20 weighted pull potential, down from 1.40 in the previous defaults. It does not imply successful
-pulling. References remain fixed throughout the episode, including releases and regrasping. Each bilateral
-fraction can be set to zero to use only the corresponding per-arm mean.
+With `pull_use_high_water_mark=True`, pull starts at zero: acquisition alone earns no pull credit. Only a
+new physical record with sufficient grasp quality earns an increment; `pull_grasp_threshold=0.2` controls
+eligibility. The bilateral record uses both current physical progresses, not independent historical maxima,
+and requires both current grasps. Records advance even during ungrasped motion, preventing retrospective
+payment on regrasp. They never reset on release or inward motion. Repeated inward/outward cycles cannot
+earn the same pull credit twice; progress below the reset baseline or past the per-arm target pays nothing.
+This deliberately trades below-baseline recovery feedback for a bounded, non-repeatable pull budget.
+Each bilateral fraction can be set to zero to use only the corresponding per-arm mean.
 
-The `dense_task` term differences one potential, without rate clipping or a stage-switch gate. A closed cycle of its
-full state has zero undiscounted dense reward; stationary states give zero once the filter settles. Invalid
-samples do not advance its state, and the first valid sample after reset gives no dense reward. This is a
-progress objective, not a claim of optimal-policy invariance under discounting.
+Approach and grasp retain their signed potential differences, including penalties for losing a grasp or
+moving away. Physical pull credit is never clawed back merely because contact quality drops. Stationary
+states pay no dense reward once the filter settles. Invalid samples preserve history, and the first valid
+sample after reset seeds without reward. New-record pull can pay on the first physical cycle but not on
+subsequent identical cycles. No discounted optimal-policy invariance is claimed.
 
 The independent `pregrasp` progress term bridges coarse approach and the first physical grasp. It uses the same
 three-segment tail centers and TCP positions as the policy's `tails_to_tcp` observation:
@@ -121,29 +138,41 @@ The independent `grasp_hold` term rewards time spent retaining physical grasps:
 
 ```python
 hold = 0.5 * G.mean(dim=-1) + 0.5 * H(G[:, 0], G[:, 1])
-hold_reward = 1.0 * step_dt * hold
+full_rate_time = minimum(step_dt * hold, maximum(2.0 - full_rate_time_used, 0))
+hold_reward = 1.0 * (0.2 * step_dt * hold + 0.8 * full_rate_time)
+full_rate_time_used += full_rate_time
 ```
 
-Its weight is a maximum reward rate of 1.0 per second: ideal bilateral retention pays 1.0 per second and
-one-sided retention pays 0.25. Empty closure earns approximately zero. It owns its filter, so disabling or
-reordering `dense_task` does not change retention evaluation. Invalid contact, closure, or slip inputs earn
-zero and preserve filter history; reset clears only the selected environments. When tuning contact or filter
-parameters, update both `dense_task.params` and `grasp_hold.params` to keep their grasp definitions aligned.
+Its weight is a maximum reward rate of 1.0 per second: initially, ideal bilateral retention pays 1.0 per second
+and one-sided retention pays 0.25. `full_reward_duration=2.0` limits full-rate **quality-weighted** time per
+episode, not wall-clock time since reset or first contact. Afterwards, `sustained_reward_fraction=0.2`
+preserves a smaller maintenance incentive. Release and regrasp do not renew the budget. A step crossing the
+budget boundary is split exactly, independent of policy timestep. Empty closure earns approximately zero.
+It owns its filter and budget, so disabling or reordering `dense_task` does not change retention evaluation.
+Invalid contact, closure, or slip inputs earn zero and preserve filter/budget state; reset clears only selected
+environments. When tuning contact or filter parameters, update both `dense_task.params` and
+`grasp_hold.params` to keep their grasp definitions aligned.
 Set `env.rewards.grasp_hold.weight=0` for a progress-only ablation.
-To restore the previous retention budget, set `env.rewards.grasp_hold.weight=0.2` and
-`env.rewards.grasp_hold.params.bilateral_grasp_fraction=0.8`. The current defaults increase ideal bilateral
-retention credit fivefold and single-arm credit 12.5-fold, without changing the physical grasp criteria.
+Set `env.rewards.grasp_hold.params.full_reward_duration=None` to disable the time budget for an ablation.
 
 The `success` reward pays +5 on the existing geometric success termination, including success on the timeout
 step. Timeout alone pays no success reward. `mdp.shoelace_success_reward` divides the success flag by
 `step_dt`, so the manager's timestep multiplication leaves +5 per event. The environment then resets.
-Ideal retention throughout the current 10-second episode can contribute at most 10; completion earns a
-separate event reward. Holding still can therefore compete with task completion. These are acquisition
-and retention tuning budgets, not a guarantee that training will learn to pull.
+Ideal bilateral retention throughout the current 10-second episode contributes at most 3.6 instead of 10;
+ideal single-arm retention contributes at most 2.1 instead of 2.5. Completion earns a separate event reward.
+These are acquisition and retention tuning budgets, not a guarantee that training will learn to pull.
 Evaluate simultaneous approach, continuous grasp duration, gripper switching, outward displacement, and
 geometric success when comparing runs.
 
 **Migration:** The observation/action interface is unchanged, but the reward objective and defaults changed.
+Existing checkpoints remain loadable; re-evaluate them and use a separate training run because return values
+and grasp-score curves are not directly comparable. To reproduce the pre-loaded-pull objective, set
+`contact_penetration_tolerance=0.0` in both dense and hold terms, `dense_task.params.pull_use_high_water_mark=False`,
+and `grasp_hold.params.full_reward_duration=None`. These are also independent ablation switches; change one
+step at a time when attributing training improvements. Old saved parameter dictionaries retain legacy behavior
+because the new callable options default to zero penetration tolerance, legacy pull, and no hold budget.
+
+For migration from older acquisition formulas:
 `approach_fraction` now linearly divides acquisition between the cooperative approach and grasp scores;
 the previous `H(A, approach_fraction)` saturation was removed. Existing parameter names remain accepted,
 but restoring their old values does not reproduce the old reward formula. Re-evaluate or retrain policies,
@@ -161,7 +190,8 @@ Two independent penalties regularize the 12 normalized arm commands before Carte
 The reward manager multiplies both penalties by `step_dt`, so the total per-step reward is:
 
 ```python
-reward = 10.0 * (potential - previous_potential) + pregrasp_reward + hold_reward + 5.0 * success - step_dt * (
+reward = 10.0 * (acquisition_potential - previous_acquisition_potential + 0.4 * pull_increment)
+reward += pregrasp_reward + hold_reward + 5.0 * success - step_dt * (
     0.001 * (arm_action - previous_arm_action).square().sum(dim=-1)
     + 0.001 * arm_action.square().sum(dim=-1)
 )
@@ -169,7 +199,7 @@ reward = 10.0 * (potential - previous_potential) + pregrasp_reward + hold_reward
 
 Both progress terms are zero on their first valid samples as described above; other reward terms still apply.
 Action history resets to zero per environment, so the first command is compared with zero. The total reward
-therefore does not have the dense term's zero-return closed-cycle property. These small initial weights have
+therefore includes ongoing maintenance rewards as well as bounded progress credit. These small initial weights have
 not been tuned through training. Adjust them independently with `env.rewards.arm_action_rate.weight` and
 `env.rewards.arm_action_magnitude.weight`.
 
@@ -184,8 +214,8 @@ to the grasp-gated score when checking whether a tail actually moved outward:
 | `grasp_both` | Hamacher soft-AND of both filtered grasp qualities in [0, 1]. |
 | `pull_x_separation_m` | Absolute two-tail X separation [m]; 0.18 m is one necessary success condition. |
 | `pull_left_displacement_m`, `pull_right_displacement_m` | Signed outward tail displacement from the episode baseline [m], independent of grasp quality. Positive means outward; negative means inward. |
-| `pull_left_score`, `pull_right_score` | Each tail's progress gated by its own filtered grasp, in [0, 1]; not a distance or success rate. |
-| `pull_left`, `pull_right` | Deprecated aliases of `pull_left_score` and `pull_right_score`; their values have not changed. |
+| `pull_left_score`, `pull_right_score` | Legacy `H(G, 0.5*(1+tanh(d/scale)))` diagnostic in [0, 1]; not a distance, actual new-record reward, or success rate. |
+| `pull_left`, `pull_right` | Deprecated aliases, equal to the corresponding `pull_left_score` and `pull_right_score` values. |
 | `success_rate` | Mean success over each environment's most recent completed episode. |
 | `valid_fraction` | Fraction of environments whose checked reward inputs contain no NaN/Inf; normally 1.0. |
 
@@ -195,8 +225,8 @@ The baseline is the first finite reward sample after that environment resets, no
 `0.02` means 2 cm farther outward than the baseline, `-0.01` means 1 cm inward, and acquiring a stationary
 grasp leaves displacement at zero. Releasing and regrasping do not rebase it. The displacement is neither
 clipped nor grasp-gated: passive cable motion also counts, so it does not prove that the gripper caused
-the motion. A stationary ideal grasp can still produce a pull **score** near 0.5 because the reward's
-internal progress starts at 0.5; the new displacement metrics do not change that reward formula.
+the motion. A stationary ideal grasp can still produce a legacy pull **score** near 0.5. In high-water mode,
+that score is diagnostic only; the actual pull reward requires a new physical record and is zero at rest.
 
 `finite` is the internal per-environment numerical mask. It checks tail-to-TCP distances, finger-tail signed
 distances, relative speeds, closure fractions, tail X separation, and outward tail offsets. If any checked
@@ -220,11 +250,11 @@ across environments can cancel in the average.
 averages of `grasp_left` and `grasp_right`: different environments may hold different single tails.
 
 Dashboard migration: use `pull_left_displacement_m` and `pull_right_displacement_m` for physical progress,
-and `pull_left_score` and `pull_right_score` when inspecting the reward's internal scores. The old
+and `pull_left_score` and `pull_right_score` only when inspecting the legacy grasp-gated diagnostic. The old
 `pull_left` and `pull_right` tags remain available as deprecated score aliases for compatibility; do not
 interpret old curves as meters or compare score and displacement values directly. Existing event files
-are not rewritten. Reward calculations, including slip-sensitive grasp quality and the bilateral pull
-bonus, are unchanged by this logging update.
+are not rewritten. The score equation and aliases are retained, but the new penetration tolerance changes
+their grasp input; historical grasp and score curves require matching reward parameters for comparison.
 
 The reward manager separately logs `Episode_Reward/pregrasp`, `Episode_Reward/grasp_hold`, `Episode_Reward/success`,
 `Episode_Reward/arm_action_rate`, and `Episode_Reward/arm_action_magnitude` when episodes reset.
