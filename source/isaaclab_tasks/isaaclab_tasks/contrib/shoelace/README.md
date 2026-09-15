@@ -1,9 +1,16 @@
 # Dual-Franka shoelace task
 
 For multi-GPU training, `--num_envs` is the number of environments on each GPU.
-RSL-RL collects 16 steps per environment before each PPO update. With 8 GPUs and
-1024 environments per GPU, each iteration collects 131,072 transitions in total.
-Use `agent.num_steps_per_env=32` to restore the previous rollout length.
+RSL-RL collects 8 steps per environment before each PPO update. With 8 GPUs and
+1024 environments per GPU, each iteration collects 65,536 transitions in total.
+Override the rollout length with, for example, `agent.num_steps_per_env=32`.
+
+The PPO actor learns its Gaussian exploration standard deviation in log space (`std_type="log"`), with
+initial standard deviation 1.0. This changes the exploration parameterization, not the action interface or
+deterministic mean-action evaluation. When loading a checkpoint trained with scalar standard deviation,
+use its saved agent configuration or set `agent.actor.distribution_cfg.std_type=scalar`; scalar and log
+parameterizations use different checkpoint parameter names.
+
 The outer Newton collision pipeline reserves at least `max(1_000_000, 8192 * num_envs)`
 triangle pairs per process. The internal ADMM pipeline keeps 1,000,000 triangle pairs
 and scales its contact-reduction hashtable factor to reserve at least 2048 slots per
