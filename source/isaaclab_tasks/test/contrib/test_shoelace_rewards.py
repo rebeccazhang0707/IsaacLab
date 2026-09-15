@@ -424,8 +424,8 @@ def test_grasp_hold_rewards_duration_and_cooperation_without_dense_term(
     stable_reward = compute()
     duration_steps = round(1.0 / step_dt)
     stable_total = torch.stack([compute() for _ in range(duration_steps)]).sum(dim=0)
-    # After the manager applies dt and weight, one second pays 0.2 for both and 0.02 for either alone.
-    torch.testing.assert_close(stable_total, torch.tensor([0.2, 0.02, 0.02, 0.0]), atol=1.0e-6, rtol=1.0e-4)
+    # After the manager applies dt and weight, one second pays 1.0 for both and 0.25 for either alone.
+    torch.testing.assert_close(stable_total, torch.tensor([1.0, 0.25, 0.25, 0.0]), atol=1.0e-6, rtol=1.0e-4)
 
     signed_distance[0] = torch.nan
     relative_speed[1] = torch.inf
@@ -608,8 +608,8 @@ def test_task_config_uses_arm_penalties_and_matching_success_threshold() -> None
     assert cfg.rewards.dense_task.params["bilateral_approach_fraction"] == pytest.approx(0.5)
     assert cfg.rewards.dense_task.params["bilateral_grasp_fraction"] == pytest.approx(0.7)
     assert cfg.rewards.dense_task.params["bilateral_pull_fraction"] == pytest.approx(0.8)
-    assert cfg.rewards.grasp_hold.weight == pytest.approx(0.2)
-    assert cfg.rewards.grasp_hold.params["bilateral_grasp_fraction"] == pytest.approx(0.8)
+    assert cfg.rewards.grasp_hold.weight == pytest.approx(1.0)
+    assert cfg.rewards.grasp_hold.params["bilateral_grasp_fraction"] == pytest.approx(0.5)
     assert cfg.rewards.dense_task.params["success_x_separation"] == pytest.approx(TAIL_SUCCESS_X_SEPARATION)
     assert cfg.terminations.success.params["threshold"] == pytest.approx(TAIL_SUCCESS_X_SEPARATION)
     assert cfg.terminations.success.func is shoelace_terminations.shoelace_success

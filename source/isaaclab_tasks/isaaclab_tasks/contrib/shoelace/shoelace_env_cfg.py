@@ -293,14 +293,14 @@ class RewardsCfg:
     )
     grasp_hold = RewTerm(
         func=mdp.grasp_hold_reward,
-        weight=0.2,
+        weight=1.0,
         params={
             "contact_std": 5.0e-4,
             "relative_speed_std": 0.08,
             "grasp_filter_time_constant": 0.10,
             "open_position": GRIPPER_OPEN_POSITION,
             "closed_position": GRIPPER_CLOSED_POSITION,
-            "bilateral_grasp_fraction": 0.8,
+            "bilateral_grasp_fraction": 0.5,
             "cable_cfgs": CABLE_CFGS,
             "robot_cfgs": ROBOT_CFGS,
         },

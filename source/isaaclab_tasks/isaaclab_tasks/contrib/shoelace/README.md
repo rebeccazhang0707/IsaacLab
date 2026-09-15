@@ -113,22 +113,26 @@ are unchanged, so checkpoints remain loadable but need re-evaluation under the n
 The independent `grasp_hold` term rewards time spent retaining physical grasps:
 
 ```python
-hold = 0.2 * G.mean(dim=-1) + 0.8 * H(G[:, 0], G[:, 1])
-hold_reward = 0.2 * step_dt * hold
+hold = 0.5 * G.mean(dim=-1) + 0.5 * H(G[:, 0], G[:, 1])
+hold_reward = 1.0 * step_dt * hold
 ```
 
-Its weight is a maximum reward rate of 0.2 per second: ideal bilateral retention pays 0.20 per second and
-one-sided retention pays 0.02. Empty closure earns approximately zero. It owns its filter, so disabling or
+Its weight is a maximum reward rate of 1.0 per second: ideal bilateral retention pays 1.0 per second and
+one-sided retention pays 0.25. Empty closure earns approximately zero. It owns its filter, so disabling or
 reordering `dense_task` does not change retention evaluation. Invalid contact, closure, or slip inputs earn
 zero and preserve filter history; reset clears only the selected environments. When tuning contact or filter
 parameters, update both `dense_task.params` and `grasp_hold.params` to keep their grasp definitions aligned.
 Set `env.rewards.grasp_hold.weight=0` for a progress-only ablation.
+To restore the previous retention budget, set `env.rewards.grasp_hold.weight=0.2` and
+`env.rewards.grasp_hold.params.bilateral_grasp_fraction=0.8`. The current defaults increase ideal bilateral
+retention credit fivefold and single-arm credit 12.5-fold, without changing the physical grasp criteria.
 
 The `success` reward pays +5 on the existing geometric success termination, including success on the timeout
 step. Timeout alone pays no success reward. `mdp.shoelace_success_reward` divides the success flag by
 `step_dt`, so the manager's timestep multiplication leaves +5 per event. The environment then resets.
-Ideal retention throughout the current 10-second episode can contribute at most 2; completion earns a
-separate event reward. These are initial shaping budgets, not a guarantee that training will learn to pull.
+Ideal retention throughout the current 10-second episode can contribute at most 10; completion earns a
+separate event reward. Holding still can therefore compete with task completion. These are acquisition
+and retention tuning budgets, not a guarantee that training will learn to pull.
 Evaluate simultaneous approach, continuous grasp duration, gripper switching, outward displacement, and
 geometric success when comparing runs.
 
