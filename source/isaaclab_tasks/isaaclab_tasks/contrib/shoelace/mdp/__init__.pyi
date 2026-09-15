@@ -13,6 +13,8 @@ __all__ = [
     "pregrasp_progress_reward",
     "reset_arm_joints",
     "reset_shoe_position",
+    "shoelace_bilateral_pull_success",
+    "shoelace_grasp_quality",
     "shoelace_success",
     "shoelace_success_reward",
     "tail_tcp_relative_speed",
@@ -28,7 +30,8 @@ from .rewards import (
     dense_task_reward,
     grasp_hold_reward,
     pregrasp_progress_reward,
+    shoelace_grasp_quality,
     shoelace_success_reward,
 )
-from .terminations import shoelace_success, tail_x_separation_success
+from .terminations import shoelace_bilateral_pull_success, shoelace_success, tail_x_separation_success
 from isaaclab.envs.mdp import *

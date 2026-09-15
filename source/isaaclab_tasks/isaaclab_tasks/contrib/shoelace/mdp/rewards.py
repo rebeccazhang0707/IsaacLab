@@ -50,7 +50,7 @@ def arm_action_rate_l2(env: ManagerBasedRLEnv) -> torch.Tensor:
 
 
 def shoelace_success_reward(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """Return the geometric success flag as an event rate [1/s].
+    """Return the configured success flag as an event rate [1/s].
 
     The reward manager cancels ``step_dt``, so its weight is the reward per successful episode.
     The environment resets after success; timeout alone earns no completion reward.
@@ -62,6 +62,57 @@ def shoelace_success_reward(env: ManagerBasedRLEnv) -> torch.Tensor:
         Success event rates [1/s], shape [N].
     """
     return env.termination_manager.get_term("success").float() / env.step_dt
+
+
+def shoelace_grasp_quality(
+    env: ManagerBasedRLEnv,
+    contact_std: float,
+    relative_speed_std: float,
+    open_position: float,
+    closed_position: float,
+    cable_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
+    robot_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
+    contact_penetration_tolerance: float = 0.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute shared unfiltered grasp quality for acquisition, retention, and success.
+
+    Args:
+        env: Shoelace environment with current finger-tail contact observations.
+        contact_std: Finger-tail surface-distance width [m].
+        relative_speed_std: Tail-to-TCP relative-speed width [m/s].
+        open_position: Open finger joint position [m].
+        closed_position: Closed finger joint position [m].
+        cable_cfgs: Left and right cable scene entities.
+        robot_cfgs: Left and right robot entities with resolved finger joint and hand body indices.
+        contact_penetration_tolerance: Allowed contact-solver penetration [m].
+
+    Returns:
+        Raw grasp qualities in robot-arm order, shape [N, 2], and finite-input flags, shape [N].
+        Quality combines two-finger contact, actual closure, and low relative slip, not measured force closure.
+
+    Raises:
+        ValueError: If contact penetration tolerance is not finite and nonnegative.
+    """
+    if not math.isfinite(contact_penetration_tolerance) or contact_penetration_tolerance < 0.0:
+        raise ValueError("contact_penetration_tolerance must be finite and nonnegative")
+    signed_distance = finger_tail_signed_distance(env).reshape(env.num_envs, 2, 2)
+    relative_speed = tail_tcp_relative_speed(env, cable_cfgs, robot_cfgs)
+    positions = torch.stack(
+        [env.scene[cfg.name].data.joint_pos.torch[:, cfg.joint_ids[0]] for cfg in robot_cfgs], dim=1
+    )
+    closure = ((open_position - positions) / max(open_position - closed_position, 1.0e-6)).clamp(0.0, 1.0)
+    finite = (
+        torch.isfinite(signed_distance).all(dim=(1, 2))
+        & torch.isfinite(relative_speed).all(dim=1)
+        & torch.isfinite(closure).all(dim=1)
+    )
+    # Tolerate bounded solver penetration under load, without rewarding gaps or deeper penetration.
+    contact_error = signed_distance.clamp_min(0.0) + (-signed_distance - contact_penetration_tolerance).clamp_min(0.0)
+    finger_contact = torch.exp(-torch.square(contact_error / max(contact_std, 1.0e-6)))
+    contact = _hamacher_product(finger_contact[:, :, 0], finger_contact[:, :, 1])
+    grasp = _hamacher_product(contact, closure)
+    motion_match = 1.0 - torch.tanh(relative_speed / max(relative_speed_std, 1.0e-6))
+    return _hamacher_product(grasp, motion_match), finite
 
 
 class dense_task_reward(ManagerTermBase):
@@ -191,7 +242,7 @@ class dense_task_reward(ManagerTermBase):
         # Per-arm tensors follow robot order (left, right), which is opposite to the cable naming.
         tail_vectors = tails_to_tcp(env, cable_cfgs, robot_cfgs).reshape(env.num_envs, 2, 3)
         tail_distances = torch.linalg.vector_norm(tail_vectors, dim=-1)
-        per_gripper_grasp, grasp_finite = _grasp_quality(
+        per_gripper_grasp, grasp_finite = shoelace_grasp_quality(
             env,
             contact_std,
             relative_speed_std,
@@ -368,7 +419,7 @@ class grasp_hold_reward(ManagerTermBase):
             raise ValueError("full_reward_duration must be None or finite and nonnegative")
         if not 0.0 <= sustained_reward_fraction <= 1.0:
             raise ValueError("sustained_reward_fraction must be in [0, 1]")
-        grasp, finite = _grasp_quality(
+        grasp, finite = shoelace_grasp_quality(
             env,
             contact_std,
             relative_speed_std,
@@ -487,36 +538,6 @@ def _arm_action_squared_sum(env: ManagerBasedRLEnv, actions: torch.Tensor) -> to
     )
 
 
-def _grasp_quality(
-    env: ManagerBasedRLEnv,
-    contact_std: float,
-    relative_speed_std: float,
-    open_position: float,
-    closed_position: float,
-    cable_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
-    robot_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
-    contact_penetration_tolerance: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Share physical grasp criteria between acquisition and independently evaluated retention."""
-    if not math.isfinite(contact_penetration_tolerance) or contact_penetration_tolerance < 0.0:
-        raise ValueError("contact_penetration_tolerance must be finite and nonnegative")
-    signed_distance = finger_tail_signed_distance(env).reshape(env.num_envs, 2, 2)
-    relative_speed = tail_tcp_relative_speed(env, cable_cfgs, robot_cfgs)
-    closure = _gripper_closed_fraction(env, robot_cfgs, open_position, closed_position)
-    finite = (
-        torch.isfinite(signed_distance).all(dim=(1, 2))
-        & torch.isfinite(relative_speed).all(dim=1)
-        & torch.isfinite(closure).all(dim=1)
-    )
-    # Tolerate bounded solver penetration under load, without rewarding gaps or deeper penetration.
-    contact_error = signed_distance.clamp_min(0.0) + (-signed_distance - contact_penetration_tolerance).clamp_min(0.0)
-    finger_contact = torch.exp(-torch.square(contact_error / max(contact_std, 1.0e-6)))
-    contact = _hamacher_product(finger_contact[:, :, 0], finger_contact[:, :, 1])
-    grasp = _hamacher_product(contact, closure)
-    motion_match = 1.0 - torch.tanh(relative_speed / max(relative_speed_std, 1.0e-6))
-    return _hamacher_product(grasp, motion_match), finite
-
-
 def _filter_grasps(
     previous: torch.Tensor, grasp: torch.Tensor, finite: torch.Tensor, step_dt: float, time_constant: float
 ) -> torch.Tensor:
@@ -531,20 +552,6 @@ def _bilateral_score(per_arm_score: torch.Tensor, bilateral_fraction: float) -> 
     """Combine independent credit with a symmetric cooperation bonus."""
     bilateral = _hamacher_product(per_arm_score[:, 0], per_arm_score[:, 1])
     return (1.0 - bilateral_fraction) * per_arm_score.mean(dim=1) + bilateral_fraction * bilateral
-
-
-def _gripper_closed_fraction(
-    env: ManagerBasedRLEnv,
-    robot_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
-    open_position: float,
-    closed_position: float,
-) -> torch.Tensor:
-    """Return normalized actual gripper closure in ``[0, 1]``."""
-    positions = torch.stack(
-        [env.scene[robot_cfg.name].data.joint_pos.torch[:, robot_cfg.joint_ids[0]] for robot_cfg in robot_cfgs],
-        dim=1,
-    )
-    return ((open_position - positions) / max(open_position - closed_position, 1.0e-6)).clamp(0.0, 1.0)
 
 
 def _hamacher_product(a: torch.Tensor, b: torch.Tensor | float, eps: float = 1.0e-6) -> torch.Tensor:

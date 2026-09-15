@@ -45,8 +45,11 @@ GRIPPER_OPEN_POSITION = 0.01
 GRIPPER_CLOSED_POSITION = 0.001
 GRIPPER_STIFFNESS = 8000.0
 CONTACT_OBSERVATION_HISTORY_LENGTH = 3
-TAIL_SUCCESS_X_SEPARATION = 0.18
+TAIL_SUCCESS_OUTWARD_DISTANCE = 0.09
+TAIL_SUCCESS_X_SEPARATION = 2.0 * TAIL_SUCCESS_OUTWARD_DISTANCE
 THROAT_RADIUS = 0.025
+MAXIMUM_THROAT_SEGMENTS_PER_ARM = 15
+# Legacy geometry-only defaults; not used by the cooperative success configuration.
 MAXIMUM_THROAT_SEGMENTS = 52
 TAIL_SUCCESS_DISTANCE = 0.09
 
@@ -84,6 +87,16 @@ ROBOT_CFGS = (
     SceneEntityCfg("robot_left", joint_names=["panda_finger_joint1"], body_names=["panda_hand"]),
     SceneEntityCfg("robot_right", joint_names=["panda_finger_joint1"], body_names=["panda_hand"]),
 )
+_GRASP_PARAMS = {
+    "contact_std": 5.0e-4,
+    "contact_penetration_tolerance": 1.0e-3,
+    "relative_speed_std": 0.08,
+    "grasp_filter_time_constant": 0.10,
+    "open_position": GRIPPER_OPEN_POSITION,
+    "closed_position": GRIPPER_CLOSED_POSITION,
+    "cable_cfgs": CABLE_CFGS,
+    "robot_cfgs": ROBOT_CFGS,
+}
 
 
 def _franka_cfg(
@@ -114,11 +127,6 @@ def _arm_action(asset_name: str) -> env_mdp.DifferentialInverseKinematicsActionC
     return action
 
 
-def _cable_cfg(prim_path: str) -> CableObjectCfg:
-    """Build one cable whose exact geometry is filled from the asset at runtime."""
-    return CableObjectCfg(prim_path=prim_path, spawn=physics.cable_spawn_cfg())
-
-
 @configclass
 class ShoelaceSceneCfg(InteractiveSceneCfg):
     """Replicated dual-Franka shoe and shoelace scene."""
@@ -139,9 +147,9 @@ class ShoelaceSceneCfg(InteractiveSceneCfg):
     shoe_collider = physics.shoe_collider_asset_cfg()
     shoe_visual = physics.shoe_visual_asset_cfg("/World/ShoeMaterials/shoes")
     tongue_upper = physics.tongue_upper_asset_cfg()
-    shoelace_left = _cable_cfg("{ENV_REGEX_NS}/ShoelaceLeft")
+    shoelace_left = CableObjectCfg(prim_path="{ENV_REGEX_NS}/ShoelaceLeft", spawn=physics.cable_spawn_cfg())
     shoelace_pinned_visual = AssetBaseCfg(prim_path="{ENV_REGEX_NS}/Shoe/ShoelacePinned")
-    shoelace_right = _cable_cfg("{ENV_REGEX_NS}/ShoelaceRight")
+    shoelace_right = CableObjectCfg(prim_path="{ENV_REGEX_NS}/ShoelaceRight", spawn=physics.cable_spawn_cfg())
     ground = physics.ground_asset_cfg(10.0)
     light = physics.light_asset_cfg()
 
@@ -261,13 +269,8 @@ class RewardsCfg:
         func=mdp.dense_task_reward,
         weight=10.0,
         params={
+            **_GRASP_PARAMS,
             "reach_std": 0.08,
-            "contact_std": 5.0e-4,
-            "contact_penetration_tolerance": 1.0e-3,
-            "relative_speed_std": 0.08,
-            "grasp_filter_time_constant": 0.10,
-            "open_position": GRIPPER_OPEN_POSITION,
-            "closed_position": GRIPPER_CLOSED_POSITION,
             "success_x_separation": TAIL_SUCCESS_X_SEPARATION,
             "acquisition_weight": 0.6,
             "approach_fraction": 0.5,
@@ -276,8 +279,6 @@ class RewardsCfg:
             "bilateral_pull_fraction": 0.8,
             "pull_use_high_water_mark": True,
             "pull_grasp_threshold": 0.2,
-            "cable_cfgs": CABLE_CFGS,
-            "robot_cfgs": ROBOT_CFGS,
         },
     )
     pregrasp = RewTerm(
@@ -298,17 +299,10 @@ class RewardsCfg:
         func=mdp.grasp_hold_reward,
         weight=1.0,
         params={
-            "contact_std": 5.0e-4,
-            "contact_penetration_tolerance": 1.0e-3,
-            "relative_speed_std": 0.08,
-            "grasp_filter_time_constant": 0.10,
-            "open_position": GRIPPER_OPEN_POSITION,
-            "closed_position": GRIPPER_CLOSED_POSITION,
+            **_GRASP_PARAMS,
             "bilateral_grasp_fraction": 0.5,
             "full_reward_duration": 2.0,
             "sustained_reward_fraction": 0.2,
-            "cable_cfgs": CABLE_CFGS,
-            "robot_cfgs": ROBOT_CFGS,
         },
     )
     success = RewTerm(func=mdp.shoelace_success_reward, weight=5.0)
@@ -318,16 +312,17 @@ class RewardsCfg:
 
 @configclass
 class TerminationsCfg:
-    """Cleared knot throat with separated tails, and episode timeout."""
+    """Cooperative loaded pull followed by geometric completion, and episode timeout."""
 
     success = DoneTerm(
-        func=mdp.shoelace_success,
+        func=mdp.shoelace_bilateral_pull_success,
         params={
-            "threshold": TAIL_SUCCESS_X_SEPARATION,
+            **_GRASP_PARAMS,
             "throat_radius": THROAT_RADIUS,
-            "maximum_throat_segments": MAXIMUM_THROAT_SEGMENTS,
-            "tail_success_distance": TAIL_SUCCESS_DISTANCE,
-            "cable_cfgs": CABLE_CFGS,
+            "maximum_throat_segments_per_arm": MAXIMUM_THROAT_SEGMENTS_PER_ARM,
+            "minimum_tail_outward_distance": TAIL_SUCCESS_OUTWARD_DISTANCE,
+            "minimum_pull_distance": 0.025,
+            "grasp_threshold": 0.2,
         },
     )
     time_out = DoneTerm(func=env_mdp.time_out, time_out=True)

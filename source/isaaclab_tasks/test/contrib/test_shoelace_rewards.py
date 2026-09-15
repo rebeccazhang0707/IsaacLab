@@ -222,7 +222,7 @@ def test_pull_pays_new_displacement_without_regrasp_or_passive_motion_credit(
     outward = torch.full((2, 2), 0.05)
     env = SimpleNamespace(num_envs=2, device="cpu", step_dt=0.1, extras={}, termination_manager=_termination_manager(2))
     monkeypatch.setattr(shoelace_rewards, "tails_to_tcp", lambda *args: torch.zeros((2, 6)))
-    monkeypatch.setattr(shoelace_rewards, "_grasp_quality", lambda *args: (grasp, finite))
+    monkeypatch.setattr(shoelace_rewards, "shoelace_grasp_quality", lambda *args: (grasp, finite))
     monkeypatch.setattr(shoelace_rewards, "tail_outward_x", lambda *args: outward)
     monkeypatch.setattr(shoelace_rewards, "tail_x_separation", lambda *args: outward.sum(dim=1))
     cfg = RewardsCfg().dense_task
@@ -320,7 +320,14 @@ def test_success_requires_cleared_throat_and_both_tails_away_from_anchors() -> N
     for cable in cables.values():
         cable.data.segment_pose_w.torch[7, :, :3] += torch.tensor([1.52, -2.98, 0.2])
     cfg = TerminationsCfg().success
-    success = cfg.func(SimpleNamespace(scene=cables), **cfg.params)
+    geometry_params = {
+        "threshold": 0.18,
+        "throat_radius": cfg.params["throat_radius"],
+        "maximum_throat_segments": 52,
+        "tail_success_distance": 0.09,
+        "cable_cfgs": CABLE_CFGS,
+    }
+    success = shoelace_terminations.shoelace_success(SimpleNamespace(scene=cables), **geometry_params)
     torch.testing.assert_close(success, torch.tensor([True, False, False, False, False, False, False, True]))
     reward_cfg = RewardsCfg().success
     for step_dt in (1.0 / 30.0, 1.0 / 60.0):
@@ -332,6 +339,268 @@ def test_success_requires_cleared_throat_and_both_tails_away_from_anchors() -> N
         )
         reward = reward_cfg.func(env, **reward_cfg.params) * reward_cfg.weight * step_dt
         torch.testing.assert_close(reward, 5.0 * success.float())
+
+
+@pytest.mark.parametrize("pulling_arm", [0, 1])
+def test_success_rejects_single_arm_pull_despite_cleared_geometry(
+    monkeypatch: pytest.MonkeyPatch, pulling_arm: int
+) -> None:
+    """A free opposite tail can satisfy the geometry without any cooperative pulling."""
+    tail_x = torch.tensor([[-0.05, 0.05]])
+    signed_distance = torch.full((1, 4), CONTACT_DISTANCE_CAP)
+    signed_distance[:, 2 * pulling_arm : 2 * pulling_arm + 2] = 0.0
+    robot_cfgs = tuple(SimpleNamespace(name=name, joint_ids=[0]) for name in ("robot_left", "robot_right"))
+    env = SimpleNamespace(
+        num_envs=1,
+        device="cpu",
+        step_dt=1.0 / 30.0,
+        extras={},
+        scene={
+            cfg.name: SimpleNamespace(data=SimpleNamespace(joint_pos=_proxy(torch.tensor([[0.001]]))))
+            for cfg in robot_cfgs
+        },
+    )
+    monkeypatch.setattr(shoelace_rewards, "finger_tail_signed_distance", lambda *args: signed_distance)
+    monkeypatch.setattr(shoelace_rewards, "tail_tcp_relative_speed", lambda *args: torch.zeros((1, 2)))
+    cfg = TerminationsCfg().success
+    if "robot_cfgs" in cfg.params:
+        cfg.params["robot_cfgs"] = robot_cfgs
+    term = cfg.func(cfg, env) if isinstance(cfg.func, type) else cfg.func
+
+    def compute() -> torch.Tensor:
+        env.scene.update(_cables(tail_x))
+        for name, tail_slice in (("shoelace_left", slice(0, 3)), ("shoelace_right", slice(-3, None))):
+            poses = env.scene[name].data.segment_pose_w.torch
+            poses[:, 3:-3, 0] = 0.04
+            poses[:, tail_slice, 1] = 0.10  # Radial distance need not imply outward X motion.
+        return term(env, **cfg.params)
+
+    assert not compute().item()
+    tail_x[:, pulling_arm] += (-1.0, 1.0)[pulling_arm] * 0.10
+    assert not compute().item()
+    # Acquiring the missing grasp at the end cannot claim earlier passive displacement.
+    signed_distance.zero_()
+    for _ in range(10):
+        assert not compute().item()
+
+
+def test_success_geometry_limits_throat_capsules_per_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One cleared cable must not hide excess capsules on the other after loaded pulling."""
+    counts_by_arm = torch.tensor([[15, 15], [16, 10], [10, 16], [0, 30], [30, 0], [15, 15], [0, 0]])
+    num_envs = len(counts_by_arm)
+    env = SimpleNamespace(num_envs=num_envs, device="cpu", step_dt=1.0 / 30.0, extras={}, scene={})
+    cfg = TerminationsCfg().success
+    term = cfg.func(cfg, env)
+    monkeypatch.setattr(
+        shoelace_terminations,
+        "shoelace_grasp_quality",
+        lambda *args: (torch.ones((num_envs, 2)), torch.ones(num_envs, dtype=torch.bool)),
+    )
+
+    def compute(distance: float) -> torch.Tensor:
+        env.scene.update(_cables(torch.tensor([[-distance, distance]]).repeat(num_envs, 1)))
+        left = env.scene["shoelace_left"].data.segment_pose_w.torch
+        right = env.scene["shoelace_right"].data.segment_pose_w.torch
+        left[:, 3:-1, 0] = 0.04
+        right[:, 1:-3, 0] = -0.04
+        for env_id, (left_count, right_count) in enumerate(counts_by_arm.tolist()):
+            right[env_id, 1 : 1 + left_count, 0] = 0.0
+            left[env_id, 3 : 3 + right_count, 0] = 0.0
+        for cable in env.scene.values():
+            cable.data.segment_pose_w.torch[5, :, :3] += torch.tensor([1.52, -2.98, 0.2])
+        return term(env, **cfg.params)
+
+    assert not compute(0.05).any()
+    success = compute(0.10)
+    assert env.extras["log"]["Metrics/shoelace/bilateral_pull_completed"] == 1.0
+    expected = torch.tensor([True, False, False, False, False, True, True])
+    torch.testing.assert_close(success, expected)
+    counts, *_ = shoelace_terminations.untying_metrics(
+        env, CABLE_CFGS, cfg.params["throat_radius"], per_arm_throat_counts=True
+    )
+    total, *_ = shoelace_terminations.untying_metrics(env, CABLE_CFGS, cfg.params["throat_radius"])
+    torch.testing.assert_close(counts, counts_by_arm)
+    torch.testing.assert_close(total, counts_by_arm.sum(dim=1))
+    for arm, side in enumerate(("left", "right")):
+        torch.testing.assert_close(
+            env.extras["log"][f"Metrics/shoelace/throat_{side}_segments"], counts_by_arm[:, arm].float().mean()
+        )
+
+
+def test_success_geometry_requires_each_tail_on_its_outward_side(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Completed loaded pulls cannot compensate for a wrong-side or insufficiently separated tail."""
+    target_x = torch.tensor(
+        [
+            [-0.09, 0.09],  # Exact signed-distance boundaries.
+            [-0.089, 0.14],  # One tail short despite enough total separation and 3D radius.
+            [-0.14, 0.089],
+            [0.09, 0.30],  # Both tails on the right.
+            [-0.30, -0.09],  # Both tails on the left.
+            [0.10, -0.10],  # Assigned tails crossed sides.
+            [-0.10, 0.10],  # Translated scene.
+            [-0.095, 0.15],  # Unequal outward distances are allowed.
+        ]
+    )
+    num_envs = len(target_x)
+    env = SimpleNamespace(num_envs=num_envs, device="cpu", step_dt=1.0 / 30.0, extras={}, scene={})
+    cfg = TerminationsCfg().success
+    term = cfg.func(cfg, env)
+    monkeypatch.setattr(
+        shoelace_terminations,
+        "shoelace_grasp_quality",
+        lambda *args: (torch.ones((num_envs, 2)), torch.ones(num_envs, dtype=torch.bool)),
+    )
+
+    def compute(tail_x: torch.Tensor) -> torch.Tensor:
+        env.scene.update(_cables(tail_x))
+        left = env.scene["shoelace_left"].data.segment_pose_w.torch
+        right = env.scene["shoelace_right"].data.segment_pose_w.torch
+        left[:, 3:-1, 0] = 0.04
+        right[:, 1:-3, 0] = -0.04
+        left[:, :3, 2] = right[:, -3:, 2] = 0.06
+        for cable in env.scene.values():
+            cable.data.segment_pose_w.torch[6, :, :3] += torch.tensor([1.52, -2.98, 0.2])
+        return term(env, **cfg.params)
+
+    initial_x = target_x - torch.tensor([-1.0, 1.0]) * (2.0 * cfg.params["minimum_pull_distance"])
+    assert not compute(initial_x).any()
+    success = compute(target_x)
+    assert shoelace_terminations.shoelace_success(
+        env,
+        threshold=0.18,
+        throat_radius=cfg.params["throat_radius"],
+        maximum_throat_segments=52,
+        tail_success_distance=0.09,
+        cable_cfgs=CABLE_CFGS,
+    ).all()
+    assert env.extras["log"]["Metrics/shoelace/bilateral_pull_completed"] == 1.0
+    expected = torch.tensor([True, False, False, False, False, False, True, True])
+    torch.testing.assert_close(success, expected)
+    torch.testing.assert_close(env.extras["log"]["Metrics/shoelace/geometry_success"], expected.float().mean())
+
+
+@pytest.fixture
+def bilateral_success_probe(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """Supply batched physical inputs without depending on a reward manager or a simulator."""
+    cfg = TerminationsCfg().success
+    state = SimpleNamespace(
+        outward=torch.full((2, 2), cfg.params["minimum_tail_outward_distance"] + 0.01),
+        grasp=torch.ones((2, 2)),
+        grasp_finite=torch.ones(2, dtype=torch.bool),
+        geometry_finite=torch.ones(2, dtype=torch.bool),
+        throat_count=torch.zeros((2, 2), dtype=torch.long),
+    )
+    env = SimpleNamespace(num_envs=2, device="cpu", step_dt=1.0 / 30.0, extras={})
+    monkeypatch.setattr(shoelace_terminations, "tail_outward_x", lambda *args: state.outward)
+    monkeypatch.setattr(
+        shoelace_terminations, "shoelace_grasp_quality", lambda *args: (state.grasp, state.grasp_finite)
+    )
+    monkeypatch.setattr(
+        shoelace_terminations,
+        "untying_metrics",
+        lambda *args, **kwargs: (
+            state.throat_count,
+            state.outward.abs() + 0.01,
+            state.outward.sum(dim=1).abs(),
+            state.geometry_finite,
+        ),
+    )
+    state.env = env
+    state.cfg = cfg
+    state.term = cfg.func(cfg, env)
+    state.compute = lambda: state.term(env, **cfg.params)
+    state.distance = cfg.params["minimum_pull_distance"]
+    return state
+
+
+def test_bilateral_pull_success_requires_both_phases_and_allows_release(
+    bilateral_success_probe: SimpleNamespace,
+) -> None:
+    """Both loaded pulls are required, but geometric completion may follow release."""
+    probe = bilateral_success_probe
+    assert not probe.compute().any()
+    probe.outward[:, 0] += 1.1 * probe.distance
+    assert not probe.compute().any()
+    assert probe.env.extras["log"]["Metrics/shoelace/loaded_pull_left_m"] == pytest.approx(1.1 * probe.distance)
+    assert probe.env.extras["log"]["Metrics/shoelace/loaded_pull_right_m"] == 0.0
+    probe.throat_count.fill_(probe.cfg.params["maximum_throat_segments_per_arm"] + 1)
+    probe.outward[:, 1] += 1.1 * probe.distance
+    assert not probe.compute().any()
+    assert probe.env.extras["log"]["Metrics/shoelace/bilateral_pull_completed"] == 1.0
+    assert probe.env.extras["log"]["Metrics/shoelace/geometry_success"] == 0.0
+
+    probe.grasp.zero_()
+    probe.throat_count.zero_()
+    success = probe.compute()
+    assert success.all()
+    reward_cfg = RewardsCfg().success
+    probe.env.termination_manager = SimpleNamespace(get_term=lambda name: success)
+    reward = reward_cfg.func(probe.env, **reward_cfg.params) * reward_cfg.weight * probe.env.step_dt
+    torch.testing.assert_close(reward, torch.full((2,), 5.0))
+
+    terminal_log = probe.env.extras["log"]
+    probe.env.extras["log"] = {"unrelated_metric": 1.0}
+    probe.term.reset(torch.tensor([0]))
+    for name, value in terminal_log.items():
+        torch.testing.assert_close(probe.env.extras["log"][name], value)
+    assert probe.env.extras["log"]["unrelated_metric"] == 1.0
+    torch.testing.assert_close(probe.compute(), torch.tensor([False, True]))
+    probe.term.reset()
+    assert not probe.compute().any()
+
+
+def test_bilateral_pull_success_rejects_passive_records_cycles_and_invalid_gaps(
+    bilateral_success_probe: SimpleNamespace,
+) -> None:
+    """Only new records bracketed by valid bilateral grasps count toward completion."""
+    probe = bilateral_success_probe
+    probe.grasp.zero_()
+    probe.compute()
+    probe.outward += 2.0 * probe.distance
+    assert not probe.compute().any()
+    probe.grasp.fill_(1.0)
+    probe.outward += probe.distance  # Closing at the end of an interval cannot claim its motion.
+    assert not probe.compute().any()
+    for _ in range(10):
+        probe.compute()
+    for _ in range(4):
+        probe.outward -= probe.distance
+        probe.compute()
+        probe.outward += probe.distance
+        assert not probe.compute().any()
+    for side in ("left", "right"):
+        assert probe.env.extras["log"][f"Metrics/shoelace/loaded_pull_{side}_m"] == 0.0
+
+    # Raw grasp loss blocks a still-positive filtered grasp.
+    probe.grasp[:, 0] = 0.0
+    probe.outward += probe.distance
+    assert not probe.compute().any()
+    probe.grasp.fill_(1.0)
+    probe.outward += probe.distance
+    assert not probe.compute().any()
+    probe.compute()
+    probe.outward += 0.6 * probe.distance
+    assert not probe.compute().any()
+    for side in ("left", "right"):
+        assert probe.env.extras["log"][f"Metrics/shoelace/loaded_pull_{side}_m"] == pytest.approx(0.6 * probe.distance)
+
+    probe.grasp[0] = torch.nan
+    probe.grasp_finite[0] = False
+    probe.geometry_finite[1] = False
+    probe.outward.fill_(torch.nan)
+    assert not probe.compute().any()
+    assert all(torch.isfinite(value) for value in probe.env.extras["log"].values())
+    probe.grasp.fill_(1.0)
+    probe.grasp_finite.fill_(True)
+    probe.geometry_finite.fill_(True)
+    probe.outward.fill_(0.5)
+    assert not probe.compute().any()  # Do not bridge the invalid interval.
+    for side in ("left", "right"):
+        assert probe.env.extras["log"][f"Metrics/shoelace/loaded_pull_{side}_m"] == pytest.approx(0.6 * probe.distance)
+    probe.outward += 0.5 * probe.distance
+    assert probe.compute().all()
+    probe.geometry_finite[0] = False
+    torch.testing.assert_close(probe.compute(), torch.tensor([False, True]))
 
 
 def test_dense_reward_filters_contact_and_resets_only_selected_envs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -550,7 +819,7 @@ def test_hold_budget_keeps_acquisition_credit_without_renewal_on_regrasp(
     grasp = torch.tensor([[1.0, 1.0], [1.0, 0.0]])
     finite = torch.ones(2, dtype=torch.bool)
     env = SimpleNamespace(num_envs=2, device="cpu", step_dt=step_dt)
-    monkeypatch.setattr(shoelace_rewards, "_grasp_quality", lambda *args: (grasp, finite))
+    monkeypatch.setattr(shoelace_rewards, "shoelace_grasp_quality", lambda *args: (grasp, finite))
     cfg = RewardsCfg().grasp_hold
     cfg.params["grasp_filter_time_constant"] = 1.0e-6
     term = cfg.func(cfg, env)
@@ -765,7 +1034,7 @@ def test_pregrasp_preserves_invalid_samples_and_resets_selected_envs(monkeypatch
 
 
 def test_task_config_uses_arm_penalties_and_matching_success_threshold() -> None:
-    """Budget cooperative progress, time-based retention, and geometric completion separately."""
+    """Budget cooperative progress, time-based retention, and cooperative completion separately."""
     cfg = ShoelaceEnvCfg()
 
     assert [field.name for field in dataclasses.fields(RewardsCfg)] == [
@@ -802,10 +1071,23 @@ def test_task_config_uses_arm_penalties_and_matching_success_threshold() -> None
     assert cfg.rewards.grasp_hold.params["sustained_reward_fraction"] == pytest.approx(0.2)
     for key in ("contact_std", "contact_penetration_tolerance", "relative_speed_std", "grasp_filter_time_constant"):
         assert cfg.rewards.grasp_hold.params[key] == cfg.rewards.dense_task.params[key]
+        assert cfg.terminations.success.params[key] == cfg.rewards.dense_task.params[key]
     assert cfg.rewards.dense_task.params["contact_penetration_tolerance"] == pytest.approx(0.001)
     assert cfg.rewards.dense_task.params["success_x_separation"] == pytest.approx(TAIL_SUCCESS_X_SEPARATION)
-    assert cfg.terminations.success.params["threshold"] == pytest.approx(TAIL_SUCCESS_X_SEPARATION)
-    assert cfg.terminations.success.func is shoelace_terminations.shoelace_success
+    assert {"threshold", "maximum_throat_segments", "tail_success_distance"}.isdisjoint(cfg.terminations.success.params)
+    assert cfg.terminations.success.func is shoelace_terminations.shoelace_bilateral_pull_success
+    assert cfg.terminations.success.params["minimum_pull_distance"] == pytest.approx(0.025)
+    assert cfg.terminations.success.params["grasp_threshold"] == cfg.rewards.dense_task.params["pull_grasp_threshold"]
+    assert cfg.terminations.success.params["maximum_throat_segments_per_arm"] == 15
+    assert cfg.terminations.success.params["minimum_tail_outward_distance"] == pytest.approx(
+        cfg.rewards.dense_task.params["success_x_separation"] / 2.0
+    )
+    # Shared defaults must not couple overrides between terms or config instances.
+    contact_std = cfg.rewards.dense_task.params["contact_std"]
+    cfg.rewards.dense_task.params["contact_std"] *= 2.0
+    assert cfg.rewards.grasp_hold.params["contact_std"] == contact_std
+    assert cfg.terminations.success.params["contact_std"] == contact_std
+    assert ShoelaceEnvCfg().rewards.dense_task.params["contact_std"] == contact_std
 
 
 if __name__ == "__main__":

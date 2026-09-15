@@ -155,14 +155,14 @@ environments. When tuning contact or filter parameters, update both `dense_task.
 Set `env.rewards.grasp_hold.weight=0` for a progress-only ablation.
 Set `env.rewards.grasp_hold.params.full_reward_duration=None` to disable the time budget for an ablation.
 
-The `success` reward pays +5 on the existing geometric success termination, including success on the timeout
+The `success` reward pays +5 on the cooperative-pull-and-geometry success termination, including success on the timeout
 step. Timeout alone pays no success reward. `mdp.shoelace_success_reward` divides the success flag by
 `step_dt`, so the manager's timestep multiplication leaves +5 per event. The environment then resets.
 Ideal bilateral retention throughout the current 10-second episode contributes at most 3.6 instead of 10;
 ideal single-arm retention contributes at most 2.1 instead of 2.5. Completion earns a separate event reward.
 These are acquisition and retention tuning budgets, not a guarantee that training will learn to pull.
 Evaluate simultaneous approach, continuous grasp duration, gripper switching, outward displacement, and
-geometric success when comparing runs.
+cooperative task success and geometry-only completion separately when comparing runs.
 
 **Migration:** The observation/action interface is unchanged, but the reward objective and defaults changed.
 Existing checkpoints remain loadable; re-evaluate them and use a separate training run because return values
@@ -203,7 +203,7 @@ therefore includes ongoing maintenance rewards as well as bounded progress credi
 not been tuned through training. Adjust them independently with `env.rewards.arm_action_rate.weight` and
 `env.rewards.arm_action_magnitude.weight`.
 
-The dense term writes phase metrics to `extras["log"]` on every policy step. RSL-RL prints their rollout
+The dense and success terms write phase metrics to `extras["log"]` on every policy step. RSL-RL prints their rollout
 averages in each training iteration and writes the same tags to TensorBoard. Prefer physical displacement
 to the grasp-gated score when checking whether a tail actually moved outward:
 
@@ -212,11 +212,15 @@ to the grasp-gated score when checking whether a tail actually moved outward:
 | `approach_distance_m` | Mean TCP-to-tail distance across both arms [m]; lower is better. |
 | `grasp_left`, `grasp_right` | Filtered contact, closure, and low-slip grasp quality for each arm in [0, 1]. |
 | `grasp_both` | Hamacher soft-AND of both filtered grasp qualities in [0, 1]. |
-| `pull_x_separation_m` | Absolute two-tail X separation [m]; 0.18 m is one necessary success condition. |
+| `pull_x_separation_m` | Absolute two-tail X separation [m]; successful per-tail X boundaries imply at least 0.18 m, but this total alone is insufficient. |
 | `pull_left_displacement_m`, `pull_right_displacement_m` | Signed outward tail displacement from the episode baseline [m], independent of grasp quality. Positive means outward; negative means inward. |
 | `pull_left_score`, `pull_right_score` | Legacy `H(G, 0.5*(1+tanh(d/scale)))` diagnostic in [0, 1]; not a distance, actual new-record reward, or success rate. |
 | `success_rate` | Mean success over each environment's most recent completed episode. |
 | `valid_fraction` | Fraction of environments whose checked reward inputs contain no NaN/Inf; normally 1.0. |
+| `geometry_success` | Current fraction satisfying the geometry-only criterion, regardless of grasp or pulling history. |
+| `throat_left_segments`, `throat_right_segments` | Current mean free-capsule center counts in the throat for the cable controlled by each arm; each must be at most 15 at success. |
+| `bilateral_pull_completed` | Current fraction whose two tails have each earned at least 0.025 m of loaded outward records this episode; retained after release. |
+| `loaded_pull_left_m`, `loaded_pull_right_m` | Mean accumulated new outward record distances [m] earned with valid bilateral grasps; not signed net displacement or a reward. |
 
 Each displacement uses the mean position of the corresponding tail's three free-end segments relative
 to the fixed seam midpoint. Left-arm outward motion is negative X; right-arm outward motion is positive X.
@@ -239,7 +243,11 @@ metrics are zero and `valid_fraction=0` identifies that case. `success_rate` use
 flag, excludes environments that have not finished an episode, and is zero until the first completion. These
 continuous grasp scores are contact-based proxies, not discrete stage-completion labels. For example, high
 `pull_x_separation_m` with low `grasp_both` indicates separated tails without strong simultaneous grasps. Metrics are
-computed by the dense reward term and require its weight to remain nonzero.
+computed by the dense reward term and require its weight to remain nonzero, except for `geometry_success`,
+`throat_*_segments`, `bilateral_pull_completed`, and `loaded_pull_*_m`. Those diagnostics come from the success term and
+remain available when dense rewards are disabled. They average over all environments before reset;
+`geometry_success` is a current-state fraction, not a completed-episode success rate. Loaded distances and
+the completed cooperative phase retain their previously earned history until that environment resets.
 RSL-RL then averages the per-step values over its rollout window. In the current multi-GPU runner these
 custom metrics are logged from rank 0's local environments, not reduced across all GPUs. Displacement
 curves are therefore mean signed displacements, not per-episode maximum distances; opposite motions
@@ -261,24 +269,79 @@ The reward manager separately logs `Episode_Reward/pregrasp`, `Episode_Reward/gr
 `Episode_Reward/arm_action_rate`, and `Episode_Reward/arm_action_magnitude` when episodes reset.
 These are episode sums divided by the configured episode duration, not raw event rewards.
 
-Success now uses `mdp.shoelace_success` and requires all of the following:
+Success now uses `mdp.shoelace_bilateral_pull_success`. Its geometric component requires all of the following:
 
-- no more than 52 free cable segments inside a sphere of radius 0.025 m around the fixed seam midpoint;
-- both tail centers at least 0.09 m from that midpoint;
-- absolute two-tail X separation of at least 0.18 m; and
+- no more than 15 free capsule centers from **each** arm's cable inside a sphere of radius 0.025 m around
+  the fixed seam midpoint;
+- the left arm's tail at least 0.09 m toward negative X from the midpoint and the right arm's tail at least
+  0.09 m toward positive X; and
 - finite cable segment positions and velocities.
 
-The throat and tail-distance criteria follow `reb/newton_shoelace_demo`. The midpoint is the average of the
+The throat region follows `reb/newton_shoelace_demo`. The midpoint is the average of the
 left cable's last segment and the right cable's first segment. These two fixed anchors are excluded from
-the throat count; the remaining 156 segment centers are counted. The region follows shoe translations.
-This rejects separation-only success while a dense knot remains in the throat or one tail stays near it.
+the throat count; the remaining 156 segment centers are counted, 78 on each cable. The region follows shoe translations.
+Counts use capsule centers strictly inside the sphere, not capsule-sphere overlap, and are split in robot-arm
+order: the left arm controls `shoelace_right`, and the right arm controls `shoelace_left`.
+`mdp.utils.untying_metrics(..., per_arm_throat_counts=True)` returns these counts as [N, 2]; its default
+retains the legacy total-count [N] output. The per-side limit prevents one cleared cable from compensating
+for excessive occupancy on the other. Logged counts are rollout/environment averages and can be fractional;
+the success predicate checks each environment's integer counts before reset.
 It is a regional geometry heuristic, not a general topological proof of untying: changes to the cable asset,
-segment resolution or knot geometry require revalidating the radius and count threshold. Unlike the old
-branch, success does not require both grippers to remain closed; cooperation is rewarded through the bonus.
+segment resolution or knot geometry require revalidating the radius and count thresholds. Configure the
+per-side count through `env.terminations.success.params.maximum_throat_segments_per_arm`.
+The initial 15-per-side limit rejects the audited unilateral trajectory's
+19-23 remaining capsules on the ungrasped side, while allowing its pulled side's 12-13; it still needs
+calibration on genuine bilateral completions.
 
-The previous `mdp.tail_x_separation_success` helper remains available for custom distance-only evaluations.
-Custom tasks should switch to `mdp.shoelace_success` with the four thresholds in `TerminationsCfg.success`.
-Historical success rates from the distance-only criterion are not comparable to the new rates.
+The signed X boundaries are configured through `env.terminations.success.params.minimum_tail_outward_distance`.
+They are absolute offsets from the fixed midpoint, not displacements from reset. Unlike the old 3D-radius
+and total-separation checks, downward motion or extra right-tail travel cannot substitute for placing the
+left tail sufficiently far left. The distances do not need to be equal. These final-state requirements and
+the loaded-pull history below serve different purposes and must both be satisfied.
+
+The default success configuration no longer contains redundant `tail_success_distance`, `threshold`, or
+`maximum_throat_segments` settings: the per-tail X bounds already imply radial distances of at least 0.09 m
+and total X separation of at least 0.18 m, and the two capsule limits imply a total no greater than 30.
+The new cooperative term accepts only the per-side geometric limits. The pre-existing stateless legacy
+helper retains its original interface for explicit historical comparisons.
+
+The dense reward's `success_x_separation` remains a pull-normalization scale, not an additional success
+gate. Its default is derived as twice `TAIL_SUCCESS_OUTWARD_DISTANCE` so the initial reward and success
+geometry agree without maintaining two independent constants. Runtime overrides of these independent
+terms should keep that relation when changing the task target. `minimum_pull_distance` instead measures
+earned displacement during bilateral grasps, not final position. The approach, pregrasp, and grasp-hold
+terms shape different phases or retention, and their individual parameters remain available for ablations.
+
+The default success term additionally requires each tail to earn at least 0.025 m of new outward X records
+while **both** hands have valid grasps. Configure this initial threshold with
+`env.terminations.success.params.minimum_pull_distance`. A valid grasp uses the same two-finger contact,
+actual closure, and low-slip criterion as the rewards. Dense acquisition, grasp retention, and success
+all call the single `mdp.shoelace_grasp_quality` implementation; their filters and episode histories remain independent.
+Common defaults are defined once in `_GRASP_PARAMS` and copied into each term's parameter dictionary,
+so per-term overrides remain independent.
+Both raw and 0.10 s filtered qualities must be at least 0.2 for each hand at both ends of the policy-step
+interval; configure the threshold with `env.terminations.success.params.grasp_threshold`.
+
+Each tail's record starts at the first finite post-reset sample and advances even without valid grasps.
+Only increments beyond that physical record during qualifying intervals accumulate loaded distance.
+Passive movement followed by grasping, release with a still-positive filtered score, or inward/outward
+cycles cannot retroactively earn completion credit. Invalid observations break interval eligibility.
+The cooperative phase stays completed after both distances reach the threshold, so release before
+geometric completion is allowed. Geometry must still hold at the terminal step. The term is independent
+of reward history and reward weights; `success_rate`, the success termination, and the +5 event all use
+this stricter result. Contact quality remains a proxy, not a measured tension or force-closure guarantee.
+
+Migration: checkpoints keep the same action and observation interfaces, but must be re-evaluated under
+the new objective. Historical geometry-only success rates and the earlier `geometry_success` metric are
+not comparable to the stricter per-cable-count and signed-X result.
+Restart existing training/play processes to load the new term. Reward weights and dense reward formulas
+are unchanged. The stateless `mdp.shoelace_success` geometry-only helper and
+`mdp.tail_x_separation_success` distance-only helper remain available for explicit legacy evaluation.
+To use the former, replace the success term with a `DoneTerm` using only `threshold`, `throat_radius`,
+`maximum_throat_segments`, `tail_success_distance`, and `cable_cfgs`; do not pass the cooperative parameters.
+Use the saved run's parameter values, including its old total count limit of 52, when reproducing that legacy criterion.
+`MAXIMUM_THROAT_SEGMENTS` and `TAIL_SUCCESS_DISTANCE` remain as legacy module constants, but are not used
+by the current cooperative success configuration.
 
 The deprecated `maximum_progress_rate`, `approach_weight`, `grasp_weight`, and `task_weight` parameters
 have been removed. If only `maximum_progress_rate` was used, delete that key. Configurations using any
