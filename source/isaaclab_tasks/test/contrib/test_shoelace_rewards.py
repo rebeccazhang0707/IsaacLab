@@ -107,10 +107,6 @@ def test_legacy_dense_reward_orders_approach_contact_grasp_and_pull(
                 atol=1.0e-6,
                 rtol=1.0e-5,
             )
-            torch.testing.assert_close(
-                env.extras["log"][f"Metrics/shoelace/pull_{side}"],
-                env.extras["log"][f"Metrics/shoelace/pull_{side}_score"],
-            )
         reward_history.append(reward.clone())
         return reward
 
@@ -175,8 +171,8 @@ def test_legacy_dense_reward_orders_approach_contact_grasp_and_pull(
     assert compute().item() > 0.0
     tail_x[:, first_arm] += outward_sign[first_arm] * 0.05
     assert compute().item() > 0.0
-    first_pull_key = f"Metrics/shoelace/pull_{('left', 'right')[first_arm]}"
-    other_pull_key = f"Metrics/shoelace/pull_{('left', 'right')[other_arm]}"
+    first_pull_key = f"Metrics/shoelace/pull_{('left', 'right')[first_arm]}_score"
+    other_pull_key = f"Metrics/shoelace/pull_{('left', 'right')[other_arm]}_score"
     single_pull = env.extras["log"][first_pull_key].clone()
     assert single_pull.item() > 0.5
     assert env.extras["log"][other_pull_key].item() < 1.0e-5
@@ -381,8 +377,6 @@ def test_dense_reward_filters_contact_and_resets_only_selected_envs(monkeypatch:
             "grasp_left",
             "grasp_right",
             "grasp_both",
-            "pull_left",
-            "pull_right",
             "pull_left_score",
             "pull_right_score",
             "pull_left_displacement_m",

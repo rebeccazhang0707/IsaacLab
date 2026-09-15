@@ -73,8 +73,8 @@ class dense_task_reward(ManagerTermBase):
         - Phase metrics under ``Metrics/shoelace/`` average only environments with finite reward inputs.
         - ``pull_left_displacement_m`` and ``pull_right_displacement_m`` report signed outward tail
           displacement [m] from the first valid sample after reset, independently of grasp quality.
-        - ``pull_left_score`` and ``pull_right_score`` retain the grasp-gated reward scores in [0, 1].
-          ``pull_left`` and ``pull_right`` are deprecated aliases of these scores, not distances.
+        - ``pull_left_score`` and ``pull_right_score`` retain the legacy grasp-gated diagnostic scores
+          in [0, 1], not distances or the new-record pull reward.
         - ``valid_fraction`` measures numerical input validity, not grasp quality or task success.
         - ``success_rate`` averages the latest completed result per environment, excluding those with
           no completed episode. It is zero until the first completion.
@@ -264,9 +264,6 @@ class dense_task_reward(ManagerTermBase):
             "pull_right_displacement_m": outward_displacement[:, 1],
             "pull_left_score": per_arm_pull[:, 0],
             "pull_right_score": per_arm_pull[:, 1],
-            # Preserve old dashboards without silently changing their scores into distances.
-            "pull_left": per_arm_pull[:, 0],
-            "pull_right": per_arm_pull[:, 1],
         }
         samples = torch.stack(tuple(metric_values.values()), dim=-1)
         means = torch.where(finite.unsqueeze(1), samples, 0.0).sum(dim=0) / finite.sum().clamp_min(1)

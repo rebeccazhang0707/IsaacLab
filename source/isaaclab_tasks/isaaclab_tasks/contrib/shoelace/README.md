@@ -215,7 +215,6 @@ to the grasp-gated score when checking whether a tail actually moved outward:
 | `pull_x_separation_m` | Absolute two-tail X separation [m]; 0.18 m is one necessary success condition. |
 | `pull_left_displacement_m`, `pull_right_displacement_m` | Signed outward tail displacement from the episode baseline [m], independent of grasp quality. Positive means outward; negative means inward. |
 | `pull_left_score`, `pull_right_score` | Legacy `H(G, 0.5*(1+tanh(d/scale)))` diagnostic in [0, 1]; not a distance, actual new-record reward, or success rate. |
-| `pull_left`, `pull_right` | Deprecated aliases, equal to the corresponding `pull_left_score` and `pull_right_score` values. |
 | `success_rate` | Mean success over each environment's most recent completed episode. |
 | `valid_fraction` | Fraction of environments whose checked reward inputs contain no NaN/Inf; normally 1.0. |
 
@@ -251,10 +250,12 @@ averages of `grasp_left` and `grasp_right`: different environments may hold diff
 
 Dashboard migration: use `pull_left_displacement_m` and `pull_right_displacement_m` for physical progress,
 and `pull_left_score` and `pull_right_score` only when inspecting the legacy grasp-gated diagnostic. The old
-`pull_left` and `pull_right` tags remain available as deprecated score aliases for compatibility; do not
-interpret old curves as meters or compare score and displacement values directly. Existing event files
-are not rewritten. The score equation and aliases are retained, but the new penetration tolerance changes
-their grasp input; historical grasp and score curves require matching reward parameters for comparison.
+`pull_left` and `pull_right` aliases were removed; update dashboards to the corresponding `*_score` tags.
+Do not interpret old curves as meters or compare score and displacement values directly. Existing event files
+are not rewritten, and running training processes must restart to pick up the logging change. Reward
+calculations and retained metric values are unchanged by the alias removal. The new penetration tolerance
+still changes the score's grasp input relative to older reward versions; historical grasp and score curves
+require matching reward parameters for comparison.
 
 The reward manager separately logs `Episode_Reward/pregrasp`, `Episode_Reward/grasp_hold`, `Episode_Reward/success`,
 `Episode_Reward/arm_action_rate`, and `Episode_Reward/arm_action_magnitude` when episodes reset.
