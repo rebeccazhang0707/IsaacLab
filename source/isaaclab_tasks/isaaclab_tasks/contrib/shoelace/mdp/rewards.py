@@ -71,6 +71,10 @@ class dense_task_reward(ManagerTermBase):
 
     Notes:
         - Phase metrics under ``Metrics/shoelace/`` average only environments with finite reward inputs.
+        - ``pull_left_displacement_m`` and ``pull_right_displacement_m`` report signed outward tail
+          displacement [m] from the first valid sample after reset, independently of grasp quality.
+        - ``pull_left_score`` and ``pull_right_score`` retain the grasp-gated reward scores in [0, 1].
+          ``pull_left`` and ``pull_right`` are deprecated aliases of these scores, not distances.
         - ``valid_fraction`` measures numerical input validity, not grasp quality or task success.
         - ``success_rate`` averages the latest completed result per environment, excluding those with
           no completed episode. It is zero until the first completion.
@@ -202,8 +206,9 @@ class dense_task_reward(ManagerTermBase):
         initial_separation = self._baseline_outward_x.sum(dim=1).abs()
         # Split the remaining target separation between arms; the 1 cm floor avoids a near-zero scale.
         pull_scale = (0.5 * (success_x_separation - initial_separation)).clamp_min(0.01)
+        outward_displacement = outward_x - self._baseline_outward_x
         # Start at 0.5 so outward motion below the reset baseline still changes the potential smoothly.
-        per_arm_progress = 0.5 * (1.0 + torch.tanh((outward_x - self._baseline_outward_x) / pull_scale.unsqueeze(1)))
+        per_arm_progress = 0.5 * (1.0 + torch.tanh(outward_displacement / pull_scale.unsqueeze(1)))
         # Gate each tail by its own grasp; the bilateral term is a bonus, not a prerequisite for pulling.
         per_arm_pull = _hamacher_product(filtered_per_gripper_grasp, per_arm_progress)
         pull = _bilateral_score(per_arm_pull, bilateral_pull_fraction)
@@ -215,6 +220,11 @@ class dense_task_reward(ManagerTermBase):
             "grasp_right": filtered_per_gripper_grasp[:, 1],
             "grasp_both": bilateral_grasp,
             "pull_x_separation_m": x_separation,
+            "pull_left_displacement_m": outward_displacement[:, 0],
+            "pull_right_displacement_m": outward_displacement[:, 1],
+            "pull_left_score": per_arm_pull[:, 0],
+            "pull_right_score": per_arm_pull[:, 1],
+            # Preserve old dashboards without silently changing their scores into distances.
             "pull_left": per_arm_pull[:, 0],
             "pull_right": per_arm_pull[:, 1],
         }

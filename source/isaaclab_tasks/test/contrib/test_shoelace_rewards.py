@@ -61,6 +61,7 @@ def test_dense_reward_orders_approach_contact_grasp_and_pull(
     signed_distance = torch.full((1, 4), CONTACT_DISTANCE_CAP)
     relative_speed = torch.zeros((1, 2))
     tail_x = torch.tensor([[-0.05, 0.05]])
+    initial_tail_x = tail_x.clone()
     translation = torch.zeros(3)
     other_arm = 1 - first_arm
     first_contact = slice(2 * first_arm, 2 * first_arm + 2)
@@ -96,6 +97,19 @@ def test_dense_reward_orders_approach_contact_grasp_and_pull(
         for cable_cfg in CABLE_CFGS:
             env.scene[cable_cfg.name].data.segment_pose_w.torch[:, :, :3] += translation
         reward = term(env, **cfg.params)
+        # Report signed physical motion, even without a grasp or after translating the whole scene.
+        expected_displacement = (tail_x - initial_tail_x) * torch.tensor(outward_sign)
+        for arm, side in enumerate(("left", "right")):
+            torch.testing.assert_close(
+                env.extras["log"][f"Metrics/shoelace/pull_{side}_displacement_m"],
+                expected_displacement[0, arm],
+                atol=1.0e-6,
+                rtol=1.0e-5,
+            )
+            torch.testing.assert_close(
+                env.extras["log"][f"Metrics/shoelace/pull_{side}"],
+                env.extras["log"][f"Metrics/shoelace/pull_{side}_score"],
+            )
         reward_history.append(reward.clone())
         return reward
 
@@ -135,6 +149,9 @@ def test_dense_reward_orders_approach_contact_grasp_and_pull(
     assert env.extras["log"][f"Metrics/shoelace/grasp_{('left', 'right')[first_arm]}"].item() > 0.99
     assert env.extras["log"][f"Metrics/shoelace/grasp_{('left', 'right')[other_arm]}"].item() < 1.0e-5
     assert env.extras["log"]["Metrics/shoelace/grasp_both"].item() < 1.0e-5
+    # Stationary grasp acquisition raises the score to 0.5, not the displacement.
+    first_score_key = f"Metrics/shoelace/pull_{('left', 'right')[first_arm]}_score"
+    assert env.extras["log"][first_score_key].item() == pytest.approx(0.5, abs=1.0e-5)
 
     signed_distance[:, other_contact].zero_()
     second_grasp = compute().item() * env.step_dt * cfg.weight
@@ -288,6 +305,10 @@ def test_dense_reward_filters_contact_and_resets_only_selected_envs(monkeypatch:
             "grasp_both",
             "pull_left",
             "pull_right",
+            "pull_left_score",
+            "pull_right_score",
+            "pull_left_displacement_m",
+            "pull_right_displacement_m",
             "pull_x_separation_m",
             "success_rate",
             "valid_fraction",
@@ -298,12 +319,16 @@ def test_dense_reward_filters_contact_and_resets_only_selected_envs(monkeypatch:
     assert (compute() > 0.0).all()
 
     signed_distance[0] = torch.nan
+    x_separation[0] = 0.40
     reward = compute()
     assert reward[0].item() == 0.0
     assert reward[1].item() > 0.0
     assert env.extras["log"]["Metrics/shoelace/valid_fraction"].item() == 0.5
     assert all(torch.isfinite(value) for value in env.extras["log"].values())
+    for side in ("left", "right"):
+        assert env.extras["log"][f"Metrics/shoelace/pull_{side}_displacement_m"].item() == 0.0
     signed_distance.zero_()
+    x_separation[0] = 0.10
     assert (compute() > 0.0).all()
 
     term.reset([0])
@@ -311,9 +336,17 @@ def test_dense_reward_filters_contact_and_resets_only_selected_envs(monkeypatch:
     reward = compute()
     assert reward[0].item() == 0.0
     assert reward[1].item() > 0.0
+    for side in ("left", "right"):
+        assert env.extras["log"][f"Metrics/shoelace/pull_{side}_displacement_m"].item() == 0.0
 
     x_separation.fill_(0.14)
     assert (compute() > 0.0).all()
+    # Only the reset environment rebases: outward motion is 0.03 and 0.02 m per arm.
+    expected_displacement = ((x_separation - torch.tensor([0.08, 0.10])) / 2.0).mean()
+    for side in ("left", "right"):
+        torch.testing.assert_close(
+            env.extras["log"][f"Metrics/shoelace/pull_{side}_displacement_m"], expected_displacement
+        )
     grasp_before_slip = env.extras["log"]["Metrics/shoelace/grasp_both"].clone()
     relative_speed.fill_(0.8)
     assert (compute() < 0.0).all()
@@ -344,6 +377,8 @@ def test_dense_reward_filters_contact_and_resets_only_selected_envs(monkeypatch:
     compute()
     assert env.extras["log"]["Metrics/shoelace/valid_fraction"].item() == 0.0
     assert env.extras["log"]["Metrics/shoelace/grasp_both"].item() == 0.0
+    for side in ("left", "right"):
+        assert env.extras["log"][f"Metrics/shoelace/pull_{side}_displacement_m"].item() == 0.0
     assert all(torch.isfinite(value) for value in env.extras["log"].values() if isinstance(value, torch.Tensor))
 
 

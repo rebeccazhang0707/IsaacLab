@@ -166,8 +166,9 @@ therefore does not have the dense term's zero-return closed-cycle property. Thes
 not been tuned through training. Adjust them independently with `env.rewards.arm_action_rate.weight` and
 `env.rewards.arm_action_magnitude.weight`.
 
-The dense term writes nine phase metrics to `extras["log"]` on every policy step. RSL-RL prints their rollout
-averages in each training iteration and writes the same tags to TensorBoard:
+The dense term writes phase metrics to `extras["log"]` on every policy step. RSL-RL prints their rollout
+averages in each training iteration and writes the same tags to TensorBoard. Prefer physical displacement
+to the grasp-gated score when checking whether a tail actually moved outward:
 
 | Tag under `Metrics/shoelace/` | Interpretation |
 | --- | --- |
@@ -175,9 +176,20 @@ averages in each training iteration and writes the same tags to TensorBoard:
 | `grasp_left`, `grasp_right` | Filtered contact, closure, and low-slip grasp quality for each arm in [0, 1]. |
 | `grasp_both` | Hamacher soft-AND of both filtered grasp qualities in [0, 1]. |
 | `pull_x_separation_m` | Absolute two-tail X separation [m]; 0.18 m is one necessary success condition. |
-| `pull_left`, `pull_right` | Each tail's progress gated by its own filtered grasp. |
+| `pull_left_displacement_m`, `pull_right_displacement_m` | Signed outward tail displacement from the episode baseline [m], independent of grasp quality. Positive means outward; negative means inward. |
+| `pull_left_score`, `pull_right_score` | Each tail's progress gated by its own filtered grasp, in [0, 1]; not a distance or success rate. |
+| `pull_left`, `pull_right` | Deprecated aliases of `pull_left_score` and `pull_right_score`; their values have not changed. |
 | `success_rate` | Mean success over each environment's most recent completed episode. |
 | `valid_fraction` | Fraction of environments whose checked reward inputs contain no NaN/Inf; normally 1.0. |
+
+Each displacement uses the mean position of the corresponding tail's three free-end segments relative
+to the fixed seam midpoint. Left-arm outward motion is negative X; right-arm outward motion is positive X.
+The baseline is the first finite reward sample after that environment resets, not the first grasp. Thus
+`0.02` means 2 cm farther outward than the baseline, `-0.01` means 1 cm inward, and acquiring a stationary
+grasp leaves displacement at zero. Releasing and regrasping do not rebase it. The displacement is neither
+clipped nor grasp-gated: passive cable motion also counts, so it does not prove that the gripper caused
+the motion. A stationary ideal grasp can still produce a pull **score** near 0.5 because the reward's
+internal progress starts at 0.5; the new displacement metrics do not change that reward formula.
 
 `finite` is the internal per-environment numerical mask. It checks tail-to-TCP distances, finger-tail signed
 distances, relative speeds, closure fractions, tail X separation, and outward tail offsets. If any checked
@@ -192,15 +204,20 @@ flag, excludes environments that have not finished an episode, and is zero until
 continuous grasp scores are contact-based proxies, not discrete stage-completion labels. For example, high
 `pull_x_separation_m` with low `grasp_both` indicates separated tails without strong simultaneous grasps. Metrics are
 computed by the dense reward term and require its weight to remain nonzero.
+RSL-RL then averages the per-step values over its rollout window. In the current multi-GPU runner these
+custom metrics are logged from rank 0's local environments, not reduced across all GPUs. Displacement
+curves are therefore mean signed displacements, not per-episode maximum distances; opposite motions
+across environments can cancel in the average.
 
 `grasp_both` averages the per-environment joint grasp quality. It cannot be recovered by combining the logged
 averages of `grasp_left` and `grasp_right`: different environments may hold different single tails.
 
-The log was reduced to nine metrics by removing `approach_score`, `grasp_slip_mps`, `pull_progress`, and
-`pull_score`, and adding the per-arm `pull_left` and `pull_right` scores. Update dashboards to use the
-physical approach distance, per-arm grasp/pull scores, actual separation, and success rate above. These are
-diagnostic replacements, not numerically equivalent signals. Reward calculations, including slip-sensitive
-grasp quality and the bilateral pull bonus, are unchanged by this logging reduction.
+Dashboard migration: use `pull_left_displacement_m` and `pull_right_displacement_m` for physical progress,
+and `pull_left_score` and `pull_right_score` when inspecting the reward's internal scores. The old
+`pull_left` and `pull_right` tags remain available as deprecated score aliases for compatibility; do not
+interpret old curves as meters or compare score and displacement values directly. Existing event files
+are not rewritten. Reward calculations, including slip-sensitive grasp quality and the bilateral pull
+bonus, are unchanged by this logging update.
 
 The reward manager separately logs `Episode_Reward/pregrasp`, `Episode_Reward/grasp_hold`, `Episode_Reward/success`,
 `Episode_Reward/arm_action_rate`, and `Episode_Reward/arm_action_magnitude` when episodes reset.
