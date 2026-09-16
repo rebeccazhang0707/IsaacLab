@@ -212,11 +212,12 @@ def test_legacy_dense_reward_orders_approach_contact_grasp_and_pull(
     torch.testing.assert_close(torch.stack(reward_history).sum(dim=0) * env.step_dt, torch.zeros(1))
 
 
+@pytest.mark.parametrize("bilateral_fraction", [0.0, 0.8, 1.0])
 @pytest.mark.parametrize("first_arm", [0, 1])
 def test_pull_pays_new_displacement_without_regrasp_or_passive_motion_credit(
-    monkeypatch: pytest.MonkeyPatch, first_arm: int
+    monkeypatch: pytest.MonkeyPatch, first_arm: int, bilateral_fraction: float
 ) -> None:
-    """Only new physical records with current grasps earn the bounded pull budget."""
+    """Valid new records keep paying beyond the pull scale, without cycle or passive-motion credit."""
     grasp = torch.zeros((2, 2))
     finite = torch.ones(2, dtype=torch.bool)
     outward = torch.full((2, 2), 0.05)
@@ -227,6 +228,7 @@ def test_pull_pays_new_displacement_without_regrasp_or_passive_motion_credit(
     monkeypatch.setattr(shoelace_rewards, "tail_x_separation", lambda *args: outward.sum(dim=1))
     cfg = RewardsCfg().dense_task
     cfg.params["acquisition_weight"] = 0.0
+    cfg.params["bilateral_pull_fraction"] = bilateral_fraction
     cfg.params["grasp_filter_time_constant"] = 1.0e-6
     term = cfg.func(cfg, env)
     budget = cfg.weight
@@ -242,7 +244,9 @@ def test_pull_pays_new_displacement_without_regrasp_or_passive_motion_credit(
     grasp.fill_(0.5)
     outward += scale * 0.25
     first_pull = compute()
-    assert (first_pull > 0).all()  # Grasp dropped, but remains valid and both tails moved outward.
+    # Preserve the original below-scale curve: H(1/4, 1/4) is approximately 1/7.
+    expected_first = budget * ((1 - bilateral_fraction) * 0.25 + bilateral_fraction / 7)
+    torch.testing.assert_close(first_pull, torch.full((2,), expected_first))
     torch.testing.assert_close(compute(), torch.zeros(2))
     outward -= scale * 0.25
     torch.testing.assert_close(compute(), torch.zeros(2))
@@ -280,13 +284,31 @@ def test_pull_pays_new_displacement_without_regrasp_or_passive_motion_credit(
     torch.testing.assert_close(independent, torch.full((2,), expected_independent))
     grasp[:, other_arm] = 0.9
     torch.testing.assert_close(compute(), torch.zeros(2))  # No delayed cooperation bonus on regrasp.
-    outward[:] = 0.05 + scale * 2
+    outward[:] = 0.05 + scale
     final_pull = compute()
     assert (final_pull > 0).all()
     assert reset_pull[0] + independent[0] + final_pull[0] <= budget
     assert first_pull[1] + independent[1] + final_pull[1] <= budget
     outward += scale
-    torch.testing.assert_close(compute(), torch.zeros(2))  # Progress saturates at the physical target.
+    torch.testing.assert_close(compute(), torch.full((2,), budget))  # Continue beyond the old cap.
+
+    # Beyond the scale, the trailing arm controls cooperation; the leading arm earns independent credit.
+    outward[:, first_arm] += scale * 0.25
+    torch.testing.assert_close(compute(), torch.full((2,), expected_independent))
+    outward[:, other_arm] += scale * 0.25
+    expected_catchup = expected_independent + budget * bilateral_fraction * 0.25
+    torch.testing.assert_close(compute(), torch.full((2,), expected_catchup))
+    outward -= scale
+    torch.testing.assert_close(compute(), torch.zeros(2))
+    outward += scale
+    torch.testing.assert_close(compute(), torch.zeros(2))
+    grasp.zero_()
+    outward += scale
+    torch.testing.assert_close(compute(), torch.zeros(2))
+    grasp.fill_(0.9)
+    torch.testing.assert_close(compute(), torch.zeros(2))
+    outward += scale
+    torch.testing.assert_close(compute(), torch.full((2,), budget))
 
 
 def test_success_is_only_finite_absolute_tail_x_separation(monkeypatch: pytest.MonkeyPatch) -> None:

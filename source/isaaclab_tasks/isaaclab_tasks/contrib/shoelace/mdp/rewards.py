@@ -188,8 +188,9 @@ class dense_task_reward(ManagerTermBase):
 
         Notes:
             - Reset: the first finite sample seeds state and returns zero; regrasping never resets references.
-            - High-water pull: starts at zero and saturates at the per-arm separation target. Records advance
-              even without grasps, preventing retrospective payment on regrasp. Returning to an old position
+            - High-water pull: starts at zero and continues beyond the per-arm separation scale. Above the
+              scale, bilateral progress follows the smaller current per-arm progress. Records advance even
+              without grasps, preventing retrospective payment on regrasp. Returning to an old position
               cannot earn credit again. Acquisition still penalizes grasp loss and moving away from tails.
             - Legacy pull scores start at 0.5 before grasp gating and remain available as diagnostic metrics.
             - Invalid inputs: return zero and preserve reward history; excluded from phase metric averages.
@@ -220,7 +221,7 @@ class dense_task_reward(ManagerTermBase):
                 both arms must qualify for new bilateral records. Used only in high-water mode.
 
         Returns:
-            Signed reward rates [1/s], shape [N]. Acquisition and pull budgets sum to one.
+            Signed reward rates [1/s], shape [N]. High-water pull has no fixed total reward cap.
 
         Raises:
             ValueError: If scene entities, reward budgets, or the separation target are invalid.
@@ -289,8 +290,11 @@ class dense_task_reward(ManagerTermBase):
         potential = acquisition_weight * acquire
         pull_increment = torch.zeros_like(potential)
         if pull_use_high_water_mark:
-            physical_progress = (outward_displacement / pull_scale.unsqueeze(1)).clamp(0.0, 1.0)
-            bilateral_progress = _hamacher_product(physical_progress[:, 0], physical_progress[:, 1])
+            physical_progress = (outward_displacement / pull_scale.unsqueeze(1)).clamp_min(0.0)
+            # Preserve shaping below the scale; extend cooperation with the trailing arm beyond it.
+            bounded_progress = physical_progress.clamp_max(1.0)
+            bilateral_progress = _hamacher_product(bounded_progress[:, 0], bounded_progress[:, 1])
+            bilateral_progress += (physical_progress.amin(dim=1) - 1.0).clamp_min(0.0)
             progress_records = torch.cat((physical_progress, bilateral_progress.unsqueeze(1)), dim=1)
             best_progress = torch.maximum(self._best_pull_progress, progress_records)
             new_progress = best_progress - self._best_pull_progress

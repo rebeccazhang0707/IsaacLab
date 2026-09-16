@@ -52,8 +52,10 @@ approach = 0.5 * A.mean(dim=-1) + 0.5 * H(A[:, 0], A[:, 1])
 grasp = 0.3 * G.mean(dim=-1) + 0.7 * H(G[:, 0], G[:, 1])
 acquisition_potential = 0.3 * approach + 0.3 * grasp
 scale = max((0.18 - initial_x_separation) / 2, 0.01)  # per environment, metres
-P = clip(d / scale, 0, 1)
-records = concatenate((P, H(P[:, 0], P[:, 1])[:, None]), dim=1)
+P = maximum(d / scale, 0)
+B = minimum(P, 1)  # Hamacher inputs stay in [0, 1].
+bilateral = H(B[:, 0], B[:, 1]) + maximum(P.min(dim=-1).values - 1, 0)
+records = concatenate((P, bilateral[:, None]), dim=1)
 new_records = maximum(records - best_records, 0)
 eligible = (raw_grasp >= 0.2) & (G >= 0.2)
 pull_increment = 0.2 * (new_records[:, :2] * eligible).mean(dim=-1)
@@ -62,9 +64,11 @@ best_records = maximum(best_records, records)  # also advance without grasps
 reward_rate = (acquisition_potential - previous_acquisition_potential + 0.4 * pull_increment) / step_dt
 ```
 
-`acquisition_weight=0.6` and `approach_fraction=0.5` divide the progress budget into 30% approach, 30% grasp, and
+`acquisition_weight=0.6` and `approach_fraction=0.5` set progress weights of 30% approach, 30% grasp, and
 40% pull. The manager multiplies the returned rate by `step_dt` and the overall weight (10), giving maximum
-progress budgets of 3, 3, and 4. `bilateral_approach_fraction=0.5` and `bilateral_grasp_fraction=0.7` reserve
+acquisition gains of 3 for approach and 3 for grasp. Pull pays approximately 4 for ideal bilateral progress
+from zero to one scale, then 4 per additional common scale of new outward progress; its total is not capped.
+`bilateral_approach_fraction=0.5` and `bilateral_grasp_fraction=0.7` reserve
 half the approach budget and 70% of grasp acquisition for cooperation. Independent credit starts either arm;
 bringing the other arm into the same phase earns a larger increment. With ideal scores, one approached arm
 earns 0.75 of the approach budget and approaching the other adds 2.25. One grasp earns 0.45 of the acquisition
@@ -91,8 +95,11 @@ new physical record with sufficient grasp quality earns an increment; `pull_gras
 eligibility. The bilateral record uses both current physical progresses, not independent historical maxima,
 and requires both current grasps. Records advance even during ungrasped motion, preventing retrospective
 payment on regrasp. They never reset on release or inward motion. Repeated inward/outward cycles cannot
-earn the same pull credit twice; progress below the reset baseline or past the per-arm target pays nothing.
-This deliberately trades below-baseline recovery feedback for a bounded, non-repeatable pull budget.
+earn the same pull credit twice; progress below the reset baseline pays nothing. The separation scale is
+not a stopping threshold: new records beyond it continue paying until termination. The original Hamacher
+shaping is preserved up to that scale; beyond it, the bilateral extension follows the smaller current
+per-arm progress, so pulling only the leading arm farther earns independent credit, not an extra bilateral
+bonus. This removes premature reward saturation without changing success, grasp gates, or the scale.
 Each bilateral fraction can be set to zero to use only the corresponding per-arm mean.
 
 Approach and grasp retain their signed potential differences, including penalties for losing a grasp or
@@ -166,7 +173,10 @@ cooperative task success and geometry-only completion separately when comparing 
 
 **Migration:** The observation/action interface is unchanged, but the reward objective and defaults changed.
 Existing checkpoints remain loadable; re-evaluate them and use a separate training run because return values
-and grasp-score curves are not directly comparable. To reproduce the pre-loaded-pull objective, set
+and grasp-score curves are not directly comparable. High-water pull no longer clips records at one scale;
+old capped-pull checkpoints need further training to learn from the extended reward. To reproduce the capped
+objective, use its original code revision; saved configuration alone does not restore that formula.
+To reproduce the pre-loaded-pull objective, set
 `contact_penetration_tolerance=0.0` in both dense and hold terms, `dense_task.params.pull_use_high_water_mark=False`,
 and `grasp_hold.params.full_reward_duration=None`. These are also independent ablation switches; change one
 step at a time when attributing training improvements. Old saved parameter dictionaries retain legacy behavior
@@ -199,7 +209,7 @@ reward += pregrasp_reward + hold_reward + 5.0 * success - step_dt * (
 
 Both progress terms are zero on their first valid samples as described above; other reward terms still apply.
 Action history resets to zero per environment, so the first command is compared with zero. The total reward
-therefore includes ongoing maintenance rewards as well as bounded progress credit. These small initial weights have
+therefore includes ongoing maintenance rewards as well as new-record progress credit. These small initial weights have
 not been tuned through training. Adjust them independently with `env.rewards.arm_action_rate.weight` and
 `env.rewards.arm_action_magnitude.weight`.
 
