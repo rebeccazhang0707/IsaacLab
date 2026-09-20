@@ -4,10 +4,21 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import newton
+import numpy as np
 import pytest
+import warp as wp
+from isaaclab_newton.cloner.newton_clone_utils import build_source_builders
+from isaaclab_newton.sim.schemas import (
+    NewtonCablePropertiesCfg,
+    NewtonCollisionCfg,
+    apply_newton_cable_properties,
+)
+from isaaclab_newton.sim.spawners.materials import NewtonMaterialCfg
+
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 import isaaclab.sim as sim_utils
-from isaaclab.sim.spawners.materials import CableMaterialCfg
+from isaaclab.sim.spawners.materials import CableMaterialCfg, UsdPhysicsRigidBodyMaterialCfg, spawn_physics_material
 from isaaclab.sim.spawners.shapes import CableCfg
 
 # Cable joint degrees of freedom, in the order Newton lays them out.
@@ -116,3 +127,139 @@ def test_newton_imports_cable_with_adjacent_collision_filtering():
 
     assert all(flag & newton.ShapeFlags.COLLIDE_SHAPES for flag in builder.shape_flags)
     assert filter_pairs == {(0, 1), (1, 2)}
+
+
+def _cable_stage() -> Usd.Stage:
+    stage = sim_utils.create_new_stage()
+    UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+    cfg = CableCfg(
+        positions=[(0.0, 0.0, 0.0), (0.2, 0.0, 0.0), (0.4, 0.0, 0.0), (0.6, 0.0, 0.0)],
+        physics_material=CableMaterialCfg(),
+        collision_props=[sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)],
+    )
+    cfg.func("/World/Cable", cfg)
+    return stage
+
+
+def _source_builder(stage: Usd.Stage) -> newton.ModelBuilder:
+    return build_source_builders(stage, ["/World/Cable"], newton.ModelBuilder, [])["/World/Cable"]
+
+
+def test_cable_physics_arrays_survive_usd_roundtrip_and_replication(tmp_path):
+    """Keep segment properties, joint gains, and native filters local through asset replication."""
+    stage = _cable_stage()
+    path = "/World/Cable/geometry/mesh"
+    prim = stage.GetPrimAtPath(path)
+    prim.CreateAttribute("physics:masses", Sdf.ValueTypeNames.FloatArray).Set([0.1, 0.2, 0.3])
+    prim.CreateAttribute("physics:masses:elementType", Sdf.ValueTypeNames.Token).Set("segment")
+    native = newton.ModelBuilder()
+    native.add_usd(stage, root_path="/World/Cable")
+    inertias = np.asarray(native.body_inertia).reshape(3, 3, 3) + np.eye(3) * 0.001
+    inertias[2] = 0.0
+    gains = [Gf.Vec4d(100, 200, 3, 4), Gf.Vec4d(500, 600, 7, 8)]
+    cfg = NewtonCablePropertiesCfg(
+        fixed_segments=[2],
+        segment_orientations=[(0.0, 0.0, 0.0, 1.0)] * 3,
+        joint_stiffnesses=[tuple(row) for row in gains],
+        joint_dampings=[(1.0, 2.0, 3.0, 4.0)] * 2,
+        dahl_max_strains=[0.2, 0.3],
+        dahl_decay=[0.4, 0.5],
+    )
+    apply_newton_cable_properties(cfg, path, stage)
+    # Partial fragment overrides keep every other authored field and all native properties.
+    apply_newton_cable_properties(NewtonCablePropertiesCfg(inertia_regularization=0.001), path, stage)
+    material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial(materialPurpose="physics")
+    spawn_physics_material(
+        str(material.GetPath()),
+        [
+            UsdPhysicsRigidBodyMaterialCfg(dynamic_friction=0.7),
+            NewtonMaterialCfg(contact_stiffness=123.0, contact_damping=4.0),
+        ],
+        stage=stage,
+    )
+    sim_utils.apply_namespaced(NewtonCollisionCfg(contact_gap=0.001), path, stage)
+    filter_prim = stage.DefinePrim("/World/Cable/Filter", "PhysicsElementCollisionFilter")
+    for side, segment in ((0, 0), (1, 2)):
+        filter_prim.CreateRelationship(f"physics:src{side}").SetTargets([path])
+        filter_prim.CreateAttribute(f"physics:groupElemCounts{side}", Sdf.ValueTypeNames.IntArray).Set([1])
+        filter_prim.CreateAttribute(f"physics:groupElemIndices{side}", Sdf.ValueTypeNames.IntArray).Set([segment])
+    asset = tmp_path / "cable.usda"
+    stage.GetRootLayer().Export(str(asset))
+    source = _source_builder(Usd.Stage.Open(str(asset)))
+    builder = newton.ModelBuilder()
+    builder.replicate(source, 2, xforms=[wp.transform(), wp.transform(wp.vec3(1, 2, 3), wp.quat(0, 0, 1, 0))])
+
+    np.testing.assert_allclose(builder.body_mass, [0.1, 0.2, 0, 0.1, 0.2, 0])
+    np.testing.assert_allclose(
+        np.asarray(builder.body_inertia).reshape(6, 3, 3),
+        np.tile(inertias, (2, 1, 1)),
+    )
+    np.testing.assert_allclose(np.asarray(builder.body_q)[:, 3:], [[0, 0, 0, 1]] * 3 + [[0, 0, 1, 0]] * 3)
+    np.testing.assert_allclose(builder.joint_target_ke, np.tile(np.asarray(gains).ravel(), 2))
+    np.testing.assert_allclose(builder.joint_target_kd, [1, 2, 3, 4] * 4)
+    for field, value in (("mu", 0.7), ("ke", 123.0), ("kd", 4.0)):
+        np.testing.assert_allclose(getattr(builder, "shape_material_" + field), value)
+    np.testing.assert_allclose(builder.shape_gap, 0.001)
+    model = builder.finalize(device="cpu")
+    np.testing.assert_allclose(model.vbd.dahl_eps_max.numpy(), [0.2, 0.3] * 2)
+    np.testing.assert_allclose(model.vbd.dahl_tau.numpy(), [0.4, 0.5] * 2)
+    assert set(builder.shape_collision_filter_pairs) == {(0, 1), (1, 2), (0, 2), (3, 4), (4, 5), (3, 5)}
+
+
+@pytest.mark.parametrize(
+    ("name", "usd_type", "value"),
+    [
+        ("fixedSegments", Sdf.ValueTypeNames.IntArray, [3]),
+        ("jointStiffnesses", Sdf.ValueTypeNames.Double4Array, [Gf.Vec4d(1)]),
+        ("dahlDecay", Sdf.ValueTypeNames.FloatArray, [0.1, float("nan")]),
+        ("segmentOrientations", Sdf.ValueTypeNames.Double4Array, [Gf.Vec4d(0)] * 3),
+        ("inertiaRegularization", Sdf.ValueTypeNames.Double, -1.0),
+    ],
+)
+def test_invalid_cable_physics_arrays_fail_import(name, usd_type, value):
+    stage = _cable_stage()
+    stage.GetPrimAtPath("/World/Cable/geometry/mesh").CreateAttribute(f"isaaclab:cable:{name}", usd_type).Set(value)
+    with pytest.raises(ValueError, match=name):
+        _source_builder(stage)
+
+
+def test_cable_without_physics_arrays_preserves_native_import():
+    stage = _cable_stage()
+    native = newton.ModelBuilder()
+    native.add_usd(stage, root_path="/World/Cable")
+    imported = _source_builder(stage)
+    for name in ("body_mass", "body_inertia", "body_q", "joint_target_ke", "joint_target_kd", "shape_gap"):
+        np.testing.assert_array_equal(getattr(imported, name), getattr(native, name))
+
+
+def test_authored_fixture_stays_a_resettable_zero_mass_body():
+    stage = _cable_stage()
+    cube = UsdGeom.Cube.Define(stage, "/World/Cable/Fixture").GetPrim()
+    UsdPhysics.RigidBodyAPI.Apply(cube).CreateKinematicEnabledAttr(True)
+    UsdPhysics.CollisionAPI.Apply(cube)
+    UsdPhysics.MassAPI.Apply(cube).CreateMassAttr(1.0)
+    cube.CreateAttribute("isaaclab:physics:fixed", Sdf.ValueTypeNames.Bool).Set(True)
+    builder = _source_builder(stage)
+    body = builder.body_label.index(str(cube.GetPath()))
+    assert builder.body_mass[body] == builder.body_inv_mass[body] == 0.0
+    np.testing.assert_array_equal(np.asarray(builder.body_inertia[body]), 0.0)
+    np.testing.assert_array_equal(np.asarray(builder.body_inv_inertia[body]), 0.0)
+    assert builder.body_shapes[body]
+
+
+@pytest.mark.parametrize("scale", [1.0, 2.0])
+def test_cable_local_orientations_compose_rotation_and_reject_unbaked_scale(scale):
+    stage = _cable_stage()
+    root = UsdGeom.Xformable(stage.GetPrimAtPath("/World/Cable"))
+    root.AddRotateZOp().Set(180.0)
+    root.GetPrim().GetAttribute("xformOp:scale").Set(Gf.Vec3d(scale))
+    curve = stage.GetPrimAtPath("/World/Cable/geometry/mesh")
+    curve.CreateAttribute("isaaclab:cable:segmentOrientations", Sdf.ValueTypeNames.Double4Array).Set(
+        [Gf.Vec4d(0, 0, 0, 1)] * 3
+    )
+    if scale != 1.0:
+        with pytest.raises(ValueError, match="bake scale/shear"):
+            _source_builder(stage)
+    else:
+        builder = _source_builder(stage)
+        np.testing.assert_allclose(np.asarray(builder.body_q)[:, 3:], [[0, 0, 1, 0]] * 3, atol=1.0e-7)

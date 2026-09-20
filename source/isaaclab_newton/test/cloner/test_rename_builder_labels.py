@@ -388,6 +388,7 @@ class TestVisualizationClonePlan(unittest.TestCase):
         self.assertEqual(registry_groups, [])
         builder.add_usd.assert_called_once_with(
             stage,
+            return_deformable_results=True,
             schema_resolvers=["newton", "physx"],
             ignore_paths=None,
             skip_mesh_approximation=True,

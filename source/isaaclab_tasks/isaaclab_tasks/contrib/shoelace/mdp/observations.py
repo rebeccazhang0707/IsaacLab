@@ -5,29 +5,24 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import torch
 
 from isaaclab.envs import ManagerBasedEnv
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils import math as math_utils
 
-from ..shoelace_physics import TCP_OFFSET
+from ..shoelace_constants import TCP_OFFSET
 from .utils import tail_state
 
-if TYPE_CHECKING:
-    from ..shoelace_env import ShoelaceEnv
 
-
-def finger_tail_signed_distance(env: ShoelaceEnv) -> torch.Tensor:
+def finger_tail_signed_distance(env: ManagerBasedEnv) -> torch.Tensor:
     """Return signed surface separation for both fingers of each gripper [m].
 
     The columns are left-gripper left/right finger followed by right-gripper left/right finger.
     A positive capped value denotes no collision candidate, zero denotes touching, and negative values
     denote contact-solver penetration.
     """
-    signed_distance = env._physics.finger_tail_signed_distance
+    signed_distance = env.scene["finger_tail_contacts"].data
     if signed_distance is None:
         raise RuntimeError("Shoelace finger-tail contact observation is not initialized")
     return signed_distance

@@ -43,21 +43,43 @@ The smoke test verifies rollout and PPO updates; it does not establish policy co
 
 | Module | Responsibility |
 | --- | --- |
-| `shoelace_env_cfg.py` | Scene, actions, observations, events, rewards, terminations, and explicit solver composition |
-| `shoelace_env.py` | Fill runtime geometry/capacities, install settled defaults, and coordinate reset |
-| `shoelace_model.py` | Newton builder callback: gravity compensation, cable materials, anchors, and Dahl hysteresis |
-| `shoelace_contacts.py` | Map collision shapes and aggregate signed finger-tail distances on the simulation device |
-| `shoelace_physics.py` | Asset loading, spawners, cable geometry, inertia, and collision filtering |
+| `shoelace_env_cfg.py` | Standard manager-based scene, solver composition, managers, and dependent configuration resolution |
+| `shoelace_assets.py`, `shoelace_constants.py` | USD material overrides, common spawners, asset paths, and physical defaults |
+| `shoelace_contacts.py` | Scene sensor for signed finger-tail distances, including selective reset and CUDA capture |
+| `generate_asset.py`, `asset_authoring.py` | Offline generation of the composite shoe/cable USD and its physics properties |
 | `mdp/grasp.py` | Shared contact/closure/slip quality, filtering, and bilateral scoring |
-| `mdp/observations.py`, `mdp/events.py` | Policy inputs and physically consistent reset randomization |
+| `mdp/observations.py`, `mdp/events.py` | Policy inputs, startup settled defaults, and reset randomization |
 | `mdp/rewards.py`, `mdp/terminations.py` | Independent manager-term histories for progress, retention, and success |
 | `agents/rsl_rl_ppo_cfg.py` | PPO runner configuration |
-| `data/` | Packaged USD assets, textures, and offline settled poses; see attribution there |
+| `data/` | Baked composite USD, source assets, textures, and offline settled poses; see attribution there |
+
+The Gym entry point is `isaaclab.envs:ManagerBasedRLEnv`. The default task has no
+model-builder callback. The Newton importer reads asset-local physics properties
+before replication; `EventTermCfg` handles settled defaults and randomized resets.
+`FingerTailContactSensor` initializes before solver CUDA capture and clears its cache
+through the normal scene sensor reset. Robot gravity compensation uses `MujocoRigidBodyCfg`.
+
+To regenerate the asset after changing offline geometry or material calculations:
+
+```bash
+PXR_WORK_THREAD_LIMIT=1 uv run python -m isaaclab_tasks.contrib.shoelace.generate_asset
+```
+
+`data/shoelace.usda` uses native segment masses (which also determine geometric inertia),
+material/contact attributes, and element collision filters. `NewtonCablePropertiesCfg` extends
+the existing `SchemaFragment` interface for fixed endpoints, proxy inertia, initial frames,
+tail stiffness/damping, and Dahl parameters that preserve the special model behavior. Its paths
+and segment indices are internal to the asset. Runtime `finger_mu`, `lace_mu`, `shoe_mu`,
+and `cable_inertia_regularization` overrides remain available; they modify USD properties
+before import. Contact capacity and ground size resolve from the final `scene.num_envs`
+in `validate_config()`, including CLI overrides.
+
+The Isaac Lab USD extension and supported units/topologies are documented in
+[Authoring Newton cable assets](../../../../../docs/source/how-to/newton_cable_assets.rst).
 
 Grasp calculations are shared, but reward and termination filters remain independent. Disabling a reward
-for an ablation cannot change the success history. The existing `mdp.shoelace_grasp_quality` and
-`mdp.rewards.shoelace_grasp_quality` imports remain available. `ShoelaceVBDSolverCfg` is retained for
-compatibility; the default task now configures the framework's `VBDSolverCfg` directly.
+for an ablation cannot change the success history. The task configures the framework's `VBDSolverCfg`
+directly.
 
 ## Task contract
 
@@ -96,6 +118,9 @@ filtered grasps exceed 0.2 at both ends of each credited interval. Then each tai
 0.09 m outward X boundary, and each cable must leave at most 15 free segments within the 0.025 m
 knot-throat radius. One arm cannot compensate for the other. Completed loaded pulls remain recorded
 after release; current geometry must still satisfy the completion condition.
+
+`mdp.shoelace_bilateral_pull_success` uses the grasp and geometry parameters in
+`TerminationsCfg.success`. The success reward reads this termination result without recomputing it.
 
 The outer collision pipeline scales its capacity with environment count. The ADMM pipeline retains
 its small triangle budget for Newton 1.6 contact matching and scales its reduction table instead.

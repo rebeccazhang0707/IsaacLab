@@ -27,6 +27,7 @@ from isaaclab_newton.cloner.newton_clone_utils import (
 )
 from isaaclab_newton.physics import NewtonCfg, NewtonManager
 from isaaclab_newton.renderers.visual_material import import_builder_visual_material_paths
+from isaaclab_newton.sim.usd import _add_usd
 
 if TYPE_CHECKING:
     from isaaclab.cloner import ClonePlan
@@ -117,7 +118,8 @@ def _build_newton_builder_from_mapping(
     hf_ignore_paths = manager_cls._inject_terrain_heightfields(stage, builder, root_paths=import_paths)
     import_results = []
     for root_path in import_paths:
-        import_result = builder.add_usd(
+        import_result = _add_usd(
+            builder,
             stage,
             root_path=root_path,
             ignore_paths=hf_ignore_paths,

@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from dataclasses import fields
+
 from isaaclab_newton.physics import (
     MJWarpSolverCfg,
     NewtonCfg,
@@ -14,9 +16,10 @@ from isaaclab_newton.physics import (
     NewtonShapeCfg,
     VBDSolverCfg,
 )
+from isaaclab_newton.sim.schemas import MujocoRigidBodyCfg
 
 import isaaclab.envs.mdp as env_mdp
-from isaaclab.assets import ArticulationCfg, AssetBaseCfg, CableObjectCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, CableObjectCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -36,7 +39,10 @@ from isaaclab_tasks.core.lift.config.franka_soft.franka_soft_env_cfg import (
 from isaaclab_tasks.core.lift.config.franka_soft.franka_soft_env_cfg import FrankaSoftSceneCfg
 
 from . import mdp
-from . import shoelace_physics as physics
+from . import shoelace_assets as assets
+from . import shoelace_constants as physics
+from .shoelace_assets import ShoelaceUsdCfg
+from .shoelace_contacts import FingerTailContactSensorCfg
 
 TCP_OFFSET = physics.TCP_OFFSET
 ARM_ACTION_SCALE = 0.005
@@ -49,9 +55,6 @@ TAIL_SUCCESS_OUTWARD_DISTANCE = 0.09
 TAIL_SUCCESS_X_SEPARATION = 2.0 * TAIL_SUCCESS_OUTWARD_DISTANCE
 THROAT_RADIUS = 0.025
 MAXIMUM_THROAT_SEGMENTS_PER_ARM = 15
-# Legacy geometry-only defaults; not used by the cooperative success configuration.
-MAXIMUM_THROAT_SEGMENTS = 52
-TAIL_SUCCESS_DISTANCE = 0.09
 
 NEWTON_NUM_SUBSTEPS = 10
 NEWTON_COLLISION_DECIMATION = 2
@@ -107,10 +110,14 @@ def _franka_cfg(
 ) -> ArticulationCfg:
     """Build one fixed-base Franka in the nominal open-pregrasp pose."""
     robot = FrankaSoftSceneCfg().default.robot.replace(prim_path=prim_path)
+    spawn_args = {field.name: getattr(robot.spawn, field.name) for field in fields(robot.spawn)}
+    spawn_args.pop("func")
+    robot.spawn = ShoelaceUsdCfg(**spawn_args)
     robot.init_state.pos = position
     robot.init_state.rot = rotation
     robot.init_state.joint_pos.update(arm_joint_positions)
     robot.init_state.joint_pos["panda_finger_joint.*"] = GRIPPER_OPEN_POSITION
+    robot.spawn.rigid_props = {"/.*": [robot.spawn.rigid_props, MujocoRigidBodyCfg(gravcomp=1.0)]}
     robot.actuators["panda_hand"].actuator_velocity_limit = 0.04
     robot.actuators["panda_hand"].stiffness = GRIPPER_STIFFNESS
     return robot
@@ -143,15 +150,16 @@ class ShoelaceSceneCfg(InteractiveSceneCfg):
         (0.0, 0.0, 1.0, 0.0),
         RIGHT_ARM_JOINT_POSITIONS,
     )
-    shoe = physics.shoe_asset_cfg(visible=False)
-    shoe_collider = physics.shoe_collider_asset_cfg()
-    shoe_visual = physics.shoe_visual_asset_cfg("/World/ShoeMaterials/shoes")
-    tongue_upper = physics.tongue_upper_asset_cfg()
-    shoelace_left = CableObjectCfg(prim_path="{ENV_REGEX_NS}/ShoelaceLeft", spawn=physics.cable_spawn_cfg())
-    shoelace_pinned_visual = AssetBaseCfg(prim_path="{ENV_REGEX_NS}/Shoe/ShoelacePinned")
-    shoelace_right = CableObjectCfg(prim_path="{ENV_REGEX_NS}/ShoelaceRight", spawn=physics.cable_spawn_cfg())
-    ground = physics.ground_asset_cfg(10.0)
-    light = physics.light_asset_cfg()
+    shoelace_asset = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/ShoelaceScene",
+        spawn=ShoelaceUsdCfg(usd_path=str(physics.ASSET_DIR / "shoelace.usda")),
+    )
+    shoe = RigidObjectCfg(prim_path="{ENV_REGEX_NS}/ShoelaceScene/Shoe", spawn=None)
+    shoelace_left = CableObjectCfg(prim_path="{ENV_REGEX_NS}/ShoelaceScene/ShoelaceLeft", spawn=None)
+    shoelace_right = CableObjectCfg(prim_path="{ENV_REGEX_NS}/ShoelaceScene/ShoelaceRight", spawn=None)
+    finger_tail_contacts = FingerTailContactSensorCfg(prim_path="{ENV_REGEX_NS}/ShoelaceScene")
+    ground = assets.ground_asset_cfg(10.0)
+    light = assets.light_asset_cfg()
 
 
 @configclass
@@ -233,6 +241,8 @@ class ObservationsCfg:
 class EventsCfg:
     """Restore defaults, then perturb arm joints and translate the shoe with its laces."""
 
+    settled_defaults = EventTerm(func=mdp.install_settled_default_state, mode="startup")
+
     reset_scene = EventTerm(
         func=env_mdp.reset_scene_to_default,
         mode="reset",
@@ -265,6 +275,7 @@ class EventsCfg:
 class RewardsCfg:
     """Cooperative progress, sustained grasping, and completion with small arm motion penalties."""
 
+    # Reward coarse approach and physical grasp acquisition changes, plus new outward pull records.
     dense_task = RewTerm(
         func=mdp.dense_task_reward,
         weight=10.0,
@@ -277,10 +288,10 @@ class RewardsCfg:
             "bilateral_approach_fraction": 0.5,
             "bilateral_grasp_fraction": 0.7,
             "bilateral_pull_fraction": 0.8,
-            "pull_use_high_water_mark": True,
             "pull_grasp_threshold": 0.2,
         },
     )
+    # Reward fine TCP-to-tail positional alignment and nearby finger-closure progress before contact.
     pregrasp = RewTerm(
         func=mdp.pregrasp_progress_reward,
         weight=1.0,
@@ -295,6 +306,7 @@ class RewardsCfg:
             "robot_cfgs": ROBOT_CFGS,
         },
     )
+    # Reward retained contact-based, closed-finger, low-slip grasps even without further task progress.
     grasp_hold = RewTerm(
         func=mdp.grasp_hold_reward,
         weight=1.0,
@@ -305,6 +317,7 @@ class RewardsCfg:
             "sustained_reward_fraction": 0.2,
         },
     )
+
     success = RewTerm(func=mdp.shoelace_success_reward, weight=5.0)
     arm_action_rate = RewTerm(func=mdp.arm_action_rate_l2, weight=-0.001)
     arm_action_magnitude = RewTerm(func=mdp.arm_action_l2, weight=-0.001)
@@ -326,15 +339,6 @@ class TerminationsCfg:
         },
     )
     time_out = DoneTerm(func=env_mdp.time_out, time_out=True)
-
-
-@configclass
-class ShoelaceVBDSolverCfg(VBDSolverCfg):
-    """Compatibility configuration; prefer ``VBDSolverCfg`` with explicit task settings."""
-
-    rigid_avbd_alpha: float = 0.0
-    rigid_contact_hard: bool = True
-    rigid_body_contact_buffer_size: int = physics.VBD_CONTACT_BUFFER
 
 
 @configclass
@@ -362,7 +366,7 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
                             njmax=2048,
                             nconmax=256,
                         ),
-                        bodies=[r"/World/envs/env_[^/]+/(Robot(Left|Right)|Shoe)"],
+                        bodies=[r"/World/envs/env_[^/]+/(Robot(Left|Right)|ShoelaceScene/Shoe)"],
                     ),
                     CouplerEntryCfg(
                         name="shoelace",
@@ -371,7 +375,7 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
                             rigid_avbd_alpha=0.0,
                             rigid_body_contact_buffer_size=physics.VBD_CONTACT_BUFFER,
                         ),
-                        bodies=[r"/World/envs/env_[^/]+/Shoelace(Left|Right)"],
+                        bodies=[r"/World/envs/env_[^/]+/ShoelaceScene/Shoelace(Left|Right)"],
                         include_static_shapes=True,
                     ),
                 ],
@@ -411,3 +415,33 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
 
     cable_inertia_regularization: float = physics.CABLE_INERTIA_REGULARIZATION
     """Isotropic inertia added to each dynamic cable segment [kg*m^2], without changing its mass."""
+
+    def validate_config(self) -> None:
+        """Resolve dependent scene settings after CLI overrides and validate the Newton backend."""
+        self.scene.shoelace_asset.spawn.friction_overrides = {
+            "/Shoelace(Left|Right)/geometry/mesh": self.lace_mu,
+            "/Shoe/ShoelacePinned/geometry/mesh": self.lace_mu,
+            "/Shoe/(Collider|TongueUpper/geometry/mesh)": self.shoe_mu,
+        }
+        self.scene.shoelace_asset.spawn.inertia_regularization = self.cable_inertia_regularization
+        for robot in (self.scene.robot_left, self.scene.robot_right):
+            robot.spawn.friction_overrides = {"/.*panda_(left|right)finger/.*": self.finger_mu}
+        size = assets.ground_size(self.scene.num_envs, self.scene.env_spacing)
+        self.scene.ground.spawn.size = (size, size)
+
+        if not isinstance(self.sim.physics, NewtonCfg):
+            raise TypeError("The dual-Franka shoelace task requires Newton physics")
+        collision = self.sim.physics.collision_cfg
+        collision.rigid_contact_max = physics.CONTACTS_PER_ENV * self.scene.num_envs
+        collision.max_triangle_pairs = max(
+            collision.max_triangle_pairs,
+            physics.MIN_TRIANGLE_PAIRS,
+            physics.TRIANGLE_PAIRS_PER_ENV * self.scene.num_envs,
+        )
+        solver = self.sim.physics.solver_cfg
+        solver.contact_max_triangle_pairs = max(solver.contact_max_triangle_pairs or 0, physics.MIN_TRIANGLE_PAIRS)
+        # Newton 1.6 contact matching needs a triangle budget below 2**20; scale the table instead.
+        solver.contact_reduction_hashtable_size_factor = max(
+            solver.contact_reduction_hashtable_size_factor or 0.25,
+            0.25 * physics.TRIANGLE_PAIRS_PER_ENV * self.scene.num_envs / solver.contact_max_triangle_pairs,
+        )

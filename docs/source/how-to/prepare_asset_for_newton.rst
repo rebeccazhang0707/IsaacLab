@@ -174,3 +174,9 @@ Enable ``NewtonCfg.debug_mode`` to inspect iteration-cap usage. Increase overflo
 change convergence settings only after the asset, reset, controller, contact model, and capacities
 are valid. Keep the smallest fixed-state reproduction and record the first non-finite quantity so
 later changes can be compared one at a time.
+
+Cable assets
+------------
+
+For preconfigured cable segments, anchors, joint materials, and replicated cable scenes,
+see :doc:`newton_cable_assets`.

@@ -14,16 +14,57 @@ from __future__ import annotations
 
 import dataclasses
 
-from pxr import Sdf, Usd, UsdPhysics, Vt
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, Vt
 
 from isaaclab.sim.schemas.schemas import apply_namespaced
 from isaaclab.sim.utils import change_prim_property, safe_set_attribute_on_usd_prim
 from isaaclab.sim.utils.stage import get_current_stage
 from isaaclab.utils.string import to_camel_case
 
-from .schemas_cfg import MujocoCollisionCfg, MujocoFixedTendonCfg, MujocoJointCfg
+from .schemas_cfg import MujocoCollisionCfg, MujocoFixedTendonCfg, MujocoJointCfg, NewtonCablePropertiesCfg
 
-__all__ = ["apply_mujoco_collision", "apply_mujoco_fixed_tendon", "apply_mujoco_joint"]
+__all__ = ["apply_mujoco_collision", "apply_mujoco_fixed_tendon", "apply_mujoco_joint", "apply_newton_cable_properties"]
+
+
+def apply_newton_cable_properties(
+    cfg: NewtonCablePropertiesCfg, prim_path: str, stage: Usd.Stage | None = None
+) -> bool:
+    """Author optional cable model overrides through the standard fragment interface.
+
+    Native geometry, mass, and material attributes remain unchanged. Array dimensions and
+    physical values are validated by the Newton backend when the cable is imported.
+
+    Args:
+        cfg: Cable overrides; ``None`` fields leave authored values unchanged.
+        prim_path: An existing ``UsdGeom.BasisCurves`` prim path.
+        stage: Stage to modify. Defaults to the current stage.
+
+    Returns:
+        True if the attributes were written successfully.
+
+    Raises:
+        ValueError: If the prim does not exist or is not a BasisCurves.
+    """
+    stage = get_current_stage() if stage is None else stage
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsA(UsdGeom.BasisCurves):
+        raise ValueError(f"Cable properties require a BasisCurves prim: '{prim_path}'.")
+    types = {
+        "fixed_segments": Sdf.ValueTypeNames.IntArray,
+        "inertia_regularization": Sdf.ValueTypeNames.Double,
+        "segment_orientations": Sdf.ValueTypeNames.Double4Array,
+        "joint_stiffnesses": Sdf.ValueTypeNames.Double4Array,
+        "joint_dampings": Sdf.ValueTypeNames.Double4Array,
+        "dahl_max_strains": Sdf.ValueTypeNames.FloatArray,
+        "dahl_decay": Sdf.ValueTypeNames.FloatArray,
+    }
+    for name, usd_type in types.items():
+        value = getattr(cfg, name)
+        if value is not None:
+            if usd_type == Sdf.ValueTypeNames.Double4Array:
+                value = [Gf.Vec4d(*row) for row in value]
+            prim.CreateAttribute(f"{cfg._usd_namespace}:{to_camel_case(name, 'cC')}", usd_type).Set(value)
+    return True
 
 
 def apply_mujoco_collision(cfg: MujocoCollisionCfg, prim_path: str, stage: Usd.Stage | None = None) -> bool:

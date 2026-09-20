@@ -21,10 +21,49 @@ from isaaclab.sim.schemas.schemas_cfg import (
     MeshCollisionFragment,
     RigidBodyBaseCfg,
     RigidBodyFragment,
+    SchemaFragment,
     _deprecated_schema_cfg,
 )
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialBaseCfg
 from isaaclab.utils import configclass
+
+
+@configclass
+class NewtonCablePropertiesCfg(SchemaFragment):
+    """Optional cable model overrides that native USD cable import cannot represent.
+
+    Inherits the standard fragment interface and authors ``isaaclab:cable:*`` attributes,
+    not an upstream Newton schema. Apply to one open ``UsdGeom.BasisCurves`` prim using
+    :func:`~isaaclab_newton.sim.schemas.apply_newton_cable_properties` before import.
+    Use native cable geometry, mass, material, and collision schemas for other properties.
+    ``None`` leaves the authored value unchanged. Indices are local to the curve.
+    """
+
+    _usd_namespace: ClassVar[str | None] = "isaaclab:cable"
+    _usd_applied_schema: ClassVar[str | None] = None
+
+    func: Callable | str = "isaaclab_newton.sim.schemas:apply_newton_cable_properties"
+
+    fixed_segments: list[int] | None = None
+    """Segment indices whose mass and inertia, including inverses, are set to zero."""
+
+    inertia_regularization: float | None = None
+    """Isotropic inertia added to each dynamic segment's native mass-derived inertia [kg*m^2]."""
+
+    segment_orientations: list[tuple[float, float, float, float]] | None = None
+    """Initial segment xyzw quaternions in the curve frame, without changing joint rest frames."""
+
+    joint_stiffnesses: list[tuple[float, float, float, float]] | None = None
+    """Per-joint stretch/shear [N/m] and bend/twist [N*m/rad] gains, in that order."""
+
+    joint_dampings: list[tuple[float, float, float, float]] | None = None
+    """Per-joint stretch/shear [N*s/m] and bend/twist [N*m*s/rad] damping, in that order."""
+
+    dahl_max_strains: list[float] | None = None
+    """Per-joint VBD persistent angular strain limits [rad]."""
+
+    dahl_decay: list[float] | None = None
+    """Per-joint VBD angular memory decay lengths [rad]."""
 
 
 @_deprecated_schema_cfg("[UsdPhysicsRigidBodyCfg(...), PhysxRigidBodyCfg(...)]")

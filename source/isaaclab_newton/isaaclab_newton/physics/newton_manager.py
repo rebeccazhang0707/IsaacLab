@@ -22,6 +22,8 @@ import numpy as np
 import torch
 import warp as wp
 
+from isaaclab_newton.sim.usd import _add_usd
+
 # Load CUDA runtime for relaxed-mode graph capture (RTX-compatible).
 # cudaStreamCaptureModeRelaxed (2) allows the RTX compositor's background
 # CUDA stream to keep running during capture without invalidating it.
@@ -1978,8 +1980,8 @@ class NewtonManager(PhysicsManager):
 
         if not env_paths:
             # No env Xforms — flat loading
-            import_result = builder.add_usd(
-                stage, ignore_paths=[*hf_ignore_paths, *solver_ignore_paths], schema_resolvers=schema_resolvers
+            import_result = _add_usd(
+                builder, stage, ignore_paths=[*hf_ignore_paths, *solver_ignore_paths], schema_resolvers=schema_resolvers
             )
             _restore_visible_colliders_without_visual_shapes(builder, stage, import_result["path_shape_map"])
             replace_newton_builder_shape_colors(builder, stage)
@@ -1996,14 +1998,15 @@ class NewtonManager(PhysicsManager):
             # Load everything except the env subtrees (ground plane, lights, etc.)
             # and any terrain colliders already added as heightfields above.
             ignore_paths = [path for _, path in env_paths] + hf_ignore_paths + solver_ignore_paths
-            import_result = builder.add_usd(stage, ignore_paths=ignore_paths, schema_resolvers=schema_resolvers)
+            import_result = _add_usd(builder, stage, ignore_paths=ignore_paths, schema_resolvers=schema_resolvers)
             _restore_visible_colliders_without_visual_shapes(builder, stage, import_result["path_shape_map"])
             replace_newton_builder_shape_colors(builder, stage)
             import_builder_visual_material_paths(builder, stage)
 
             _, proto_path = env_paths[0]
             source_builders = {proto_path: cls.create_builder(up_axis=up_axis)}
-            import_result = source_builders[proto_path].add_usd(
+            import_result = _add_usd(
+                source_builders[proto_path],
                 stage,
                 root_path=proto_path,
                 ignore_paths=solver_ignore_paths,

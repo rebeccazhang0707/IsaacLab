@@ -18,6 +18,7 @@ from isaaclab.cloner import path as clone_path
 from isaaclab.sim.utils.newton_model_utils import replace_newton_builder_shape_colors
 
 from isaaclab_newton.renderers.visual_material import import_builder_visual_material_paths
+from isaaclab_newton.sim.usd import _add_usd
 
 
 def _has_visible_non_collision_geometry(stage: Usd.Stage, prim_path: str) -> bool:
@@ -161,7 +162,8 @@ def _build_source_builder(
 ) -> ModelBuilder:
     """Build one source builder."""
     builder = create_builder()
-    import_result = builder.add_usd(
+    import_result = _add_usd(
+        builder,
         stage,
         root_path=source,
         load_visual_shapes=load_visual_shapes,

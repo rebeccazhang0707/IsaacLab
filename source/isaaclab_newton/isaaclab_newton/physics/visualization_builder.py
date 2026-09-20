@@ -23,6 +23,7 @@ from isaaclab_newton.cloner.newton_clone_utils import (
 )
 from isaaclab_newton.physics.visualization_deformables import add_shadow_deformables_to_builder
 from isaaclab_newton.renderers.visual_material import import_builder_visual_material_paths
+from isaaclab_newton.sim.usd import _add_usd
 
 
 def _deformable_ignore_paths(
@@ -102,7 +103,8 @@ def build_visualization_builder_from_stage_envs(
         # Ignore deformables during USD import; add them as shadow particles below so
         # SceneData mapping and OVRTX registry receive the same particle offsets.
         deformable_ignore_paths = _deformable_ignore_paths(stage, entries=deformable_entries)
-        import_result = builder.add_usd(
+        import_result = _add_usd(
+            builder,
             stage,
             schema_resolvers=schema_resolvers,
             ignore_paths=deformable_ignore_paths or None,
@@ -133,7 +135,8 @@ def build_visualization_builder_from_stage_envs(
     # clone sources. Otherwise a non-env deformable (e.g. ``/World/Assets/Cloth``) is
     # imported here and added again by ``add_shadow_deformables_to_builder``.
     deformable_ignore_paths = _deformable_ignore_paths(stage, entries=deformable_entries)
-    import_result = builder.add_usd(
+    import_result = _add_usd(
+        builder,
         stage,
         ignore_paths=["/World/envs", *sources, *deformable_ignore_paths],
         schema_resolvers=schema_resolvers,
