@@ -64,28 +64,56 @@ def shoelace_grasp_quality(
     # Tolerate bounded solver penetration under load, without rewarding gaps or deeper penetration.
     contact_error = signed_distance.clamp_min(0.0) + (-signed_distance - contact_penetration_tolerance).clamp_min(0.0)
     finger_contact = torch.exp(-torch.square(contact_error / max(contact_std, 1.0e-6)))
-    contact = _hamacher_product(finger_contact[:, :, 0], finger_contact[:, :, 1])
-    grasp = _hamacher_product(contact, closure)
+    contact = hamacher_product(finger_contact[:, :, 0], finger_contact[:, :, 1])
+    grasp = hamacher_product(contact, closure)
     motion_match = 1.0 - torch.tanh(relative_speed / max(relative_speed_std, 1.0e-6))
-    return _hamacher_product(grasp, motion_match), finite
+    return hamacher_product(grasp, motion_match), finite
 
 
-def _filter_grasps(
+def filter_grasps(
     previous: torch.Tensor, grasp: torch.Tensor, finite: torch.Tensor, step_dt: float, time_constant: float
 ) -> torch.Tensor:
-    """Update the filter in place, seeding from finite samples and preserving invalid environments."""
+    """Update the filter in place, seeding finite samples and preserving invalid environments.
+
+    Args:
+        previous: Filter state to update in place, shape [N, 2]; NaN marks unseeded entries.
+        grasp: Current grasp qualities, shape [N, 2].
+        finite: Valid-input flags, shape [N].
+        step_dt: Policy step duration [s].
+        time_constant: Positive filter time constant [s].
+
+    Returns:
+        The updated ``previous`` tensor, shape [N, 2].
+    """
     alpha = 1.0 - math.exp(-step_dt / time_constant)
     filtered = torch.where(torch.isfinite(previous), previous + alpha * (grasp - previous), grasp)
     previous.copy_(torch.where(finite.unsqueeze(1), filtered, previous))
     return previous
 
 
-def _bilateral_score(per_arm_score: torch.Tensor, bilateral_fraction: float) -> torch.Tensor:
-    """Combine independent credit with a symmetric cooperation bonus."""
-    bilateral = _hamacher_product(per_arm_score[:, 0], per_arm_score[:, 1])
+def bilateral_score(per_arm_score: torch.Tensor, bilateral_fraction: float) -> torch.Tensor:
+    """Combine independent credit with a symmetric cooperation bonus.
+
+    Args:
+        per_arm_score: Left and right scores in [0, 1], shape [N, 2].
+        bilateral_fraction: Cooperation share in [0, 1]; the remainder uses the per-arm mean.
+
+    Returns:
+        Combined scores, shape [N].
+    """
+    bilateral = hamacher_product(per_arm_score[:, 0], per_arm_score[:, 1])
     return (1.0 - bilateral_fraction) * per_arm_score.mean(dim=1) + bilateral_fraction * bilateral
 
 
-def _hamacher_product(a: torch.Tensor, b: torch.Tensor | float, eps: float = 1.0e-6) -> torch.Tensor:
-    """Return the Hamacher soft-AND of two values in ``[0, 1]``."""
+def hamacher_product(a: torch.Tensor, b: torch.Tensor | float, eps: float = 1.0e-6) -> torch.Tensor:
+    """Return the Hamacher soft-AND of two values in ``[0, 1]``.
+
+    Args:
+        a: First input tensor with values in [0, 1].
+        b: Second input in [0, 1], broadcastable to ``a``.
+        eps: Positive denominator regularization.
+
+    Returns:
+        Soft conjunction with the broadcast shape of the inputs.
+    """
     return (a * b) / (a + b - a * b + eps)

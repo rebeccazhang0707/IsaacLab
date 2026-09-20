@@ -13,12 +13,12 @@ import torch
 import warp as wp
 
 from isaaclab_tasks.contrib.shoelace.mdp.observations import gripper_close_error, tail_tcp_relative_speed
+from isaaclab_tasks.contrib.shoelace.shoelace_constants import CONTACT_DISTANCE_CAP
 from isaaclab_tasks.contrib.shoelace.shoelace_contacts import _aggregate_finger_tail_signed_distance
 from isaaclab_tasks.contrib.shoelace.shoelace_env_cfg import (
     CONTACT_OBSERVATION_HISTORY_LENGTH,
     ObservationsCfg,
 )
-from isaaclab_tasks.contrib.shoelace.shoelace_physics import CONTACT_DISTANCE_CAP
 
 
 def _proxy(tensor: torch.Tensor) -> SimpleNamespace:

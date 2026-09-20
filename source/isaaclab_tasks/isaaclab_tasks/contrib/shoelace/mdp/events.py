@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 
 from isaaclab.assets import Articulation, CableObject, RigidObject
@@ -16,8 +17,37 @@ from isaaclab.envs.mdp.events import reset_joints_by_offset
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import sample_uniform
 
+from .. import shoelace_constants as physics
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
+
+
+def install_settled_default_state(env: ManagerBasedEnv, env_ids: torch.Tensor | None) -> None:
+    """Install the offline gravity-settled cable poses as defaults at startup.
+
+    Args:
+        env: Environment containing both shoelace cables.
+        env_ids: Unused; startup installs defaults for every environment.
+    """
+    names = ("shoelace_left", "shoelace_right")
+    with np.load(physics.ASSET_DIR / "settled_tail_clear_segment_poses.npz", allow_pickle=False) as state:
+        if tuple(state.files) != names:
+            raise ValueError(f"Expected settled shoelace arrays {names}, got {tuple(state.files)}")
+        for name in names:
+            cable: CableObject = env.scene[name]
+            default_pose = cable.data.default_segment_pose_w.torch
+            local_pose = np.asarray(state[name], dtype=np.float32)
+            if local_pose.shape != default_pose.shape[1:] or not np.isfinite(local_pose).all():
+                raise ValueError(f"Invalid settled {name} poses: expected finite {tuple(default_pose.shape[1:])}")
+            if not np.allclose(np.linalg.norm(local_pose[:, 3:], axis=1), 1.0, atol=2.0e-5):
+                raise ValueError(f"Settled {name} poses contain non-unit quaternions")
+            default_pose.copy_(default_pose.new_tensor(local_pose))
+            default_pose[..., :3] += env.scene.env_origins.unsqueeze(1)
+            velocity = cable.data.default_segment_velocity_w.torch
+            velocity.zero_()
+            cable.write_segment_pose_to_sim_index(segment_pose=default_pose)
+            cable.write_segment_velocity_to_sim_index(segment_velocity=velocity)
 
 
 def reset_arm_joints(
