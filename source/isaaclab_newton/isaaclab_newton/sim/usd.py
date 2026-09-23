@@ -22,6 +22,7 @@ from pxr import Usd, UsdGeom, UsdShade
 
 def _add_usd(builder: newton.ModelBuilder, stage: Usd.Stage, **kwargs: Any) -> dict:
     """Import USD and apply asset-local physics properties to the source builder."""
+    # Apply overrides before replication/finalization so every instance and solver starts with the same model.
     result = builder.add_usd(stage, return_deformable_results=True, **kwargs)
     for path, (bodies, joints) in result.get("path_cable_map", {}).items():
         prim = stage.GetPrimAtPath(path)
@@ -77,11 +78,15 @@ def _apply_cable_properties(builder: newton.ModelBuilder, prim: Usd.Prim, bodies
         if any(builder.joint_type[joint] != newton.JointType.ROD for joint in joints):
             raise ValueError(f"{prim.GetPath()}: cable physics arrays require ROD joints")
 
+    # Only fixedSegments is needed for anchoring; the other overrides preserve a separately tuned cable model.
     for index, body in enumerate(bodies):
         if regularization is not None and index not in fixed:
+            # Preserve the tuned rotational response without increasing mass; fixed segments must retain zero inertia.
             builder.body_inertia[body] += wp.mat33(np.eye(3, dtype=np.float32) * float(regularization))
             builder.body_inv_inertia[body] = wp.inverse(builder.body_inertia[body])
         if orientations is not None:
+            # Keep the imported joint rest frames so independently authored initial frames can carry initial strain.
+            # Native curve normals set both frames, so they are not equivalent to this state-only override.
             rotation = transform.ExtractRotationQuat()
             world_rotation = wp.quat(*rotation.GetImaginary(), rotation.GetReal())
             pose = builder.body_q[body]
@@ -90,6 +95,8 @@ def _apply_cable_properties(builder: newton.ModelBuilder, prim: Usd.Prim, bodies
             )
         if index in fixed:
             _fix_body(builder, body)
+    # Preserve per-joint gains, e.g. the shoelace's stiffer, more damped free tips and mean-length scaling.
+    # Uniform material moduli cannot encode that spatial profile; these are already discretized solver gains.
     for index, joint in enumerate(joints):
         start = builder.joint_qd_start[joint]
         if stiffness is not None:
@@ -97,6 +104,8 @@ def _apply_cable_properties(builder: newton.ModelBuilder, prim: Usd.Prim, bodies
         if damping is not None:
             builder.joint_target_kd[start : start + 4] = damping[index].tolist()
     if any(value is not None for value in dahl.values()):
+        # Preserve VBD angular friction memory, not contact friction or anchoring. Native curve import omits these.
+        # Register before finalization; VBD decides whether to enable Dahl friction when the solver is constructed.
         if "vbd:dahl_eps_max" not in builder.custom_attributes:
             newton.solvers.SolverVBD.register_custom_attributes(builder)
         for name, values in dahl.items():
@@ -134,5 +143,6 @@ def _apply_cable_contact_properties(builder: newton.ModelBuilder, prim: Usd.Prim
 
 
 def _fix_body(builder: newton.ModelBuilder, body: int) -> None:
+    # Anchor translation and rotation without adding joints or removing collision shapes/connected constraints.
     builder.body_mass[body] = builder.body_inv_mass[body] = 0.0
     builder.body_inertia[body] = builder.body_inv_inertia[body] = wp.mat33()
