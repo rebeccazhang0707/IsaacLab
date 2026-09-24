@@ -6,6 +6,7 @@
 __all__ = [
     "arm_action_l2",
     "arm_action_rate_l2",
+    "configure_shoelace_physics",
     "dense_task_reward",
     "finger_tail_signed_distance",
     "grasp_hold_reward",
@@ -21,7 +22,14 @@ __all__ = [
     "tails_to_tcp",
 ]
 
-from .events import install_settled_default_state, reset_arm_joints, reset_shoe_position
+from isaaclab.envs.mdp import *  # noqa: F403
+
+from .events import (
+    configure_shoelace_physics,
+    install_settled_default_state,
+    reset_arm_joints,
+    reset_shoe_position,
+)
 from .grasp import shoelace_grasp_quality
 from .observations import finger_tail_signed_distance, gripper_close_error, tail_tcp_relative_speed, tails_to_tcp
 from .rewards import (
@@ -33,4 +41,3 @@ from .rewards import (
     shoelace_success_reward,
 )
 from .terminations import shoelace_bilateral_pull_success
-from isaaclab.envs.mdp import *

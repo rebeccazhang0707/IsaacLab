@@ -22,8 +22,8 @@ Reset translates these poses together with the shoe and preserves their fixed an
 assets. It contains the shoe, pinned span, two free cables, their physical attributes, and collision
 filters. It uses local segment indices and relative texture paths; no training environment indices
 are stored in the asset. Native segment masses also supply geometric inertia. The generator uses
-existing material/collision configurations and `NewtonCablePropertiesCfg` for the remaining special
-model overrides. Regenerate the asset with:
+existing material/collision configurations and `NewtonCablePropertiesCfg` only for Dahl arrays.
+Task-specific body/joint overrides and the cable contact-import fallback are applied by startup events. Regenerate the asset with:
 
 ```bash
 PXR_WORK_THREAD_LIMIT=1 uv run python -m isaaclab_tasks.contrib.shoelace.generate_asset
