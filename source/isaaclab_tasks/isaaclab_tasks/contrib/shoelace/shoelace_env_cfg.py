@@ -373,7 +373,7 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
                         name="shoelace",
                         solver_cfg=VBDSolverCfg(
                             iterations=VBD_ITERATIONS,
-                            rigid_avbd_alpha=0.0,
+                            rigid_compliant_alm=True,
                             rigid_body_contact_buffer_size=physics.VBD_CONTACT_BUFFER,
                         ),
                         bodies=[r"/World/envs/env_[^/]+/ShoelaceScene/Shoelace(Left|Right)"],

@@ -21,50 +21,10 @@ from isaaclab.sim.schemas.schemas_cfg import (
     MeshCollisionFragment,
     RigidBodyBaseCfg,
     RigidBodyFragment,
-    SchemaFragment,
     _deprecated_schema_cfg,
 )
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialBaseCfg
 from isaaclab.utils import configclass
-
-
-@configclass
-class NewtonCablePropertiesCfg(SchemaFragment):
-    """Construction-time Dahl parameters that native USD cable import cannot represent.
-
-    Inherits the standard fragment interface and authors ``isaaclab:cable:*`` attributes,
-    not an upstream Newton schema. Apply to one open ``UsdGeom.BasisCurves`` prim using
-    :func:`~isaaclab_newton.sim.schemas.apply_newton_cable_properties` before import.
-    Use native cable geometry, mass, material, and collision schemas for other properties.
-    ``None`` leaves the authored value unchanged. Indices are local to the curve.
-    """
-
-    _usd_namespace: ClassVar[str | None] = "isaaclab:cable"
-    _usd_applied_schema: ClassVar[str | None] = None
-
-    func: Callable | str = "isaaclab_newton.sim.schemas:apply_newton_cable_properties"
-
-    # Keep the former public fields only to report migration errors instead of silently ignoring them.
-    fixed_segments: list[int] | None = None
-    """Deprecated and rejected by the applier. Set segment mass/inertia in a startup event."""
-
-    inertia_regularization: float | None = None
-    """Deprecated inertia addition [kg*m^2], rejected by the applier. Use a startup event."""
-
-    segment_orientations: list[tuple[float, float, float, float]] | None = None
-    """Deprecated xyzw frames, rejected by the applier. Set model/state frames in a startup event."""
-
-    joint_stiffnesses: list[tuple[float, float, float, float]] | None = None
-    """Deprecated linear [N/m] and angular [N*m/rad] gains. Use a startup event instead."""
-
-    joint_dampings: list[tuple[float, float, float, float]] | None = None
-    """Deprecated linear [N*s/m] and angular [N*m*s/rad] damping. Use a startup event instead."""
-
-    dahl_max_strains: list[float] | None = None
-    """Per-joint VBD persistent angular strain limits [rad]."""
-
-    dahl_decay: list[float] | None = None
-    """Per-joint VBD angular memory decay lengths [rad]."""
 
 
 @_deprecated_schema_cfg("[UsdPhysicsRigidBodyCfg(...), PhysxRigidBodyCfg(...)]")

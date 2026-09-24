@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 
 import newton
-from isaaclab_newton.sim.schemas import NewtonCablePropertiesCfg, NewtonCollisionCfg, apply_newton_cable_properties
+from isaaclab_newton.sim.schemas import NewtonCollisionCfg
 
 from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
@@ -67,7 +67,7 @@ def generate_asset(output: Path) -> None:
             result[key].update(imported[key])
     builder.end_world()
     build = physics.configure_shoelace_builder(builder, centerline, radius)
-    for side, bodies, joints in zip(("Left", "Right"), build.body_chains, build.joint_chains, strict=True):
+    for side, bodies in zip(("Left", "Right"), build.body_chains, strict=True):
         prim = stage.GetPrimAtPath(f"{root}/Shoelace{side}/geometry/mesh")
         masses = [
             builder.body_mass[body] or builder.body_mass[bodies[1 if index == 0 else index - 1]]
@@ -75,11 +75,6 @@ def generate_asset(output: Path) -> None:
         ]
         prim.CreateAttribute("physics:masses", Sdf.ValueTypeNames.FloatArray).Set(masses)
         prim.CreateAttribute("physics:masses:elementType", Sdf.ValueTypeNames.Token).Set("segment")
-        overrides = NewtonCablePropertiesCfg(
-            dahl_max_strains=[constants.DAHL_MAX_STRAIN] * len(joints),
-            dahl_decay=[constants.DAHL_DECAY] * len(joints),
-        )
-        apply_newton_cable_properties(overrides, str(prim.GetPath()), stage)
         material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial(materialPurpose="physics")
         _contact_material(material.GetPrim(), constants.LACE_MU)
         sim_utils.apply_namespaced(NewtonCollisionCfg(contact_gap=constants.CONTACT_GAP), str(prim.GetPath()), stage)

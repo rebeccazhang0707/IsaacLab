@@ -181,14 +181,39 @@ Core Solve
       - Description
     * - ``iterations``
       - Default: ``10``. Number of VBD iterations per substep. Increasing this value improves deformation and contact convergence, especially for stiff materials or rigid gripper contacts, but increases runtime.
-    * - ``rigid_avbd_alpha``
-      - Default: ``None``. Shared C0 stabilization strength in ``[0, 1]`` for rigid joints and body-body contacts. Leaving it unset preserves Newton's mode-dependent default.
+    * - ``rigid_compliant_alm``
+      - Default: ``None``. Preserves Newton's rigid solver mode. In Newton 1.6, ``None`` selects deprecated legacy AVBD. Set to ``True`` to use compliant ALM for rigid joints and body-body contacts, or ``False`` to explicitly retain legacy AVBD.
     * - ``rigid_body_contact_buffer_size``
       - Default: ``64``. Per-body capacity for body-body contacts when VBD integrates rigid bodies. Increase it if Newton reports a per-body body-body contact buffer overflow.
     * - ``rigid_body_particle_contact_buffer_size``
       - Default: ``256``. Per-body capacity for particle, edge, and face soft contacts. Increase it if Newton reports a per-body contact buffer overflow.
     * - ``integrate_with_external_rigid_solver``
       - Default: ``False``. Set to ``True`` only when a manual manager integrates rigid bodies in the shared model. Proxy-coupled entries use partitioned model views and leave this ``False``.
+
+
+Rigid Cables
+^^^^^^^^^^^^
+
+For new rigid-cable configurations, explicitly enable compliant ALM:
+
+.. code-block:: python
+
+    from isaaclab_newton.physics import VBDSolverCfg
+
+    cable_solver_cfg = VBDSolverCfg(
+        rigid_compliant_alm=True,
+        rigid_body_contact_buffer_size=256,
+    )
+
+Compliant ALM uses finite material stiffness for rigid joints and body-body
+contacts. Validate the cable's stretch, bend, and contact stiffness under the
+intended loads and timestep when switching from legacy AVBD. Increasing contact
+capacity only increases the available storage; it does not change stiffness.
+
+``VBDSolverCfg`` leaves Newton's C0 stabilization parameter ``rigid_avbd_alpha``
+unset. Newton 1.6 defaults it to ``0.0`` for compliant ALM and ``0.95`` for legacy
+AVBD, for both rigid joints and body-body contacts. Setting alpha to zero alone
+does not enable ALM.
 
 
 Self-Contact
@@ -360,35 +385,6 @@ Body selectors must use full Newton body-label regexes, such as
 coupling between the same named solver entries. Set ``contact_pairs`` to select
 entry pairs explicitly, or leave it as ``None`` to detect every distinct pair.
 Use ``iterations`` and ``rho`` to tune the ADMM solve.
-
-ADMM creates an internal collision pipeline for cross-entry contacts, separate
-from the outer pipeline configured by ``NewtonCfg.collision_cfg``. Set
-``CouplerAdmmCfg.contact_max_triangle_pairs`` to budget its triangle-pair and
-contact-reduction buffers, and
-``CouplerAdmmCfg.contact_reduction_hashtable_size_factor`` to increase only the
-reduction hashtable. Both default to ``None`` to preserve Newton's defaults.
-These capacities cover all environments in one process; multi-GPU jobs allocate
-them independently on every rank. Changes take effect when the solver is created,
-before CUDA graph capture. For example:
-
-.. code-block:: python
-
-    coupling_cfg = CouplerAdmmCfg(
-        entries=entries,
-        contact_max_triangle_pairs=1_000_000,
-        contact_reduction_hashtable_size_factor=2.0,
-    )
-
-Tune these budgets when the internal pipeline reports triangle-pair overflow,
-hashtable fill above 80%, or hashtable insertion failures. Increasing only the
-outer collision budget does not resize ADMM's internal buffers. Isaac Lab adapts
-the pinned Newton solver by rebuilding its internal pipeline before stepping,
-preserving its pair filters, contact output capacities, and matching settings.
-With ``rigid_contact_matching`` enabled, Newton 1.6 uses deterministic contact
-packing, which requires ``max_triangle_pairs < 2**20``. For hashtable warnings in
-this mode, increase the size factor without increasing the triangle-pair budget
-past that limit. The example above allocates 2,097,152 hashtable slots while
-preserving contact matching.
 
 Try the demo:
 

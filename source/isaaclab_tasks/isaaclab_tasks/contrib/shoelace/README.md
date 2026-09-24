@@ -7,9 +7,10 @@ of a tied shoelace. It couples **MJWarp** (the Franka arms and shoe) and **VBD**
 The example uses the ADMM contact-capacity controls from
 [PR #7912](https://github.com/isaac-sim/IsaacLab/pull/7912) and the VBD rigid-solver controls from
 [PR #7913](https://github.com/isaac-sim/IsaacLab/pull/7913). Those changes must be present when applying
-this task independently. The VBD configuration uses the updated #7913 interface: only
-`rigid_avbd_alpha=0.0` and `rigid_body_contact_buffer_size=256` are overridden; hard contacts retain
-Newton 1.6's default. The task was smoke-tested with the repository's Newton 1.6.0 dependency.
+this task independently. The VBD configuration uses `rigid_compliant_alm=True` and
+`rigid_body_contact_buffer_size=256` through the framework's `VBDSolverCfg`, without a task-local
+solver configuration subclass. Compliant ALM uses Newton's default C0 stabilization strength of zero.
+The task was smoke-tested with the repository's Newton 1.6.0 dependency.
 
 ## Run
 
@@ -66,8 +67,9 @@ PXR_WORK_THREAD_LIMIT=1 uv run python -m isaaclab_tasks.contrib.shoelace.generat
 ```
 
 `data/shoelace.usda` uses native segment masses, material/contact attributes, and element
-collision filters. The generator retains Dahl attributes for the USD importer, but no longer
-writes other `isaaclab:cable:*` overrides or `isaaclab:physics:fixed`.
+collision filters. The generator writes no custom `isaaclab:cable:*` overrides or
+`isaaclab:physics:fixed`. No Dahl parameters are configured; the coupled VBD solver leaves
+Dahl friction disabled.
 
 At startup, `configure_shoelace_physics` updates Newton runtime model arrays for all environments:
 it zeros the fixed cable segments' and shoe's mass/inertia, recomputes dynamic segments' geometric
@@ -82,16 +84,12 @@ velocities. Episode resets restore and randomize state without changing physics 
 `finger_mu` and `shoe_mu` still use spawner material overrides. Newton 1.6.0 omits cable
 contact material/gap import, so startup also sets the generated cable shapes' `lace_mu`,
 contact stiffness/damping, and gap, then sends `SHAPE_PROPERTIES` to refresh solver views.
-`NewtonCablePropertiesCfg` now authors only Dahl parameters. Its deprecated non-Dahl fields
-and `ShoelaceUsdCfg.inertia_regularization` raise migration errors when used. The generic
-importer no longer applies custom body/joint overrides or a cable contact-import patch.
-For custom shoelace configurations, retain both startup terms in this order and set the task-level
-inertia option instead of baking non-Dahl model overrides into the asset.
+The generic importer uses native Newton cable import without custom body/joint overrides or
+a cable contact-import patch. `ShoelaceUsdCfg.inertia_regularization` raises a migration error
+when used. For custom shoelace configurations, retain both startup terms in this order and set
+the task-level inertia option instead of baking model overrides into the asset.
 Contact capacity and ground size resolve from the final `scene.num_envs` in `validate_config()`,
 including CLI overrides.
-
-The Isaac Lab USD extension and supported units/topologies are documented in
-[Authoring Newton cable assets](../../../../../docs/source/how-to/newton_cable_assets.rst).
 
 Grasp calculations are shared, but reward and termination filters remain independent. Disabling a reward
 for an ablation cannot change the success history. The task configures the framework's `VBDSolverCfg`
@@ -153,5 +151,6 @@ uv run --extra test python -m pytest -q \
 ```
 
 The focused tests cover reward cycles and record gating, invalid samples, cooperative success,
-contact aggregation, action/observation contracts, proxy inertia, capacity overrides, and randomized
-partial resets with CUDA-captured coupled steps. The reset/step test skips when CUDA is unavailable.
+contact aggregation, action/observation contracts, proxy inertia, capacity overrides, native USD
+without Dahl attributes, and disabled Dahl friction in the actual coupled VBD solver. Randomized
+partial resets include CUDA-captured coupled steps; this test skips when CUDA is unavailable.

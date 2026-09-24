@@ -14,7 +14,6 @@ __all__ = [
     "MujocoRigidBodyPropertiesCfg",
     "NewtonArticulationCfg",
     "NewtonArticulationRootPropertiesCfg",
-    "NewtonCablePropertiesCfg",
     "NewtonCollisionCfg",
     "NewtonCollisionPropertiesCfg",
     "NewtonDeformableBodyPropertiesCfg",
@@ -26,14 +25,12 @@ __all__ = [
     "NewtonSDFCollisionCfg",
     "NewtonSDFCollisionPropertiesCfg",
     "apply_mujoco_joint",
-    "apply_newton_cable_properties",
 ]
 
 from .schemas import (
     apply_mujoco_collision,
     apply_mujoco_fixed_tendon,
     apply_mujoco_joint,
-    apply_newton_cable_properties,
 )
 from .schemas_cfg import (
     MujocoCollisionCfg,
@@ -44,7 +41,6 @@ from .schemas_cfg import (
     MujocoRigidBodyPropertiesCfg,
     NewtonArticulationCfg,
     NewtonArticulationRootPropertiesCfg,
-    NewtonCablePropertiesCfg,
     NewtonCollisionCfg,
     NewtonCollisionPropertiesCfg,
     NewtonDeformableBodyPropertiesCfg,

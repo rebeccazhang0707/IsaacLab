@@ -118,12 +118,6 @@ How-to Guides
 
          Prepare an asset and task to run with the Newton MJWarp physics preset.
 
-      .. container:: guide-entry
-
-         :doc:`Authoring Newton cable assets </source/how-to/newton_cable_assets>`
-
-         Configure reusable cable physics in USD for replicated Newton scenes.
-
    .. container:: guide-group
 
       .. rubric:: Scenes and Cloning

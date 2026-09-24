@@ -12,10 +12,6 @@ isaaclab_newton.sim.schemas
   See :doc:`/source/concepts/schema_cfgs` for the design and
   when to use each class.
 
-  ``NewtonCablePropertiesCfg`` is an Isaac Lab extension for construction-time Dahl
-  arrays in ``isaaclab:cable:*``. Non-Dahl model overrides belong in startup events.
-  See :doc:`/source/how-to/newton_cable_assets` for native schemas and migration guidance.
-
   .. rubric:: Newton-targeted (family roots)
 
   .. autosummary::
@@ -49,16 +45,6 @@ Deformable Body
 
 Schema define and modify functions remain unified in
 :mod:`isaaclab.sim.schemas`.
-
-Cable Model Overrides
----------------------
-
-.. autoclass:: NewtonCablePropertiesCfg
-    :members:
-    :show-inheritance:
-    :exclude-members: __init__
-
-.. autofunction:: apply_newton_cable_properties
 
 Rigid Body
 ----------

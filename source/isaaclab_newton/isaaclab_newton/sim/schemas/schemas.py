@@ -14,58 +14,16 @@ from __future__ import annotations
 
 import dataclasses
 
-from pxr import Sdf, Usd, UsdGeom, UsdPhysics, Vt
+from pxr import Sdf, Usd, UsdPhysics, Vt
 
 from isaaclab.sim.schemas.schemas import apply_namespaced
 from isaaclab.sim.utils import change_prim_property, safe_set_attribute_on_usd_prim
 from isaaclab.sim.utils.stage import get_current_stage
 from isaaclab.utils.string import to_camel_case
 
-from .schemas_cfg import MujocoCollisionCfg, MujocoFixedTendonCfg, MujocoJointCfg, NewtonCablePropertiesCfg
+from .schemas_cfg import MujocoCollisionCfg, MujocoFixedTendonCfg, MujocoJointCfg
 
-__all__ = ["apply_mujoco_collision", "apply_mujoco_fixed_tendon", "apply_mujoco_joint", "apply_newton_cable_properties"]
-
-
-def apply_newton_cable_properties(
-    cfg: NewtonCablePropertiesCfg, prim_path: str, stage: Usd.Stage | None = None
-) -> bool:
-    """Author construction-time Dahl parameters through the standard fragment interface.
-
-    Native geometry, mass, and material attributes remain unchanged. Array dimensions and
-    physical values are validated by the Newton backend when the cable is imported.
-    Deprecated non-Dahl fields are rejected; configure them with startup events instead.
-
-    Args:
-        cfg: Cable overrides; ``None`` fields leave authored values unchanged.
-        prim_path: An existing ``UsdGeom.BasisCurves`` prim path.
-        stage: Stage to modify. Defaults to the current stage.
-
-    Returns:
-        True if the attributes were written successfully.
-
-    Raises:
-        ValueError: If the prim does not exist or is not a BasisCurves.
-    """
-    stage = get_current_stage() if stage is None else stage
-    prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsA(UsdGeom.BasisCurves):
-        raise ValueError(f"Cable properties require a BasisCurves prim: '{prim_path}'.")
-    for name in (
-        "fixed_segments",
-        "inertia_regularization",
-        "segment_orientations",
-        "joint_stiffnesses",
-        "joint_dampings",
-    ):
-        if getattr(cfg, name) is not None:
-            raise ValueError(f"NewtonCablePropertiesCfg.{name} is no longer imported; use a startup event instead.")
-    for name in ("dahl_max_strains", "dahl_decay"):
-        value = getattr(cfg, name)
-        if value is not None:
-            prim.CreateAttribute(
-                f"{cfg._usd_namespace}:{to_camel_case(name, 'cC')}", Sdf.ValueTypeNames.FloatArray
-            ).Set(value)
-    return True
+__all__ = ["apply_mujoco_collision", "apply_mujoco_fixed_tendon", "apply_mujoco_joint"]
 
 
 def apply_mujoco_collision(cfg: MujocoCollisionCfg, prim_path: str, stage: Usd.Stage | None = None) -> bool:
