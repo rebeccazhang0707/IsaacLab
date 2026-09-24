@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
 
 def configure_shoelace_physics(env: ManagerBasedEnv, env_ids: torch.Tensor | None) -> None:
-    """Configure non-Dahl cable physics once, before installing settled poses.
+    """Configure cable physics once, before installing settled poses.
 
     Uses the existing coupled solver's model-change notification to refresh its
     compact views and VBD material caches. Episode resets only restore state.

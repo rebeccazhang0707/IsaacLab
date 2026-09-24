@@ -58,8 +58,8 @@ def test_invalid_proxy_inertia_is_rejected(regularization: float) -> None:
         configure_shoelace_physics(SimpleNamespace(cfg=cfg), None)
 
 
-def test_baked_asset_defers_non_dahl_physics_to_events() -> None:
-    """Import native geometry/materials and Dahl, without task-specific model overrides."""
+def test_baked_asset_defers_task_physics_to_events() -> None:
+    """Import native geometry/materials without custom model overrides or Dahl attributes."""
     cfg = ShoelaceEnvCfg()
     cfg.lace_mu, cfg.shoe_mu = 0.25, 0.5
     cfg.validate()
@@ -67,6 +67,8 @@ def test_baked_asset_defers_non_dahl_physics_to_events() -> None:
     UsdGeom.SetStageMetersPerUnit(stage, 1.0)
     spawn = cfg.scene.shoelace_asset.spawn
     spawn.func("/World/ShoelaceScene", spawn)
+    for prim in stage.Traverse():
+        assert not any("dahl" in attr.GetName().lower() for attr in prim.GetAuthoredAttributes())
     native = newton.ModelBuilder()
     native_result = native.add_usd(stage, root_path="/World/ShoelaceScene", return_deformable_results=True)
     builder = build_source_builders(stage, ["/World/ShoelaceScene"], newton.ModelBuilder, [])["/World/ShoelaceScene"]
@@ -83,7 +85,6 @@ def test_baked_asset_defers_non_dahl_physics_to_events() -> None:
             "jointDampings",
         ):
             assert curve.GetAttribute(f"isaaclab:cable:{name}").Get() is None
-        assert curve.GetAttribute("isaaclab:cable:dahlMaxStrains").Get()
         for segment in range(len(geometric)):
             body = builder.body_label.index(f"{curve_path}_edge_body_{segment}")
             assert builder.body_mass[body] == native.body_mass[bodies[segment]] > 0.0
@@ -129,6 +130,10 @@ def test_randomized_resets_preserve_shoe_lace_alignment_and_other_environments(r
             cables = [env.scene[name] for name in ("shoelace_left", "shoelace_right")]
             arm_events = [cfg.events.reset_left_arm, cfg.events.reset_right_arm]
             model = NewtonManager.get_model()
+            cable_solver = NewtonManager._solver.solver("shoelace")
+            assert isinstance(cable_solver, newton.solvers.SolverVBD)
+            assert cable_solver.enable_dahl_friction is False
+            assert cable_solver.rigid_compliant_alm is True
             # Compare startup inertia to an independent native USD import before finalize's correction.
             native = newton.ModelBuilder()
             imported = native.add_usd(str(constants.ASSET_DIR / "shoelace.usda"), return_deformable_results=True)
