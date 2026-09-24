@@ -241,6 +241,7 @@ class ObservationsCfg:
 class EventsCfg:
     """Restore defaults, then perturb arm joints and translate the shoe with its laces."""
 
+    configure_physics = EventTerm(func=mdp.configure_shoelace_physics, mode="startup")
     settled_defaults = EventTerm(func=mdp.install_settled_default_state, mode="startup")
 
     reset_scene = EventTerm(
@@ -423,7 +424,6 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
             "/Shoe/ShoelacePinned/geometry/mesh": self.lace_mu,
             "/Shoe/(Collider|TongueUpper/geometry/mesh)": self.shoe_mu,
         }
-        self.scene.shoelace_asset.spawn.inertia_regularization = self.cable_inertia_regularization
         for robot in (self.scene.robot_left, self.scene.robot_right):
             robot.spawn.friction_overrides = {"/.*panda_(left|right)finger/.*": self.finger_mu}
         size = assets.ground_size(self.scene.num_envs, self.scene.env_spacing)

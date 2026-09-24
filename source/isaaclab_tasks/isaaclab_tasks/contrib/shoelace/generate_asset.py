@@ -12,8 +12,6 @@ import os
 from pathlib import Path
 
 import newton
-import numpy as np
-import warp as wp
 from isaaclab_newton.sim.schemas import NewtonCablePropertiesCfg, NewtonCollisionCfg, apply_newton_cable_properties
 
 from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
@@ -24,8 +22,6 @@ from isaaclab.sim.spawners.materials import spawn_physics_material
 from . import asset_authoring as physics
 from . import shoelace_assets as assets
 from . import shoelace_constants as constants
-from .asset_authoring import _tail_joint_blend_weights
-from .shoelace_constants import TAIL_BEND_DAMPING, TAIL_BEND_STIFFNESS
 
 
 def generate_asset(output: Path) -> None:
@@ -71,12 +67,8 @@ def generate_asset(output: Path) -> None:
             result[key].update(imported[key])
     builder.end_world()
     build = physics.configure_shoelace_builder(builder, centerline, radius)
-    stiffness_scale = reference_length / build.mean_segment_length
-    for side, bodies, joints, free_end_at_start in zip(
-        ("Left", "Right"), build.body_chains, build.joint_chains, (True, False), strict=True
-    ):
+    for side, bodies, joints in zip(("Left", "Right"), build.body_chains, build.joint_chains, strict=True):
         prim = stage.GetPrimAtPath(f"{root}/Shoelace{side}/geometry/mesh")
-        fixed = [index for index, body in enumerate(bodies) if builder.body_mass[body] == 0.0]
         masses = [
             builder.body_mass[body] or builder.body_mass[bodies[1 if index == 0 else index - 1]]
             for index, body in enumerate(bodies)
@@ -84,28 +76,14 @@ def generate_asset(output: Path) -> None:
         prim.CreateAttribute("physics:masses", Sdf.ValueTypeNames.FloatArray).Set(masses)
         prim.CreateAttribute("physics:masses:elementType", Sdf.ValueTypeNames.Token).Set("segment")
         overrides = NewtonCablePropertiesCfg(
-            fixed_segments=fixed,
-            inertia_regularization=constants.CABLE_INERTIA_REGULARIZATION,
-            segment_orientations=[
-                tuple(map(float, wp.transform_get_rotation(builder.body_q[body]))) for body in bodies
-            ],
             dahl_max_strains=[constants.DAHL_MAX_STRAIN] * len(joints),
             dahl_decay=[constants.DAHL_DECAY] * len(joints),
         )
-        weights = _tail_joint_blend_weights(len(joints), build.mean_segment_length, free_end_at_start)
-        for name, stretch, bend, tail in (
-            ("joint_stiffnesses", constants.STRETCH_STIFFNESS, constants.BEND_STIFFNESS, TAIL_BEND_STIFFNESS),
-            ("joint_dampings", constants.STRETCH_DAMPING, constants.BEND_DAMPING, TAIL_BEND_DAMPING),
-        ):
-            values = np.column_stack((np.full_like(weights, stretch), bend + weights * (tail - bend)))
-            values = np.repeat(values * stiffness_scale, 2, axis=1)
-            setattr(overrides, name, [tuple(map(float, row)) for row in values])
         apply_newton_cable_properties(overrides, str(prim.GetPath()), stage)
         material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial(materialPurpose="physics")
         _contact_material(material.GetPrim(), constants.LACE_MU)
         sim_utils.apply_namespaced(NewtonCollisionCfg(contact_gap=constants.CONTACT_GAP), str(prim.GetPath()), stage)
 
-    stage.GetPrimAtPath(f"{root}/Shoe").CreateAttribute("isaaclab:physics:fixed", Sdf.ValueTypeNames.Bool).Set(True)
     # Keep the pinned span visible using a separate visual mesh, as with standard rigid assets.
     pinned_path = f"{root}/Shoe/ShoelacePinned/geometry/mesh"
     Sdf.CopySpec(stage.GetRootLayer(), pinned_path, stage.GetRootLayer(), pinned_path + "_visual")

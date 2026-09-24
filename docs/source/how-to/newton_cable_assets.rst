@@ -8,10 +8,6 @@
 Authoring Newton cable assets
 =============================
 
-Isaac Lab's Newton backend can import preconfigured cable physics from USD before
-replicating the source asset. This allows a standard ``ManagerBasedRLEnv`` to load
-an asset without a task-specific ``MODEL_INIT`` callback.
-
 Keep the cable centerline in a linear ``UsdGeom.BasisCurves`` with the usual cable
 deformable APIs and material binding. Use native ``physics:masses`` with
 ``physics:masses:elementType = "segment"`` for positive segment masses, and
@@ -19,114 +15,89 @@ deformable APIs and material binding. Use native ``physics:masses`` with
 must be imported together with both of its source prims; package interacting cables
 and fixtures beneath one asset root when they share filters.
 
-Additional cable properties
----------------------------
-
-Reuse existing configurations first
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Native materials and contacts
+--------------------------------
 
 Use ``CableCfg`` and ``CableMaterialCfg`` for native curve geometry and uniform
 material properties. Compose ``UsdPhysicsRigidBodyMaterialCfg`` and ``NewtonMaterialCfg``
 on the bound material for friction and contact response, and use ``NewtonCollisionCfg``
 for contact gaps. These configurations author existing USD/Newton attributes.
-Native ``physics:masses`` also updates each segment's geometric inertia; a second
-array of the same inertia tensors is unnecessary.
+Native ``physics:masses`` also updates each segment's geometric inertia.
 
-Only the model overrides below need ``NewtonCablePropertiesCfg``, which inherits
-the existing ``SchemaFragment`` interface. Its custom applier handles typed arrays,
-since the generic scalar fragment writer does not support those arrays. It does not
-extend ``MassPropertiesCfg`` or joint-drive configurations: imported cable segments
-and joints are generated from the curve and have no individual USD body/joint prims
-on which to apply those schemas.
+The generic adapter leaves contact import to Newton. The installed Newton 1.6.0
+curve importer does not transfer the bound material's ``physics:dynamicFriction``,
+``newton:contactStiffness``, ``newton:contactDamping``, or the curve's
+``newton:contactGap`` into generated capsule shapes. Until the dependency supports
+these fields natively, configure them in a task startup event and notify
+``ModelFlags.SHAPE_PROPERTIES``. This synchronizes compact solver views; the collision
+pipeline reads ``model.shape_gap`` when computing bounds and generating contacts.
+The shoelace event implements this fallback without a generic USD-import patch.
+
+Construction-time Dahl parameters
+---------------------------------
+
+``NewtonCablePropertiesCfg`` uses the existing ``SchemaFragment`` interface to author
+Dahl arrays. These attributes belong to **Isaac Lab**, not the upstream Newton schema.
+Native curve import does not populate the generated joints' Dahl attributes, and VBD
+decides whether to enable Dahl when the solver is constructed. Ordinary startup events
+therefore cannot first enable Dahl on a solver constructed with all-zero parameters.
+Only this construction-time bridge remains in ``isaaclab_newton.sim.usd``.
 
 .. code-block:: python
 
    from isaaclab_newton.sim.schemas import NewtonCablePropertiesCfg, apply_newton_cable_properties
 
-   # Patch only the missing model behavior; keep native masses/materials untouched.
-   properties = NewtonCablePropertiesCfg(fixed_segments=[0], inertia_regularization=1.0e-6)
+   # A standalone open curve with three segments has two rod joints.
+   properties = NewtonCablePropertiesCfg(dahl_max_strains=[0.2, 0.3], dahl_decay=[0.4, 0.5])
    apply_newton_cable_properties(properties, "/World/Cable/geometry/mesh", stage)
 
-``None`` fields leave existing authored values unchanged. The shoelace asset generator
-uses this fragment to preserve its existing solver model. In particular:
+``None`` leaves an existing authored value unchanged. The optional attributes are:
 
-* Native attachments add constraints; they do not reproduce a zero-mass fixed segment
-  with unchanged topology. Native zero segment masses are not accepted by the importer.
-* Native material gains are discretized using each joint's local rest length. The
-  shoelace model instead uses mean-length scaling and a graded free-tail profile.
-  Per-joint overrides preserve those gains exactly; uniform materials cannot replace them.
-* Native normals set both body and joint rest frames. The existing model overrides
-  initial segment frames while retaining the imported joint rest frames.
-* VBD registers Dahl parameters on generated Newton joints, but native cable USD import
-  does not populate them from curve materials or per-joint curve arrays.
+* ``isaaclab:cable:dahlMaxStrains`` (``float[]``): per-joint VBD maximum persistent
+  angular strain [rad], mapped to ``vbd:dahl_eps_max``.
+* ``isaaclab:cable:dahlDecay`` (``float[]``): per-joint VBD angular memory decay
+  length [rad], mapped to ``vbd:dahl_tau``.
 
-Attribute contract
-~~~~~~~~~~~~~~~~~~
+The arrays support one standalone open curve with ``N`` segments and ``N - 1`` rod
+joints. Entry ``i`` connects segments ``i`` and ``i + 1`` in curve point order.
+Do not store finalized or replicated model indices. Both values must be positive
+on a joint to enable its Dahl friction; missing values retain the registered defaults.
 
-The following optional attributes belong to **Isaac Lab**, not to the upstream
-Newton USD schema. Author them on the curve prim. They support a single standalone,
-open curve with ``N`` segments and ``N - 1`` cable joints. Segment indices follow
-the curve's point order; joint entry ``i`` connects segments ``i`` and ``i + 1``.
-Do not store indices from a finalized or replicated model.
+Author arrays in a stage with ``metersPerUnit = 1`` and bake scale/shear into geometry.
+Translation and proper rotation are supported. Incorrect lengths, nonfinite values,
+and negative values raise ``ValueError``. Closed, multi-curve, and welded cable arrays
+are not supported by this extension.
 
-.. list-table:: Attributes in the ``isaaclab:cable:`` namespace
-   :header-rows: 1
-   :widths: 24 18 58
+Task-specific physics belongs in events
+------------------------------------------
 
-   * - Attribute
-     - USD type
-     - Meaning
-   * - ``fixedSegments``
-     - ``int[]``
-     - Local segment indices whose mass and inertia, including inverses, are set to zero.
-   * - ``inertiaRegularization``
-     - ``double``
-     - Nonnegative isotropic addition [kg*m^2] to each dynamic segment's inertia. Default: zero.
-   * - ``segmentOrientations``
-     - ``double4[]``
-     - ``N`` unit xyzw quaternions in the curve prim's local frame, composed with its world rotation.
-   * - ``jointStiffnesses``
-     - ``double4[]``
-     - ``N - 1`` stretch, shear, bend, and twist gains, in that order. Linear gains [N/m]; angular gains [N*m/rad].
-   * - ``jointDampings``
-     - ``double4[]``
-     - ``N - 1`` damping gains in the same order. Linear gains [N*s/m]; angular gains [N*m*s/rad].
-   * - ``dahlMaxStrains``
-     - ``float[]``
-     - ``N - 1`` values for VBD's ``dahl_eps_max`` maximum persistent angular strain [rad].
-   * - ``dahlDecay``
-     - ``float[]``
-     - ``N - 1`` values for VBD's ``dahl_tau`` angular memory decay length [rad].
+Use existing manager-based ``startup`` events for one-time fixed segments/fixtures,
+inertia regularization, model frames, and per-joint stiffness/damping. Episode
+``reset`` events should restore state rather than repeatedly modify this configuration.
+After editing Newton model arrays, send the corresponding model-change flags through
+the existing ``NewtonManager`` notification path to refresh coupled solvers and caches.
 
-Mass remains controlled by native USD mass properties; inertia regularization does
-not add mass. Fixed segments take precedence over regularization.
-Joint gains are the per-joint Newton solver gains, not the structural moduli authored
-on the cable material. VBD enables Dahl friction only where both Dahl parameters are
-positive. Missing attributes retain the native imported values.
+These settings can differ from native USD authoring:
 
-``segmentOrientations`` changes initial body frames without recomputing joint rest
-frames. This is useful when reproducing a model with a separately authored initial
-configuration. To define material directors and their corresponding rest frames
-together, use native per-point curve normals instead.
+* Zeroing segment mass/inertia keeps topology unchanged, unlike adding attachments.
+* Graded per-joint gains need not match uniform material moduli and local-length scaling.
+* Model-frame overrides can preserve imported joint rest frames; native curve normals
+  define both body and joint rest frames together.
+* Newton finalization can correct tiny inertias. Recompute geometric inertia before
+  adding regularization if the task needs the original geometric-plus-regularization model.
 
-Author physics arrays in a stage with ``metersPerUnit = 1`` and bake scale/shear into
-the geometry before writing them. Translation and proper rotation are supported.
-Malformed lengths, nonfinite values, invalid fixed indices, negative gains, and invalid
-quaternions raise ``ValueError`` at import.
-Closed, multi-curve, and welded cable arrays are not supported by this extension.
+Migration from former custom USD overrides
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The importer also transfers an authored physics material's ``physics:dynamicFriction``,
-``newton:contactStiffness``, and ``newton:contactDamping`` to the cable capsules, along
-with ``newton:contactGap`` from the curve. These are existing USD/Newton attributes.
+The importer no longer consumes ``isaaclab:cable:fixedSegments``,
+``inertiaRegularization``, ``segmentOrientations``, ``jointStiffnesses``, or
+``jointDampings``, nor ``isaaclab:physics:fixed`` on rigid bodies. Remove those attributes
+from old assets and configure their behavior in startup events. Existing files containing
+them import with native Newton behavior; they do not retain those custom overrides.
 
-Fixed fixtures
---------------
-
-A rigid-body prim can opt into ``isaaclab:physics:fixed`` (``bool``, default false).
-It retains its imported body and joint topology, with mass and inertia set to zero.
-This supports a fixture whose pose is explicitly reset by the task. It does not
-create a fixed joint or change an authored kinematic flag. Native ``physics:mass = 0``
-is not a substitute: the Newton USD importer treats that as unspecified mass.
+The corresponding non-Dahl ``NewtonCablePropertiesCfg`` fields are deprecated and
+retained only to produce a migration error when passed to the applier, rather than to
+author ignored attributes. Keep using its two Dahl fields until native import supports them.
 
 Shoelace example
 ----------------
@@ -139,7 +110,24 @@ The ``IsaacContrib-Shoelace-DualFranka`` example includes a baked
    PXR_WORK_THREAD_LIMIT=1 uv run python -m isaaclab_tasks.contrib.shoelace.generate_asset
 
 The task uses ``UsdFileCfg``-based spawning and ``CableObjectCfg(spawn=None)`` views
-on the two cable children. Small USD-level overrides retain the task's configurable
-friction and proxy inertia. A scene sensor handles finger-tail observations; startup
-and reset event terms handle settled poses and randomization. Buffer capacities stay
-in the task's simulation configuration and are resolved after CLI overrides.
+on the two cable children. The generator authors native masses, materials, contact
+properties, and collision filters. Only Dahl parameters remain in custom cable USD
+attributes. Finger/shoe friction uses spawner material configuration. Cable friction,
+contact stiffness/damping, and contact gap are applied to generated shapes at startup
+from the task's settings, because the installed Newton importer omits those fields.
+
+The ``configure_shoelace_physics`` startup event updates all environments: fixed cable
+segments and the shoe receive zero mass/inertia, dynamic segments receive geometric
+inertia plus ``cfg.cable_inertia_regularization``, and joints receive the graded tail
+stiffness/damping profile. It restores parallel-transport model frames without changing
+joint rest frames. Coupler notifications refresh solver data and VBD rest invariants.
+
+The subsequent ``install_settled_default_state`` startup event installs settled poses
+and zero velocities. Resets restore and randomize state, not physics parameters.
+Keep these startup terms in this order. Set ``ShoelaceEnvCfg.cable_inertia_regularization``;
+the deprecated ``ShoelaceUsdCfg.inertia_regularization`` now raises a migration error.
+No new callback or ``EventManager`` change is needed; ``prestartup`` is not supported
+with ``replicate_physics=True``.
+
+A scene sensor handles finger-tail observations. Buffer capacities stay in the task's
+simulation configuration and are resolved after CLI overrides.

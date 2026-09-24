@@ -11,7 +11,6 @@ import math
 import re
 from collections.abc import Callable
 
-from isaaclab_newton.sim.schemas import NewtonCablePropertiesCfg, apply_newton_cable_properties
 from isaaclab_newton.sim.spawners.materials import NewtonMaterialCfg
 
 from pxr import Usd, UsdGeom, UsdPhysics, UsdShade
@@ -44,10 +43,8 @@ def spawn_shoelace_usd(
     Returns:
         The spawned root prim.
     """
-    if cfg.inertia_regularization is not None and (
-        not math.isfinite(cfg.inertia_regularization) or cfg.inertia_regularization < 0.0
-    ):
-        raise ValueError("Cable inertia regularization must be finite and nonnegative")
+    if cfg.inertia_regularization is not None:
+        raise ValueError("Set ShoelaceEnvCfg.cable_inertia_regularization for the startup event, not ShoelaceUsdCfg.")
     if any(not math.isfinite(value) or value < 0.0 for value in cfg.friction_overrides.values()):
         raise ValueError("Friction overrides must be finite and nonnegative")
     root = sim_utils.spawn_from_usd(prim_path, cfg, translation, orientation, **kwargs)
@@ -67,13 +64,6 @@ def spawn_shoelace_usd(
                     stage=root.GetStage(),
                 )
                 UsdShade.MaterialBindingAPI.Apply(prim).Bind(material, materialPurpose="physics")
-        inertia = prim.GetAttribute("isaaclab:cable:inertiaRegularization")
-        if cfg.inertia_regularization is not None and inertia:
-            apply_newton_cable_properties(
-                NewtonCablePropertiesCfg(inertia_regularization=cfg.inertia_regularization),
-                str(prim.GetPath()),
-                root.GetStage(),
-            )
     return root
 
 
@@ -85,7 +75,7 @@ class ShoelaceUsdCfg(sim_utils.UsdFileCfg):
     friction_overrides: dict[str, float] = {}
     """Asset-relative collision-prim expressions and their friction coefficients."""
     inertia_regularization: float | None = None
-    """Optional replacement for the baked cable proxy inertia addition [kg*m^2]."""
+    """Deprecated inertia addition [kg*m^2]. Rejected; use ``ShoelaceEnvCfg.cable_inertia_regularization``."""
 
 
 def rigid_material(friction: float, damping: float) -> list[UsdPhysicsRigidBodyMaterialCfg | NewtonMaterialCfg]:

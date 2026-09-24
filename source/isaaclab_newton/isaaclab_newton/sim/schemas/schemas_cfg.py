@@ -30,7 +30,7 @@ from isaaclab.utils import configclass
 
 @configclass
 class NewtonCablePropertiesCfg(SchemaFragment):
-    """Optional cable model overrides that native USD cable import cannot represent.
+    """Construction-time Dahl parameters that native USD cable import cannot represent.
 
     Inherits the standard fragment interface and authors ``isaaclab:cable:*`` attributes,
     not an upstream Newton schema. Apply to one open ``UsdGeom.BasisCurves`` prim using
@@ -44,20 +44,21 @@ class NewtonCablePropertiesCfg(SchemaFragment):
 
     func: Callable | str = "isaaclab_newton.sim.schemas:apply_newton_cable_properties"
 
+    # Keep the former public fields only to report migration errors instead of silently ignoring them.
     fixed_segments: list[int] | None = None
-    """Segment indices whose mass and inertia, including inverses, are set to zero."""
+    """Deprecated and rejected by the applier. Set segment mass/inertia in a startup event."""
 
     inertia_regularization: float | None = None
-    """Isotropic inertia added to each dynamic segment's native mass-derived inertia [kg*m^2]."""
+    """Deprecated inertia addition [kg*m^2], rejected by the applier. Use a startup event."""
 
     segment_orientations: list[tuple[float, float, float, float]] | None = None
-    """Initial segment xyzw quaternions in the curve frame, without changing joint rest frames."""
+    """Deprecated xyzw frames, rejected by the applier. Set model/state frames in a startup event."""
 
     joint_stiffnesses: list[tuple[float, float, float, float]] | None = None
-    """Per-joint stretch/shear [N/m] and bend/twist [N*m/rad] gains, in that order."""
+    """Deprecated linear [N/m] and angular [N*m/rad] gains. Use a startup event instead."""
 
     joint_dampings: list[tuple[float, float, float, float]] | None = None
-    """Per-joint stretch/shear [N*s/m] and bend/twist [N*m*s/rad] damping, in that order."""
+    """Deprecated linear [N*s/m] and angular [N*m*s/rad] damping. Use a startup event instead."""
 
     dahl_max_strains: list[float] | None = None
     """Per-joint VBD persistent angular strain limits [rad]."""

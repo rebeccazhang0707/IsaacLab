@@ -53,9 +53,9 @@ The smoke test verifies rollout and PPO updates; it does not establish policy co
 | `agents/rsl_rl_ppo_cfg.py` | PPO runner configuration |
 | `data/` | Baked composite USD, source assets, textures, and offline settled poses; see attribution there |
 
-The Gym entry point is `isaaclab.envs:ManagerBasedRLEnv`. The default task has no
-model-builder callback. The Newton importer reads asset-local physics properties
-before replication; `EventTermCfg` handles settled defaults and randomized resets.
+The Gym entry point is `isaaclab.envs:ManagerBasedRLEnv`. The task uses standard
+`EventTermCfg` startup and reset terms, without a model-builder callback or changes to
+`EventManager`. `prestartup` is not supported with `replicate_physics=True`.
 `FingerTailContactSensor` initializes before solver CUDA capture and clears its cache
 through the normal scene sensor reset. Robot gravity compensation uses `MujocoRigidBodyCfg`.
 
@@ -65,14 +65,30 @@ To regenerate the asset after changing offline geometry or material calculations
 PXR_WORK_THREAD_LIMIT=1 uv run python -m isaaclab_tasks.contrib.shoelace.generate_asset
 ```
 
-`data/shoelace.usda` uses native segment masses (which also determine geometric inertia),
-material/contact attributes, and element collision filters. `NewtonCablePropertiesCfg` extends
-the existing `SchemaFragment` interface for fixed endpoints, proxy inertia, initial frames,
-tail stiffness/damping, and Dahl parameters that preserve the special model behavior. Its paths
-and segment indices are internal to the asset. Runtime `finger_mu`, `lace_mu`, `shoe_mu`,
-and `cable_inertia_regularization` overrides remain available; they modify USD properties
-before import. Contact capacity and ground size resolve from the final `scene.num_envs`
-in `validate_config()`, including CLI overrides.
+`data/shoelace.usda` uses native segment masses, material/contact attributes, and element
+collision filters. The generator retains Dahl attributes for the USD importer, but no longer
+writes other `isaaclab:cable:*` overrides or `isaaclab:physics:fixed`.
+
+At startup, `configure_shoelace_physics` updates Newton runtime model arrays for all environments:
+it zeros the fixed cable segments' and shoe's mass/inertia, recomputes dynamic segments' geometric
+inertia plus `cfg.cable_inertia_regularization`, restores the parallel-transport model frames,
+and applies graded tail stiffness/damping. The existing coupler model-change notification path
+refreshes solver data, including VBD rest-frame invariants. Newton may report tiny-inertia
+corrections while constructing the native model; startup replaces those corrected cable tensors
+with the requested geometric-plus-regularization values before stepping. The following
+`install_settled_default_state` startup term installs settled positions, orientations, and zero
+velocities. Episode resets restore and randomize state without changing physics parameters.
+
+`finger_mu` and `shoe_mu` still use spawner material overrides. Newton 1.6.0 omits cable
+contact material/gap import, so startup also sets the generated cable shapes' `lace_mu`,
+contact stiffness/damping, and gap, then sends `SHAPE_PROPERTIES` to refresh solver views.
+`NewtonCablePropertiesCfg` now authors only Dahl parameters. Its deprecated non-Dahl fields
+and `ShoelaceUsdCfg.inertia_regularization` raise migration errors when used. The generic
+importer no longer applies custom body/joint overrides or a cable contact-import patch.
+For custom shoelace configurations, retain both startup terms in this order and set the task-level
+inertia option instead of baking non-Dahl model overrides into the asset.
+Contact capacity and ground size resolve from the final `scene.num_envs` in `validate_config()`,
+including CLI overrides.
 
 The Isaac Lab USD extension and supported units/topologies are documented in
 [Authoring Newton cable assets](../../../../../docs/source/how-to/newton_cable_assets.rst).

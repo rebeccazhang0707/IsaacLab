@@ -5,7 +5,7 @@
 
 """Tests for shoelace proxy inertia and physically consistent randomized resets."""
 
-import warnings
+from types import SimpleNamespace
 
 import gymnasium as gym
 import newton
@@ -22,6 +22,8 @@ from isaaclab.app import launch_simulation
 from isaaclab.envs import ManagerBasedRLEnv
 
 from isaaclab_tasks.contrib.shoelace import shoelace_constants as constants
+from isaaclab_tasks.contrib.shoelace.asset_authoring import load_shoelace
+from isaaclab_tasks.contrib.shoelace.mdp.events import configure_shoelace_physics
 from isaaclab_tasks.contrib.shoelace.shoelace_env_cfg import ShoelaceEnvCfg
 
 
@@ -46,50 +48,19 @@ def test_runtime_contact_capacity_scales_and_preserves_overrides(num_envs: int, 
     )
 
 
-@pytest.mark.parametrize("detailed", [False, True])
-def test_proxy_inertia_survives_newton_validation(detailed: bool, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Preserve explicitly authored proxy inertia without a second Newton correction."""
-    monkeypatch.setattr(newton, "use_coord_layout_targets", True)
-    regularization = ShoelaceEnvCfg().cable_inertia_regularization
-    assert regularization == constants.CABLE_INERTIA_REGULARIZATION == 1.0e-6
-    stage = sim_utils.create_new_stage()
-    UsdGeom.SetStageMetersPerUnit(stage, 1.0)
-    spawn = ShoelaceEnvCfg().scene.shoelace_asset.spawn
-    spawn.func("/World/ShoelaceScene", spawn)
-    builder = build_source_builders(stage, ["/World/ShoelaceScene"], newton.ModelBuilder, [])["/World/ShoelaceScene"]
-    builder.validate_inertia_detailed = detailed
-    expected = np.asarray(builder.body_inertia, dtype=np.float32).reshape(-1, 3, 3)
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        model = builder.finalize(device="cpu")
-
-    assert not caught, [str(warning.message) for warning in caught]
-    np.testing.assert_array_equal(model.body_inertia.numpy(), expected)
-    dynamic = np.flatnonzero(np.asarray(builder.body_mass) > 0.0)
-    np.testing.assert_allclose(
-        expected[dynamic] @ model.body_inv_inertia.numpy()[dynamic],
-        np.broadcast_to(np.eye(3), expected[dynamic].shape),
-        atol=1.0e-6,
-    )
-
-
 @pytest.mark.parametrize("regularization", [-1.0e-6, float("nan"), float("inf")])
 def test_invalid_proxy_inertia_is_rejected(regularization: float) -> None:
     """Reject negative and nonfinite regularization before editing body properties."""
     cfg = ShoelaceEnvCfg()
     cfg.cable_inertia_regularization = regularization
     cfg.validate()
-    sim_utils.create_new_stage()
     with pytest.raises(ValueError, match="finite and nonnegative"):
-        cfg.scene.shoelace_asset.spawn.func("/World/ShoelaceScene", cfg.scene.shoelace_asset.spawn)
+        configure_shoelace_physics(SimpleNamespace(cfg=cfg), None)
 
 
-@pytest.mark.parametrize("regularization", [0.0, 3.0e-7])
-def test_baked_asset_preserves_material_and_inertia_overrides(regularization: float) -> None:
-    """Apply existing configuration knobs through USD, including disabling proxy inertia."""
+def test_baked_asset_defers_non_dahl_physics_to_events() -> None:
+    """Import native geometry/materials and Dahl, without task-specific model overrides."""
     cfg = ShoelaceEnvCfg()
-    cfg.cable_inertia_regularization = regularization
     cfg.lace_mu, cfg.shoe_mu = 0.25, 0.5
     cfg.validate()
     stage = sim_utils.create_new_stage()
@@ -104,14 +75,24 @@ def test_baked_asset_preserves_material_and_inertia_overrides(regularization: fl
         curve = stage.GetPrimAtPath(curve_path)
         bodies, _ = native_result["path_cable_map"][curve_path]
         geometric = np.asarray(native.body_inertia, dtype=np.float32).reshape(-1, 3, 3)[bodies]
-        fixed = set(curve.GetAttribute("isaaclab:cable:fixedSegments").Get())
+        for name in (
+            "fixedSegments",
+            "inertiaRegularization",
+            "segmentOrientations",
+            "jointStiffnesses",
+            "jointDampings",
+        ):
+            assert curve.GetAttribute(f"isaaclab:cable:{name}").Get() is None
+        assert curve.GetAttribute("isaaclab:cable:dahlMaxStrains").Get()
         for segment in range(len(geometric)):
             body = builder.body_label.index(f"{curve_path}_edge_body_{segment}")
-            assert builder.body_mass[body] == (0.0 if segment in fixed else native.body_mass[bodies[segment]])
-            expected = np.zeros((3, 3)) if segment in fixed else geometric[segment] + np.eye(3) * regularization
-            np.testing.assert_allclose(np.asarray(builder.body_inertia[body]).reshape(3, 3), expected, rtol=1.0e-6)
+            assert builder.body_mass[body] == native.body_mass[bodies[segment]] > 0.0
+            np.testing.assert_allclose(
+                np.asarray(builder.body_inertia[body]).reshape(3, 3), geometric[segment], rtol=1.0e-6
+            )
             for shape in builder.body_shapes[body]:
-                assert builder.shape_material_mu[shape] == pytest.approx(cfg.lace_mu)
+                native_shape = native.body_shapes[bodies[segment]][0]
+                assert builder.shape_material_mu[shape] == native.shape_material_mu[native_shape]
     shoe = builder.shape_label.index("/World/ShoelaceScene/Shoe/Collider")
     assert builder.shape_material_mu[shoe] == pytest.approx(cfg.shoe_mu)
     assert any(
@@ -121,11 +102,13 @@ def test_baked_asset_preserves_material_and_inertia_overrides(regularization: fl
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="The coupled MJWarp/VBD rollout requires CUDA")
+@pytest.mark.parametrize("regularization", [0.0, 3.0e-7, constants.CABLE_INERTIA_REGULARIZATION])
 @torch.inference_mode()
-def test_randomized_resets_preserve_shoe_lace_alignment_and_other_environments() -> None:
+def test_randomized_resets_preserve_shoe_lace_alignment_and_other_environments(regularization: float) -> None:
     """Resample selected starts without drift, stale targets, or displaced cable anchors."""
     cfg = ShoelaceEnvCfg()
     cfg.scene.num_envs = 4
+    cfg.cable_inertia_regularization = regularization
     cfg.sim.device = "cuda:0"
     with launch_simulation(cfg, {"visualizer": None, "visualizer_explicit": True}):
         env = gym.make("IsaacContrib-Shoelace-DualFranka", cfg=cfg).unwrapped
@@ -146,6 +129,80 @@ def test_randomized_resets_preserve_shoe_lace_alignment_and_other_environments()
             cables = [env.scene[name] for name in ("shoelace_left", "shoelace_right")]
             arm_events = [cfg.events.reset_left_arm, cfg.events.reset_right_arm]
             model = NewtonManager.get_model()
+            # Compare startup inertia to an independent native USD import before finalize's correction.
+            native = newton.ModelBuilder()
+            imported = native.add_usd(str(constants.ASSET_DIR / "shoelace.usda"), return_deformable_results=True)
+            native_inertia = np.asarray(native.body_inertia).reshape(-1, 3, 3)
+            centerline, _, reference_length = load_shoelace()
+            mean_length = np.linalg.norm(np.diff(centerline, axis=0), axis=1).mean()
+            authored_frames = np.asarray(newton.utils.create_parallel_transport_cable_quaternions(centerline))
+            for side, fixed in (("Left", -1), ("Right", 0)):
+                path = f"/Shoelace/Shoelace{side}/geometry/mesh"
+                bodies, _ = imported["path_cable_map"][path]
+                expected = native_inertia[bodies] + np.eye(3) * regularization
+                expected[fixed] = 0.0
+                for world in range(env.num_envs):
+                    prefix = f"/World/envs/env_{world}/ShoelaceScene/Shoelace{side}/geometry/mesh"
+                    indices = [model.body_label.index(f"{prefix}_edge_body_{i}") for i in range(len(bodies))]
+                    shapes = np.flatnonzero(np.isin(model.shape_body.numpy(), indices))
+                    assert len(shapes) == len(indices)
+                    for field, value in (
+                        ("shape_material_mu", cfg.lace_mu),
+                        ("shape_material_ke", constants.CONTACT_KE),
+                        ("shape_material_kd", constants.CONTACT_KD),
+                        ("shape_gap", constants.CONTACT_GAP),
+                    ):
+                        np.testing.assert_allclose(getattr(model, field).numpy()[shapes], value)
+                    actual = model.body_inertia.numpy()[indices]
+                    np.testing.assert_allclose(actual, expected, rtol=2.0e-5, atol=1.0e-14)
+                    dynamic = np.delete(np.arange(len(bodies)), fixed)
+                    np.testing.assert_allclose(
+                        actual[dynamic] @ model.body_inv_inertia.numpy()[indices][dynamic],
+                        np.broadcast_to(np.eye(3), actual[dynamic].shape),
+                        atol=1.0e-6,
+                    )
+                    assert model.body_mass.numpy()[indices[fixed]] == 0.0
+                    frames = authored_frames[: len(bodies)] if side == "Left" else authored_frames[-len(bodies) :]
+                    np.testing.assert_allclose(model.body_q.numpy()[indices, 3:], frames, atol=1.0e-6)
+                    # Independently sample the material profile's core and ordinary regions.
+                    joint_indices = [model.joint_label.index(f"{prefix}_cable_{i}") for i in range(1, len(bodies))]
+                    slots = model.joint_qd_start.numpy()[joint_indices, None] + np.arange(4)
+                    for field, stretch, bend, tail in (
+                        (
+                            "joint_target_ke",
+                            constants.STRETCH_STIFFNESS,
+                            constants.BEND_STIFFNESS,
+                            constants.TAIL_BEND_STIFFNESS,
+                        ),
+                        (
+                            "joint_target_kd",
+                            constants.STRETCH_DAMPING,
+                            constants.BEND_DAMPING,
+                            constants.TAIL_BEND_DAMPING,
+                        ),
+                    ):
+                        gains = getattr(model, field).numpy()[slots]
+                        np.testing.assert_allclose(gains[:, :2], stretch * reference_length / mean_length, rtol=1.0e-6)
+                        tip, ordinary = (0, -1) if side == "Left" else (-1, 0)
+                        np.testing.assert_allclose(gains[tip, 2:], tail * reference_length / mean_length, rtol=1.0e-6)
+                        np.testing.assert_allclose(
+                            gains[ordinary, 2:], bend * reference_length / mean_length, rtol=1.0e-6
+                        )
+            model_before = {
+                name: getattr(model, name).numpy().copy()
+                for name in (
+                    "body_mass",
+                    "body_inv_mass",
+                    "body_inertia",
+                    "body_inv_inertia",
+                    "joint_target_ke",
+                    "joint_target_kd",
+                    "shape_material_mu",
+                    "shape_material_ke",
+                    "shape_material_kd",
+                    "shape_gap",
+                )
+            }
             for world in range(env.num_envs):
                 root = f"/World/envs/env_{world}/ShoelaceScene/Shoe"
                 body = model.body_label.index(root)
@@ -221,6 +278,9 @@ def test_randomized_resets_preserve_shoe_lace_alignment_and_other_environments()
                 torch.testing.assert_close(shoe.data.root_pose_w.torch, shoe_start)
                 for cable, segment, anchor in zip(cables, (-1, 0), anchors, strict=True):
                     torch.testing.assert_close(cable.data.segment_pose_w.torch[:, segment], anchor)
+
+            for name, expected in model_before.items():
+                np.testing.assert_array_equal(getattr(model, name).numpy(), expected)
 
             # Zero-width ranges recover the settled defaults after previously randomized episodes.
             for name in ("reset_left_arm", "reset_right_arm", "reset_shoe"):

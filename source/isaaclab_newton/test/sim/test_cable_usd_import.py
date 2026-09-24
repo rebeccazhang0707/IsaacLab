@@ -145,8 +145,8 @@ def _source_builder(stage: Usd.Stage) -> newton.ModelBuilder:
     return build_source_builders(stage, ["/World/Cable"], newton.ModelBuilder, [])["/World/Cable"]
 
 
-def test_cable_physics_arrays_survive_usd_roundtrip_and_replication(tmp_path):
-    """Keep segment properties, joint gains, and native filters local through asset replication."""
+def test_cable_dahl_and_native_contact_properties_survive_usd_roundtrip_and_replication(tmp_path):
+    """Preserve Dahl arrays and native masses, contacts, and filters through replication."""
     stage = _cable_stage()
     path = "/World/Cable/geometry/mesh"
     prim = stage.GetPrimAtPath(path)
@@ -154,20 +154,10 @@ def test_cable_physics_arrays_survive_usd_roundtrip_and_replication(tmp_path):
     prim.CreateAttribute("physics:masses:elementType", Sdf.ValueTypeNames.Token).Set("segment")
     native = newton.ModelBuilder()
     native.add_usd(stage, root_path="/World/Cable")
-    inertias = np.asarray(native.body_inertia).reshape(3, 3, 3) + np.eye(3) * 0.001
-    inertias[2] = 0.0
-    gains = [Gf.Vec4d(100, 200, 3, 4), Gf.Vec4d(500, 600, 7, 8)]
-    cfg = NewtonCablePropertiesCfg(
-        fixed_segments=[2],
-        segment_orientations=[(0.0, 0.0, 0.0, 1.0)] * 3,
-        joint_stiffnesses=[tuple(row) for row in gains],
-        joint_dampings=[(1.0, 2.0, 3.0, 4.0)] * 2,
-        dahl_max_strains=[0.2, 0.3],
-        dahl_decay=[0.4, 0.5],
-    )
-    apply_newton_cable_properties(cfg, path, stage)
-    # Partial fragment overrides keep every other authored field and all native properties.
-    apply_newton_cable_properties(NewtonCablePropertiesCfg(inertia_regularization=0.001), path, stage)
+    inertias = np.asarray(native.body_inertia).reshape(3, 3, 3)
+    apply_newton_cable_properties(NewtonCablePropertiesCfg(dahl_max_strains=[0.2, 0.3]), path, stage)
+    # Partial fragment overrides keep the other Dahl array and all native properties.
+    apply_newton_cable_properties(NewtonCablePropertiesCfg(dahl_decay=[0.4, 0.5]), path, stage)
     material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial(materialPurpose="physics")
     spawn_physics_material(
         str(material.GetPath()),
@@ -186,20 +176,21 @@ def test_cable_physics_arrays_survive_usd_roundtrip_and_replication(tmp_path):
     asset = tmp_path / "cable.usda"
     stage.GetRootLayer().Export(str(asset))
     source = _source_builder(Usd.Stage.Open(str(asset)))
+    native_contacts = newton.ModelBuilder()
+    native_contacts.add_usd(stage, root_path="/World/Cable")
     builder = newton.ModelBuilder()
     builder.replicate(source, 2, xforms=[wp.transform(), wp.transform(wp.vec3(1, 2, 3), wp.quat(0, 0, 1, 0))])
 
-    np.testing.assert_allclose(builder.body_mass, [0.1, 0.2, 0, 0.1, 0.2, 0])
+    np.testing.assert_allclose(builder.body_mass, [0.1, 0.2, 0.3] * 2)
     np.testing.assert_allclose(
         np.asarray(builder.body_inertia).reshape(6, 3, 3),
         np.tile(inertias, (2, 1, 1)),
     )
-    np.testing.assert_allclose(np.asarray(builder.body_q)[:, 3:], [[0, 0, 0, 1]] * 3 + [[0, 0, 1, 0]] * 3)
-    np.testing.assert_allclose(builder.joint_target_ke, np.tile(np.asarray(gains).ravel(), 2))
-    np.testing.assert_allclose(builder.joint_target_kd, [1, 2, 3, 4] * 4)
-    for field, value in (("mu", 0.7), ("ke", 123.0), ("kd", 4.0)):
-        np.testing.assert_allclose(getattr(builder, "shape_material_" + field), value)
-    np.testing.assert_allclose(builder.shape_gap, 0.001)
+    np.testing.assert_allclose(builder.joint_target_ke, np.tile(native.joint_target_ke, 2))
+    np.testing.assert_allclose(builder.joint_target_kd, np.tile(native.joint_target_kd, 2))
+    # Generic import follows Newton's contact semantics without an Isaac Lab override.
+    for field in ("shape_material_mu", "shape_material_ke", "shape_material_kd", "shape_gap"):
+        np.testing.assert_allclose(getattr(builder, field), np.tile(getattr(native_contacts, field), 2))
     model = builder.finalize(device="cpu")
     np.testing.assert_allclose(model.vbd.dahl_eps_max.numpy(), [0.2, 0.3] * 2)
     np.testing.assert_allclose(model.vbd.dahl_tau.numpy(), [0.4, 0.5] * 2)
@@ -209,11 +200,9 @@ def test_cable_physics_arrays_survive_usd_roundtrip_and_replication(tmp_path):
 @pytest.mark.parametrize(
     ("name", "usd_type", "value"),
     [
-        ("fixedSegments", Sdf.ValueTypeNames.IntArray, [3]),
-        ("jointStiffnesses", Sdf.ValueTypeNames.Double4Array, [Gf.Vec4d(1)]),
+        ("dahlMaxStrains", Sdf.ValueTypeNames.FloatArray, [0.1]),
+        ("dahlMaxStrains", Sdf.ValueTypeNames.FloatArray, [-0.1, 0.2]),
         ("dahlDecay", Sdf.ValueTypeNames.FloatArray, [0.1, float("nan")]),
-        ("segmentOrientations", Sdf.ValueTypeNames.Double4Array, [Gf.Vec4d(0)] * 3),
-        ("inertiaRegularization", Sdf.ValueTypeNames.Double, -1.0),
     ],
 )
 def test_invalid_cable_physics_arrays_fail_import(name, usd_type, value):
@@ -223,8 +212,20 @@ def test_invalid_cable_physics_arrays_fail_import(name, usd_type, value):
         _source_builder(stage)
 
 
-def test_cable_without_physics_arrays_preserves_native_import():
+@pytest.mark.parametrize("legacy_overrides", [False, True])
+def test_cable_without_dahl_preserves_native_import(legacy_overrides):
+    """The importer no longer consumes task-specific body and joint USD overrides."""
     stage = _cable_stage()
+    if legacy_overrides:
+        prim = stage.GetPrimAtPath("/World/Cable/geometry/mesh")
+        for name, usd_type, value in (
+            ("fixedSegments", Sdf.ValueTypeNames.IntArray, [0]),
+            ("inertiaRegularization", Sdf.ValueTypeNames.Double, 0.001),
+            ("segmentOrientations", Sdf.ValueTypeNames.Double4Array, [Gf.Vec4d(0, 0, 0, 1)] * 3),
+            ("jointStiffnesses", Sdf.ValueTypeNames.Double4Array, [Gf.Vec4d(123)] * 2),
+            ("jointDampings", Sdf.ValueTypeNames.Double4Array, [Gf.Vec4d(456)] * 2),
+        ):
+            prim.CreateAttribute(f"isaaclab:cable:{name}", usd_type).Set(value)
     native = newton.ModelBuilder()
     native.add_usd(stage, root_path="/World/Cable")
     imported = _source_builder(stage)
@@ -232,7 +233,17 @@ def test_cable_without_physics_arrays_preserves_native_import():
         np.testing.assert_array_equal(getattr(imported, name), getattr(native, name))
 
 
-def test_authored_fixture_stays_a_resettable_zero_mass_body():
+@pytest.mark.parametrize(
+    "name", ["fixed_segments", "inertia_regularization", "segment_orientations", "joint_stiffnesses", "joint_dampings"]
+)
+def test_legacy_cable_fragment_fields_require_startup_events(name):
+    stage = _cable_stage()
+    cfg = NewtonCablePropertiesCfg(**{name: 0.001 if name == "inertia_regularization" else []})
+    with pytest.raises(ValueError, match="use a startup event"):
+        apply_newton_cable_properties(cfg, "/World/Cable/geometry/mesh", stage)
+
+
+def test_legacy_fixed_fixture_attribute_does_not_override_native_body():
     stage = _cable_stage()
     cube = UsdGeom.Cube.Define(stage, "/World/Cable/Fixture").GetPrim()
     UsdPhysics.RigidBodyAPI.Apply(cube).CreateKinematicEnabledAttr(True)
@@ -241,25 +252,26 @@ def test_authored_fixture_stays_a_resettable_zero_mass_body():
     cube.CreateAttribute("isaaclab:physics:fixed", Sdf.ValueTypeNames.Bool).Set(True)
     builder = _source_builder(stage)
     body = builder.body_label.index(str(cube.GetPath()))
-    assert builder.body_mass[body] == builder.body_inv_mass[body] == 0.0
-    np.testing.assert_array_equal(np.asarray(builder.body_inertia[body]), 0.0)
-    np.testing.assert_array_equal(np.asarray(builder.body_inv_inertia[body]), 0.0)
+    native = newton.ModelBuilder()
+    native.add_usd(stage, root_path="/World/Cable")
+    native_body = native.body_label.index(str(cube.GetPath()))
+    for name in ("body_mass", "body_inv_mass", "body_inertia", "body_inv_inertia"):
+        np.testing.assert_array_equal(getattr(builder, name)[body], getattr(native, name)[native_body])
     assert builder.body_shapes[body]
 
 
 @pytest.mark.parametrize("scale", [1.0, 2.0])
-def test_cable_local_orientations_compose_rotation_and_reject_unbaked_scale(scale):
+def test_cable_dahl_accepts_rotation_and_rejects_unbaked_scale(scale):
     stage = _cable_stage()
     root = UsdGeom.Xformable(stage.GetPrimAtPath("/World/Cable"))
     root.AddRotateZOp().Set(180.0)
     root.GetPrim().GetAttribute("xformOp:scale").Set(Gf.Vec3d(scale))
     curve = stage.GetPrimAtPath("/World/Cable/geometry/mesh")
-    curve.CreateAttribute("isaaclab:cable:segmentOrientations", Sdf.ValueTypeNames.Double4Array).Set(
-        [Gf.Vec4d(0, 0, 0, 1)] * 3
-    )
+    curve.CreateAttribute("isaaclab:cable:dahlMaxStrains", Sdf.ValueTypeNames.FloatArray).Set([0.2, 0.3])
     if scale != 1.0:
         with pytest.raises(ValueError, match="bake scale/shear"):
             _source_builder(stage)
     else:
         builder = _source_builder(stage)
-        np.testing.assert_allclose(np.asarray(builder.body_q)[:, 3:], [[0, 0, 1, 0]] * 3, atol=1.0e-7)
+        model = builder.finalize(device="cpu")
+        np.testing.assert_allclose(model.vbd.dahl_eps_max.numpy(), [0.2, 0.3])

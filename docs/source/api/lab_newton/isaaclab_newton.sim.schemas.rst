@@ -12,9 +12,9 @@ isaaclab_newton.sim.schemas
   See :doc:`/source/concepts/schema_cfgs` for the design and
   when to use each class.
 
-  ``NewtonCablePropertiesCfg`` is an Isaac Lab extension in ``isaaclab:cable:*``.
-  See :doc:`/source/how-to/newton_cable_assets` for the native schemas to prefer
-  before using these model overrides.
+  ``NewtonCablePropertiesCfg`` is an Isaac Lab extension for construction-time Dahl
+  arrays in ``isaaclab:cable:*``. Non-Dahl model overrides belong in startup events.
+  See :doc:`/source/how-to/newton_cable_assets` for native schemas and migration guidance.
 
   .. rubric:: Newton-targeted (family roots)
 
