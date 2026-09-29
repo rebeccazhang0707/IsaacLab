@@ -167,6 +167,51 @@ For example, play the best local checkpoint and record a short video:
    depending on the workflow. Override that method on a task config to customize
    playback.
 
+For manager-based tasks with a success termination term, RSL-RL playback can
+evaluate a fixed number of episodes and save per-episode results:
+
+.. code-block:: bash
+
+   uv run --extra video isaaclab play --rl_library rsl_rl \
+       --task IsaacContrib-Shoelace-DualFranka \
+       --checkpoint logs/shoelace_260918/model_3100.pt \
+       --num_envs 16 --seed 42 --device cuda:0 --visualizer newton_gl \
+       --eval_episodes 100 --eval_output logs/shoelace_260918/eval/model_3100_seed42_100_gl_closeup.json \
+       --video_grid --video_eye 0 -0.6 0.75 --video_lookat 0 0 0.12 \
+       --video_closeup_env 0 --video_closeup_offset 0 0 0.12 --video_closeup_eye 0 -0.35 0.525 \
+       --video_length 2100 --video_interval 0
+
+``--eval_episodes`` assigns fixed per-environment quotas that sum to the requested
+count (here, four environments contribute seven episodes each and twelve contribute
+six each). Episodes after a quota is filled are ignored. Success is read from the
+terminal step's ``success`` term; use ``--eval_success_term`` for a different name.
+A success on the timeout step counts as success. The JSON contains the success rate,
+episode outcomes and lengths, quotas, checkpoint, and seed. An interrupted run is
+saved with ``complete: false``. Without ``--eval_output``, results are timestamped
+under the checkpoint directory's ``eval/`` folder.
+
+``--video_grid`` records actual Newton GL viewport frames with the same materials
+and lighting as the interactive viewer, composed into a 1920 by 1080 video. It uses
+one labelled tile per environment (4 by 4 for 16 environments). ``--video_eye X Y Z``
+and ``--video_lookat X Y Z`` set the camera eye and target offsets in metres relative
+to each environment origin. The recording uses a 24 mm focal length and clips
+geometry more than 0.6 m beyond the look-at distance to reduce background clutter.
+
+``--video_closeup_env N`` replaces the bottom-right four tiles with a larger view
+of environment N; all environments still participate in evaluation. This requires
+at least nine environments. ``--video_closeup_offset`` sets its target relative to
+the environment origin, and ``--video_closeup_eye`` sets its eye relative to that
+target, both in metres along world axes. The example keeps both grippers and the
+shoe in this larger view. Omit ``--video_closeup_env`` to retain every overview tile.
+
+Clips are saved under the checkpoint directory's ``videos/play/`` folder with a
+``_gl_grid`` filename suffix. ``--video_interval 0`` records
+one clip; ``--video_length`` limits its length in environment steps. Evaluation
+continues after the clip finishes and flushes a shorter clip if evaluation finishes
+first. For this task, 2100 steps cover the maximum seven 10-second episodes per
+environment at 30 steps per second. Omit the video options to evaluate without
+recording. These options do not change ordinary playback when omitted.
+
 .. _pretrained-checkpoints:
 
 Pretrained checkpoints
