@@ -73,7 +73,9 @@ external files referenced by relative paths and must be shipped alongside the US
 
 Offline source paths, resampling topology, shoe-tongue geometry, cable density, and cable color
 are defined in `asset_authoring.py`. Runtime `shoelace_constants.py` retains the composite asset
-path and physical defaults used by the RL task. Startup events do not import either authoring
+path and runtime defaults for control, success thresholds, solvers, and robot initial poses.
+Scene entities and manager-term composition remain in `shoelace_env_cfg.py`; import numeric
+defaults from `shoelace_constants.py` rather than `shoelace_env_cfg.py`. Startup events do not import either authoring
 module; tail material weights are computed locally in `mdp/events.py`. Shared material helpers
 and runtime contact-chain lookup remain in the runtime modules and can also be reused offline.
 

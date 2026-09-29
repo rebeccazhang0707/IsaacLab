@@ -255,17 +255,9 @@ def _tail_joint_blend_weights(
 
 
 def _source_curve(env: ManagerBasedEnv, side: str) -> Usd.Prim:
-    """Return the source cable prim retained by physics-only environment replication.
+    """Return the first environment's ``Left`` or ``Right`` cable prim.
 
-    Args:
-        env: Environment containing the composite shoelace asset.
-        side: Cable side, either ``"Left"`` or ``"Right"``.
-
-    Returns:
-        Cable geometry prim in the first environment.
-
-    Raises:
-        ValueError: If the source cable prim is missing.
+    Physics-only replication retains this source prim. Raise ``ValueError`` if missing.
     """
     path = f"{env.scene.env_prim_paths[0]}/ShoelaceScene/Shoelace{side}/geometry/mesh"
     curve = env.sim.stage.GetPrimAtPath(path)
@@ -303,18 +295,10 @@ def _startup_array(curve: Usd.Prim, name: str, shape: tuple[int, ...], quaternio
 
 
 def _source_transform(curve: Usd.Prim) -> Gf.Matrix4d:
-    """Return a rigid curve-to-world transform without scale, shear, or reflection.
+    """Return the default-time curve-to-world transform, with translation in [m].
 
-    Args:
-        curve: Source cable geometry prim.
-
-    Returns:
-        Local-to-world transform at the default USD time. Translation is in [m]
-        for the generated meter-based asset.
-
-    Raises:
-        ValueError: If the transform contains scale, shear, or reflection that would
-            invalidate the baked startup data's rigid-transform assumption.
+    The generated asset is meter-based. Raise ``ValueError`` for scale, shear, or
+    reflection, which violate the baked startup data's rigid-transform assumption.
     """
     transform = UsdGeom.Xformable(curve).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
     linear = np.asarray(transform)[:3, :3]

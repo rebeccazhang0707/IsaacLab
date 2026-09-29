@@ -12,7 +12,53 @@ ASSET_DIR = Path(__file__).resolve().parent / "data"
 # Runtime asset; texture paths are resolved relative to this USD.
 SHOELACE_ASSET = ASSET_DIR / "shoelace.usda"
 
+# Control defaults.
 TCP_OFFSET = (0.0, 0.0, 0.1034)
+ARM_ACTION_SCALE = 0.005
+GRIPPER_OPEN_POSITION = 0.01
+GRIPPER_CLOSED_POSITION = 0.001
+GRIPPER_STIFFNESS = 8000.0
+CONTACT_OBSERVATION_HISTORY_LENGTH = 3
+
+# Scene defaults.
+ENV_SPACING = 1.5
+
+# Success criteria.
+TAIL_SUCCESS_OUTWARD_DISTANCE = 0.09
+TAIL_SUCCESS_X_SEPARATION = 2.0 * TAIL_SUCCESS_OUTWARD_DISTANCE
+THROAT_RADIUS = 0.025
+MAXIMUM_THROAT_SEGMENTS_PER_ARM = 15
+
+# Solver defaults.
+NEWTON_NUM_SUBSTEPS = 10
+NEWTON_COLLISION_DECIMATION = 2
+VBD_ITERATIONS = 12
+ADMM_ITERATIONS = 2
+ADMM_RHO = 500.0
+ADMM_BAUMGARTE = 0.5
+ADMM_CONTACT_MATCHING = "latest"
+
+# Initial poses.
+LEFT_ROBOT_POSITION = (-0.525248, 0.023338, -0.089901)
+RIGHT_ROBOT_POSITION = (0.507963, -0.001890, -0.088518)
+LEFT_ARM_JOINT_POSITIONS = {
+    "panda_joint1": 0.267436,
+    "panda_joint2": -0.276844,
+    "panda_joint3": -0.509809,
+    "panda_joint4": -2.681384,
+    "panda_joint5": 0.871062,
+    "panda_joint6": 2.543250,
+    "panda_joint7": -0.079776,
+}
+RIGHT_ARM_JOINT_POSITIONS = {
+    "panda_joint1": -0.379171,
+    "panda_joint2": -0.306599,
+    "panda_joint3": 0.461994,
+    "panda_joint4": -2.726323,
+    "panda_joint5": -0.930591,
+    "panda_joint6": 2.645580,
+    "panda_joint7": 1.577059,
+}
 
 # Shared Franka-validated cable material and contact defaults.
 CABLE_INERTIA_REGULARIZATION = 1.0e-6  # Additive isotropic proxy inertia [kg*m^2].

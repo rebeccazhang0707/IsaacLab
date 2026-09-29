@@ -15,10 +15,9 @@ import torch
 import isaaclab_tasks.contrib.shoelace.mdp.grasp as shoelace_grasp
 import isaaclab_tasks.contrib.shoelace.mdp.rewards as shoelace_rewards
 import isaaclab_tasks.contrib.shoelace.mdp.terminations as shoelace_terminations
-from isaaclab_tasks.contrib.shoelace.shoelace_constants import CONTACT_DISTANCE_CAP
+from isaaclab_tasks.contrib.shoelace.shoelace_constants import CONTACT_DISTANCE_CAP, TAIL_SUCCESS_X_SEPARATION
 from isaaclab_tasks.contrib.shoelace.shoelace_env_cfg import (
     CABLE_CFGS,
-    TAIL_SUCCESS_X_SEPARATION,
     ActionsCfg,
     RewardsCfg,
     ShoelaceEnvCfg,

@@ -44,61 +44,23 @@ from . import shoelace_constants as physics
 from .shoelace_assets import ShoelaceUsdCfg
 from .shoelace_contacts import FingerTailContactSensorCfg
 
-TCP_OFFSET = physics.TCP_OFFSET
-ARM_ACTION_SCALE = 0.005
-ENV_SPACING = 1.5
-GRIPPER_OPEN_POSITION = 0.01
-GRIPPER_CLOSED_POSITION = 0.001
-GRIPPER_STIFFNESS = 8000.0
-CONTACT_OBSERVATION_HISTORY_LENGTH = 3
-TAIL_SUCCESS_OUTWARD_DISTANCE = 0.09
-TAIL_SUCCESS_X_SEPARATION = 2.0 * TAIL_SUCCESS_OUTWARD_DISTANCE
-THROAT_RADIUS = 0.025
-MAXIMUM_THROAT_SEGMENTS_PER_ARM = 15
-
-NEWTON_NUM_SUBSTEPS = 10
-NEWTON_COLLISION_DECIMATION = 2
-VBD_ITERATIONS = 12
-ADMM_ITERATIONS = 2
-ADMM_RHO = 500.0
-ADMM_BAUMGARTE = 0.5
-ADMM_CONTACT_MATCHING = "latest"
-
-LEFT_ROBOT_POSITION = (-0.525248, 0.023338, -0.089901)
-RIGHT_ROBOT_POSITION = (0.507963, -0.001890, -0.088518)
-LEFT_ARM_JOINT_POSITIONS = {
-    "panda_joint1": 0.267436,
-    "panda_joint2": -0.276844,
-    "panda_joint3": -0.509809,
-    "panda_joint4": -2.681384,
-    "panda_joint5": 0.871062,
-    "panda_joint6": 2.543250,
-    "panda_joint7": -0.079776,
-}
-RIGHT_ARM_JOINT_POSITIONS = {
-    "panda_joint1": -0.379171,
-    "panda_joint2": -0.306599,
-    "panda_joint3": 0.461994,
-    "panda_joint4": -2.726323,
-    "panda_joint5": -0.930591,
-    "panda_joint6": 2.645580,
-    "panda_joint7": 1.577059,
-}
-
 CABLE_CFGS = (SceneEntityCfg("shoelace_left"), SceneEntityCfg("shoelace_right"))
 ROBOT_CFGS = (
     SceneEntityCfg("robot_left", joint_names=["panda_finger_joint1"], body_names=["panda_hand"]),
     SceneEntityCfg("robot_right", joint_names=["panda_finger_joint1"], body_names=["panda_hand"]),
 )
+_GRIPPER_PARAMS = {
+    "open_position": physics.GRIPPER_OPEN_POSITION,
+    "closed_position": physics.GRIPPER_CLOSED_POSITION,
+    "cable_cfgs": CABLE_CFGS,
+    "robot_cfgs": ROBOT_CFGS,
+}
 _GRASP_PARAMS = {
+    **_GRIPPER_PARAMS,
     "contact_std": 5.0e-4,
     "contact_penetration_tolerance": 1.0e-3,
     "relative_speed_std": 0.08,
     "grasp_filter_time_constant": 0.10,
-    "open_position": GRIPPER_OPEN_POSITION,
-    "closed_position": GRIPPER_CLOSED_POSITION,
-    "cable_cfgs": CABLE_CFGS,
-    "robot_cfgs": ROBOT_CFGS,
 }
 
 
@@ -116,10 +78,10 @@ def _franka_cfg(
     robot.init_state.pos = position
     robot.init_state.rot = rotation
     robot.init_state.joint_pos.update(arm_joint_positions)
-    robot.init_state.joint_pos["panda_finger_joint.*"] = GRIPPER_OPEN_POSITION
+    robot.init_state.joint_pos["panda_finger_joint.*"] = physics.GRIPPER_OPEN_POSITION
     robot.spawn.rigid_props = {"/.*": [robot.spawn.rigid_props, MujocoRigidBodyCfg(gravcomp=1.0)]}
     robot.actuators["panda_hand"].actuator_velocity_limit = 0.04
-    robot.actuators["panda_hand"].stiffness = GRIPPER_STIFFNESS
+    robot.actuators["panda_hand"].stiffness = physics.GRIPPER_STIFFNESS
     return robot
 
 
@@ -129,8 +91,8 @@ def _arm_action(asset_name: str) -> env_mdp.DifferentialInverseKinematicsActionC
     action.asset_name = asset_name
     action.controller.use_relative_mode = True
     action.controller.ik_params = {"lambda_val": 0.01}
-    action.scale = (ARM_ACTION_SCALE,) * 3 + (0.01,) * 3
-    action.body_offset.pos = TCP_OFFSET
+    action.scale = (physics.ARM_ACTION_SCALE,) * 3 + (0.01,) * 3
+    action.body_offset.pos = physics.TCP_OFFSET
     return action
 
 
@@ -140,15 +102,15 @@ class ShoelaceSceneCfg(InteractiveSceneCfg):
 
     robot_left = _franka_cfg(
         "{ENV_REGEX_NS}/RobotLeft",
-        LEFT_ROBOT_POSITION,
+        physics.LEFT_ROBOT_POSITION,
         (0.0, 0.0, 0.0, 1.0),
-        LEFT_ARM_JOINT_POSITIONS,
+        physics.LEFT_ARM_JOINT_POSITIONS,
     )
     robot_right = _franka_cfg(
         "{ENV_REGEX_NS}/RobotRight",
-        RIGHT_ROBOT_POSITION,
+        physics.RIGHT_ROBOT_POSITION,
         (0.0, 0.0, 1.0, 0.0),
-        RIGHT_ARM_JOINT_POSITIONS,
+        physics.RIGHT_ARM_JOINT_POSITIONS,
     )
     shoelace_asset = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/ShoelaceScene",
@@ -170,15 +132,15 @@ class ActionsCfg:
     left_gripper = env_mdp.BinaryJointPositionActionCfg(
         asset_name="robot_left",
         joint_names=["panda_finger_joint1"],
-        open_command_expr={"panda_finger_joint1": GRIPPER_OPEN_POSITION},
-        close_command_expr={"panda_finger_joint1": GRIPPER_CLOSED_POSITION},
+        open_command_expr={"panda_finger_joint1": physics.GRIPPER_OPEN_POSITION},
+        close_command_expr={"panda_finger_joint1": physics.GRIPPER_CLOSED_POSITION},
     )
     right_arm = _arm_action("robot_right")
     right_gripper = env_mdp.BinaryJointPositionActionCfg(
         asset_name="robot_right",
         joint_names=["panda_finger_joint1"],
-        open_command_expr={"panda_finger_joint1": GRIPPER_OPEN_POSITION},
-        close_command_expr={"panda_finger_joint1": GRIPPER_CLOSED_POSITION},
+        open_command_expr={"panda_finger_joint1": physics.GRIPPER_OPEN_POSITION},
+        close_command_expr={"panda_finger_joint1": physics.GRIPPER_CLOSED_POSITION},
     )
 
 
@@ -209,8 +171,8 @@ class ObservationsCfg:
         gripper_close_error = ObsTerm(
             func=mdp.gripper_close_error,
             params={"robot_cfgs": ROBOT_CFGS},
-            clip=(0.0, GRIPPER_OPEN_POSITION - GRIPPER_CLOSED_POSITION),
-            scale=1.0 / (GRIPPER_OPEN_POSITION - GRIPPER_CLOSED_POSITION),
+            clip=(0.0, physics.GRIPPER_OPEN_POSITION - physics.GRIPPER_CLOSED_POSITION),
+            scale=1.0 / (physics.GRIPPER_OPEN_POSITION - physics.GRIPPER_CLOSED_POSITION),
         )
         tails_to_tcp = ObsTerm(
             func=mdp.tails_to_tcp,
@@ -221,7 +183,7 @@ class ObservationsCfg:
             func=mdp.finger_tail_signed_distance,
             clip=(-physics.CONTACT_DISTANCE_CAP, physics.CONTACT_DISTANCE_CAP),
             scale=1.0 / physics.CONTACT_DISTANCE_CAP,
-            history_length=CONTACT_OBSERVATION_HISTORY_LENGTH,
+            history_length=physics.CONTACT_OBSERVATION_HISTORY_LENGTH,
         )
         tail_tcp_relative_speed = ObsTerm(
             func=mdp.tail_tcp_relative_speed,
@@ -283,7 +245,7 @@ class RewardsCfg:
         params={
             **_GRASP_PARAMS,
             "reach_std": 0.08,
-            "success_x_separation": TAIL_SUCCESS_X_SEPARATION,
+            "success_x_separation": physics.TAIL_SUCCESS_X_SEPARATION,
             "acquisition_weight": 0.6,
             "approach_fraction": 0.5,
             "bilateral_approach_fraction": 0.5,
@@ -297,14 +259,11 @@ class RewardsCfg:
         func=mdp.pregrasp_progress_reward,
         weight=1.0,
         params={
+            **_GRIPPER_PARAMS,
             "alignment_std": 0.015,
             "closure_radius": 0.01,
             "alignment_weight": 0.75,
             "closure_weight": 0.25,
-            "open_position": GRIPPER_OPEN_POSITION,
-            "closed_position": GRIPPER_CLOSED_POSITION,
-            "cable_cfgs": CABLE_CFGS,
-            "robot_cfgs": ROBOT_CFGS,
         },
     )
     # Reward retained contact-based, closed-finger, low-slip grasps even without further task progress.
@@ -332,9 +291,9 @@ class TerminationsCfg:
         func=mdp.shoelace_bilateral_pull_success,
         params={
             **_GRASP_PARAMS,
-            "throat_radius": THROAT_RADIUS,
-            "maximum_throat_segments_per_arm": MAXIMUM_THROAT_SEGMENTS_PER_ARM,
-            "minimum_tail_outward_distance": TAIL_SUCCESS_OUTWARD_DISTANCE,
+            "throat_radius": physics.THROAT_RADIUS,
+            "maximum_throat_segments_per_arm": physics.MAXIMUM_THROAT_SEGMENTS_PER_ARM,
+            "minimum_tail_outward_distance": physics.TAIL_SUCCESS_OUTWARD_DISTANCE,
             "minimum_pull_distance": 0.025,
             "grasp_threshold": 0.2,
         },
@@ -372,7 +331,7 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
                     CouplerEntryCfg(
                         name="shoelace",
                         solver_cfg=VBDSolverCfg(
-                            iterations=VBD_ITERATIONS,
+                            iterations=physics.VBD_ITERATIONS,
                             rigid_compliant_alm=True,
                             rigid_body_contact_buffer_size=physics.VBD_CONTACT_BUFFER,
                         ),
@@ -381,28 +340,28 @@ class ShoelaceEnvCfg(ManagerBasedRLEnvCfg):
                     ),
                 ],
                 contact_pairs=[("robots", "shoelace")],
-                iterations=ADMM_ITERATIONS,
-                rho=ADMM_RHO,
+                iterations=physics.ADMM_ITERATIONS,
+                rho=physics.ADMM_RHO,
                 gamma=0.0,
-                baumgarte=ADMM_BAUMGARTE,
-                rigid_contact_matching=ADMM_CONTACT_MATCHING,
+                baumgarte=physics.ADMM_BAUMGARTE,
+                rigid_contact_matching=physics.ADMM_CONTACT_MATCHING,
             ),
             collision_cfg=NewtonCollisionPipelineCfg(
                 rigid_contact_max=physics.CONTACTS_PER_ENV * 4,
                 max_triangle_pairs=physics.MIN_TRIANGLE_PAIRS,
             ),
-            collision_decimation=NEWTON_COLLISION_DECIMATION,
+            collision_decimation=physics.NEWTON_COLLISION_DECIMATION,
             default_shape_cfg=NewtonShapeCfg(
                 gap=physics.CONTACT_GAP,
                 ke=2.5e4,
                 kd=100.0,
                 mu=10.0,
             ),
-            num_substeps=NEWTON_NUM_SUBSTEPS,
+            num_substeps=physics.NEWTON_NUM_SUBSTEPS,
             use_cuda_graph=True,
         ),
     )
-    scene: ShoelaceSceneCfg = ShoelaceSceneCfg(num_envs=4, env_spacing=ENV_SPACING, replicate_physics=True)
+    scene: ShoelaceSceneCfg = ShoelaceSceneCfg(num_envs=4, env_spacing=physics.ENV_SPACING, replicate_physics=True)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     events: EventsCfg = EventsCfg()

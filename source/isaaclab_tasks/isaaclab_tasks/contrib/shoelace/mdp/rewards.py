@@ -127,23 +127,17 @@ class dense_task_reward(ManagerTermBase):
     ) -> torch.Tensor:
         """Return the signed rate of acquisition-and-pull progress [1/s].
 
-        Reward composition:
-            1. Acquisition: independent approach and grasp credit plus bilateral bonuses. Each grasp
-               combines two-finger contact, actual closure, and low tail-TCP slip, independently of proximity.
-            2. Pulling: new outward-distance records with valid grasps, plus a bilateral bonus.
-            3. Feedback: acquisition potential difference plus pull progress, divided by ``step_dt``.
-               The reward manager multiplies by ``step_dt`` and the term weight.
+        Combines acquisition potential differences with grasp-gated outward-distance records;
+        each includes independent-arm credit and a bilateral bonus. Acquisition penalizes moving
+        away or losing grasps; physical grasp quality is defined by :func:`shoelace_grasp_quality`.
 
         Notes:
-            - Reset: the first finite sample seeds state and returns zero; regrasping never resets references.
-            - High-water pull: starts at zero and continues beyond the per-arm separation scale. Above the
-              scale, bilateral progress follows the smaller current per-arm progress. Records advance even
-              without grasps, preventing retrospective payment on regrasp. Returning to an old position
-              cannot earn credit again. Acquisition still penalizes grasp loss and moving away from tails.
-            - Diagnostic pull scores start at 0.5 before grasp gating and remain available as diagnostic metrics.
-            - Invalid inputs: return zero and preserve reward history; excluded from phase metric averages.
-            - Acquisition cycles cancel without discounting. Pulling pays once for new records, not for
-              repeated cycles. This shaping does not claim discounted policy invariance.
+            - The first finite sample seeds history without reward; invalid samples pay zero and
+              preserve history. Regrasping never resets baselines or records.
+            - Pull records advance even without grasps, preventing passive-motion and repeated-cycle
+              credit. Progress is unbounded; beyond the separation scale, bilateral progress follows
+              the trailing arm. Diagnostic pull scores instead start at 0.5 before grasp gating.
+            - Acquisition cycles cancel without discounting; discounted policy invariance is not claimed.
 
         Args:
             env: The task environment.
@@ -167,7 +161,8 @@ class dense_task_reward(ManagerTermBase):
                 both arms must qualify for new bilateral records.
 
         Returns:
-            Signed reward rates [1/s], shape [N]. High-water pull has no fixed total reward cap.
+            Signed reward rates [1/s], shape [N]. RewardManager cancels the timestep division
+            and applies the term weight. High-water pull has no fixed total reward cap.
 
         Raises:
             ValueError: If scene entities, reward budgets, or the separation target are invalid.
