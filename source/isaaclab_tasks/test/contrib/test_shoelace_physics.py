@@ -24,8 +24,39 @@ from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab_tasks.contrib.shoelace import asset_authoring
 from isaaclab_tasks.contrib.shoelace import shoelace_constants as constants
 from isaaclab_tasks.contrib.shoelace.asset_authoring import load_shoelace
-from isaaclab_tasks.contrib.shoelace.mdp.events import configure_shoelace_physics
+from isaaclab_tasks.contrib.shoelace.mdp.events import configure_shoelace_physics, reset_shoe_position
 from isaaclab_tasks.contrib.shoelace.shoelace_env_cfg import ShoelaceEnvCfg
+
+
+@pytest.mark.parametrize("env_ids", [slice(None), slice(1, 4, 2), slice(0, 0), torch.tensor([3, 1])])
+def test_shoe_reset_accepts_slices_and_preserves_unselected_poses(env_ids: torch.Tensor | slice) -> None:
+    """Apply the same translation to selected shoe and cable poses without expanding slices."""
+    defaults = torch.zeros(4, 7)
+    defaults[:, 6] = 1.0
+    origins = torch.arange(12, dtype=torch.float32).reshape(4, 3)
+    shoe_pose = defaults.clone()
+    cable_pose = defaults[:, None].expand(-1, 3, -1).clone()
+    shoe = SimpleNamespace(
+        data=SimpleNamespace(default_root_pose=SimpleNamespace(torch=defaults)),
+        write_root_pose_to_sim_index=lambda *, root_pose, env_ids: shoe_pose.__setitem__(env_ids, root_pose),
+    )
+    cable = SimpleNamespace(
+        data=SimpleNamespace(default_segment_pose_w=SimpleNamespace(torch=cable_pose.clone())),
+        write_segment_pose_to_sim_index=lambda *, segment_pose, env_ids: cable_pose.__setitem__(env_ids, segment_pose),
+    )
+
+    class Scene(dict):
+        env_origins = origins
+
+    env = SimpleNamespace(device="cpu", scene=Scene(shoe=shoe, shoelace_left=cable, shoelace_right=cable))
+    reset_shoe_position(env, env_ids, {"x": (0.1, 0.1), "y": (-0.2, -0.2)})
+    expected_shoe = defaults.clone()
+    expected_cable = defaults[:, None].expand(-1, 3, -1).clone()
+    offset = torch.tensor([0.1, -0.2, 0.0])
+    expected_shoe[env_ids, :3] += origins[env_ids] + offset
+    expected_cable[env_ids, :, :3] += offset
+    torch.testing.assert_close(shoe_pose, expected_shoe)
+    torch.testing.assert_close(cable_pose, expected_cable)
 
 
 @pytest.mark.parametrize(("num_envs", "override"), [(4, None), (1024, None), (1024, 1_024_000)])
@@ -238,14 +269,14 @@ def test_randomized_resets_preserve_shoe_lace_alignment_and_other_environments(
                     shape = model.shape_label.index(root + suffix)
                     assert model.shape_body.numpy()[shape] == body
 
-            for _ in range(3):
+            for selector in (selected, slice(0, env.num_envs, 2), selected):
                 shoe_before = shoe.data.root_pose_w.torch.clone()
                 robot_before = [robot.data.joint_pos.torch.clone() for robot in robots]
                 cable_before = [cable.data.segment_pose_w.torch.clone() for cable in cables]
                 distances = env.scene["finger_tail_contacts"].data
                 distances.fill_(-constants.CONTACT_DISTANCE_CAP)
                 contacts_before = distances.clone()
-                env.reset(env_ids=selected)
+                env.reset(env_ids=selector)
                 torch.testing.assert_close(
                     distances[selected], torch.full_like(distances[selected], constants.CONTACT_DISTANCE_CAP)
                 )
@@ -291,7 +322,7 @@ def test_randomized_resets_preserve_shoe_lace_alignment_and_other_environments(
                         cable.data.default_segment_velocity_w.torch[selected],
                     )
 
-                # Advance through the captured coupled solver and verify both zero-mass anchors stay put.
+                # Advance the coupled solver and verify both zero-mass anchors stay put.
                 shoe_start = shoe.data.root_pose_w.torch.clone()
                 anchors = [
                     cables[0].data.segment_pose_w.torch[:, -1].clone(),

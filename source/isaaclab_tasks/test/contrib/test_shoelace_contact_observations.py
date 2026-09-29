@@ -14,12 +14,23 @@ import warp as wp
 
 from isaaclab_tasks.contrib.shoelace.mdp.observations import gripper_close_error, tail_tcp_relative_speed
 from isaaclab_tasks.contrib.shoelace.shoelace_constants import CONTACT_DISTANCE_CAP, CONTACT_OBSERVATION_HISTORY_LENGTH
-from isaaclab_tasks.contrib.shoelace.shoelace_contacts import _aggregate_finger_tail_signed_distance
+from isaaclab_tasks.contrib.shoelace.shoelace_contacts import FingerTailContacts, _aggregate_finger_tail_signed_distance
 from isaaclab_tasks.contrib.shoelace.shoelace_env_cfg import ObservationsCfg
 
 
 def _proxy(tensor: torch.Tensor) -> SimpleNamespace:
     return SimpleNamespace(torch=tensor)
+
+
+@pytest.mark.parametrize("env_ids", [None, slice(None), slice(1, 4, 2), slice(0, 0), [3, 1], torch.tensor([3, 1])])
+def test_contact_reset_accepts_slices(env_ids) -> None:
+    """Reset only selected cached distances, including empty and strided slices."""
+    contacts = FingerTailContacts.__new__(FingerTailContacts)
+    contacts.signed_distance = torch.full((4, 4), -CONTACT_DISTANCE_CAP)
+    expected = contacts.signed_distance.clone()
+    expected[slice(None) if env_ids is None else env_ids] = CONTACT_DISTANCE_CAP
+    contacts.reset(env_ids)
+    torch.testing.assert_close(contacts.signed_distance, expected)
 
 
 def test_signed_distance_aggregates_only_matching_finger_tail_pairs() -> None:

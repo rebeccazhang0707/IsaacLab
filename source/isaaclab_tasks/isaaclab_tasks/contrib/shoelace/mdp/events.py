@@ -176,7 +176,7 @@ def install_settled_default_state(env: ManagerBasedEnv, env_ids: torch.Tensor | 
 
 def reset_arm_joints(
     env: ManagerBasedEnv,
-    env_ids: torch.Tensor,
+    env_ids: torch.Tensor | slice,
     position_range: tuple[float, float],
     asset_cfg: SceneEntityCfg,
 ) -> None:
@@ -196,7 +196,7 @@ def reset_arm_joints(
 
 def reset_shoe_position(
     env: ManagerBasedEnv,
-    env_ids: torch.Tensor,
+    env_ids: torch.Tensor | slice,
     position_range: dict[str, tuple[float, float]],
 ) -> None:
     """Translate the shoe and both laces together about their default positions.
@@ -213,8 +213,8 @@ def reset_shoe_position(
     """
     shoe: RigidObject = env.scene["shoe"]
     bounds = torch.tensor([position_range.get(axis, (0.0, 0.0)) for axis in "xyz"], device=env.device)
-    offset = sample_uniform(bounds[:, 0], bounds[:, 1], (len(env_ids), 3), env.device)
     root_pose = shoe.data.default_root_pose.torch[env_ids].clone()
+    offset = sample_uniform(bounds[:, 0], bounds[:, 1], (root_pose.shape[0], 3), env.device)
     root_pose[:, :3] += env.scene.env_origins[env_ids] + offset
     shoe.write_root_pose_to_sim_index(root_pose=root_pose, env_ids=env_ids)
 

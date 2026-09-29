@@ -123,10 +123,10 @@ class FingerTailContacts:
         NewtonManager.unregister_post_step_callback(self.update)
         NewtonManager.register_post_step_callback(self.update)
 
-    def reset(self, env_ids: Sequence[int] | torch.Tensor | None = None) -> None:
-        """Invalidate cached distances [m] for selected environments."""
+    def reset(self, env_ids: Sequence[int] | torch.Tensor | slice | None = None) -> None:
+        """Invalidate cached distances [m] for selected environments, or all when ``None``."""
         if self.signed_distance is not None:
-            if env_ids is not None and not isinstance(env_ids, torch.Tensor):
+            if env_ids is not None and not isinstance(env_ids, (torch.Tensor, slice)):
                 env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.signed_distance.device)
             self.signed_distance[slice(None) if env_ids is None else env_ids] = physics.CONTACT_DISTANCE_CAP
 
@@ -166,7 +166,9 @@ class FingerTailContactSensor(SensorBase):
         """Signed distances [m], shape [num_envs, 4], refreshed inside the physics CUDA graph."""
         return self._contacts.signed_distance
 
-    def reset(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
+    def reset(
+        self, env_ids: Sequence[int] | torch.Tensor | slice | None = None, env_mask: wp.array | None = None
+    ) -> None:
         """Clear cached distances for the reset environments."""
         super().reset(env_ids, env_mask)
         if env_mask is not None:
