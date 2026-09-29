@@ -12,9 +12,10 @@ import os
 from pathlib import Path
 
 import newton
+import numpy as np
 from isaaclab_newton.sim.schemas import NewtonCollisionCfg
 
-from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
+from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade, Vt
 
 import isaaclab.sim as sim_utils
 from isaaclab.sim.spawners.materials import spawn_physics_material
@@ -43,15 +44,15 @@ def generate_asset(output: Path) -> None:
         physics.tongue_upper_asset_cfg(),
     ]
     materials = UsdGeom.Scope.Define(stage, f"{root}/Materials").GetPrim()
-    materials.GetReferences().AddReference(str(constants.MODEL_ASSET), "/mat")
+    materials.GetReferences().AddReference(str(physics.MODEL_ASSET), "/mat")
     for asset in assets:
         path = asset.prim_path.replace("{ENV_REGEX_NS}", root)
         asset.spawn.func(path, asset.spawn, translation=asset.init_state.pos, orientation=asset.init_state.rot)
     pinned = physics.pinned_shoelace_spawner(centerline, radius)
     pinned.func(f"{root}/Shoe/ShoelacePinned", pinned)
     for side, section in (
-        ("Left", slice(None, constants.PINNED_FIRST + 2)),
-        ("Right", slice(constants.PINNED_LAST, None)),
+        ("Left", slice(None, physics.PINNED_FIRST + 2)),
+        ("Right", slice(physics.PINNED_LAST, None)),
     ):
         spawn = physics.cable_spawn_cfg(
             centerline[section], cable_radius=radius, reference_segment_length=reference_length
@@ -67,6 +68,7 @@ def generate_asset(output: Path) -> None:
             result[key].update(imported[key])
     builder.end_world()
     build = physics.configure_shoelace_builder(builder, centerline, radius)
+    _bake_runtime_data(stage, root, builder, build, reference_length)
     for side, bodies in zip(("Left", "Right"), build.body_chains, strict=True):
         prim = stage.GetPrimAtPath(f"{root}/Shoelace{side}/geometry/mesh")
         masses = [
@@ -140,6 +142,62 @@ def generate_asset(output: Path) -> None:
         output.write_text(output.read_text().rstrip() + "\n")
 
 
+def _bake_runtime_data(
+    stage: Usd.Stage,
+    root: str,
+    builder: newton.ModelBuilder,
+    build: physics.ShoelaceBuild,
+    reference_length: float,
+) -> None:
+    """Bake reference frames and settled state for the task's startup events.
+
+    Args:
+        stage: Prototype stage receiving the task-local attributes.
+        root: Prototype asset root path.
+        builder: Configured prototype builder containing full-centerline reference frames.
+        build: Ordered cable body chains and resampled mean segment length [m].
+        reference_length: Original curve's mean segment length [m].
+
+    Raises:
+        ValueError: If source poses or segment lengths are invalid, or a curve's
+            world transform is not identity. Positions [m] and xyzw orientations
+            are stored in curve-local coordinates, separately from rest geometry.
+    """
+    segment_length = build.mean_segment_length
+    if not np.isfinite([reference_length, segment_length]).all() or min(reference_length, segment_length) <= 0.0:
+        raise ValueError("Shoelace reference and resampled segment lengths must be finite and positive")
+    names = ("shoelace_left", "shoelace_right")
+    with np.load(physics.SETTLED_POSES_ASSET, allow_pickle=False) as state:
+        if set(state.files) != set(names):
+            raise ValueError(f"Expected settled shoelace arrays {names}, got {tuple(state.files)}")
+        for side, name, bodies in zip(("Left", "Right"), names, build.body_chains, strict=True):
+            prim = stage.GetPrimAtPath(f"{root}/Shoelace{side}/geometry/mesh")
+            transform = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            # The builder and source NPZ use prototype world coordinates. They are curve-local
+            # only because the generated curve and all its ancestors have identity transforms.
+            if not np.allclose(np.asarray(transform), np.eye(4), rtol=0.0, atol=1.0e-12):
+                raise ValueError(f"Runtime pose baking requires an identity curve transform at {prim.GetPath()}")
+            settled = np.asarray(state[name], dtype=np.float32)
+            if settled.shape != (len(bodies), 7) or not np.isfinite(settled).all():
+                raise ValueError(f"Invalid settled {name} poses: expected finite {(len(bodies), 7)}")
+            # configure_shoelace_builder computed transport frames on the full centerline
+            # before selecting each free cable; do not restart transport at the right cable.
+            reference = np.asarray([builder.body_q[body] for body in bodies], dtype=np.float32)[:, 3:]
+            for label, orientations in (("reference", reference), ("settled", settled[:, 3:])):
+                if orientations.shape != (len(bodies), 4) or not np.isfinite(orientations).all():
+                    raise ValueError(f"Invalid {label} {name} orientations: expected finite {(len(bodies), 4)}")
+                if not np.allclose(np.linalg.norm(orientations, axis=1), 1.0, rtol=0.0, atol=2.0e-5):
+                    raise ValueError(f"{label.capitalize()} {name} orientations contain non-unit quaternions")
+            for attribute, value_type, value in (
+                ("referenceOrientations", Sdf.ValueTypeNames.Float4Array, Vt.Vec4fArray.FromNumpy(reference)),
+                ("referenceSegmentLength", Sdf.ValueTypeNames.Double, reference_length),
+                ("segmentLength", Sdf.ValueTypeNames.Double, segment_length),
+                ("settledPositions", Sdf.ValueTypeNames.Point3fArray, Vt.Vec3fArray.FromNumpy(settled[:, :3])),
+                ("settledOrientations", Sdf.ValueTypeNames.Float4Array, Vt.Vec4fArray.FromNumpy(settled[:, 3:])),
+            ):
+                prim.CreateAttribute(f"shoelace:{attribute}", value_type, custom=True).Set(value)
+
+
 def _contact_material(prim: Usd.Prim, friction: float) -> None:
     spawn_physics_material(
         str(prim.GetPath()), assets.rigid_material(friction, constants.CONTACT_KD), stage=prim.GetStage()
@@ -148,5 +206,5 @@ def _contact_material(prim: Usd.Prim, friction: float) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=constants.ASSET_DIR / "shoelace.usda")
+    parser.add_argument("--output", type=Path, default=constants.SHOELACE_ASSET)
     generate_asset(parser.parse_args().output)

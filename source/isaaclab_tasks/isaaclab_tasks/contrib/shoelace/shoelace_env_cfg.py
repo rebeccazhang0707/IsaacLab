@@ -152,7 +152,7 @@ class ShoelaceSceneCfg(InteractiveSceneCfg):
     )
     shoelace_asset = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/ShoelaceScene",
-        spawn=ShoelaceUsdCfg(usd_path=str(physics.ASSET_DIR / "shoelace.usda")),
+        spawn=ShoelaceUsdCfg(usd_path=str(physics.SHOELACE_ASSET)),
     )
     shoe = RigidObjectCfg(prim_path="{ENV_REGEX_NS}/ShoelaceScene/Shoe", spawn=None)
     shoelace_left = CableObjectCfg(prim_path="{ENV_REGEX_NS}/ShoelaceScene/ShoelaceLeft", spawn=None)

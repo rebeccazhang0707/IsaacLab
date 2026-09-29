@@ -3,27 +3,18 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Asset paths and physical defaults shared by authoring and the RL configuration."""
+"""Runtime asset paths and physical defaults shared with offline authoring."""
 
-import math
 from pathlib import Path
 
 ASSET_DIR = Path(__file__).resolve().parent / "data"
-CURVE_ASSET = ASSET_DIR / "curve.usd"
-MODEL_ASSET = ASSET_DIR / "model.usd"
-COLLIDER_ASSET = ASSET_DIR / "collider_simplified.usd"
+
+# Runtime asset; texture paths are resolved relative to this USD.
+SHOELACE_ASSET = ASSET_DIR / "shoelace.usda"
 
 TCP_OFFSET = (0.0, 0.0, 0.1034)
 
-# Shared Franka-validated cable topology.
-AUTHORED_SEGMENT_COUNT = 450
-SHOELACE_SEGMENT_COUNT = 360
-PINNED_FIRST = 78
-PINNED_LAST = 281
-PINNED_TUBE_SIDES = 6
-
 # Shared Franka-validated cable material and contact defaults.
-CABLE_DENSITY = 1150.0
 CABLE_INERTIA_REGULARIZATION = 1.0e-6  # Additive isotropic proxy inertia [kg*m^2].
 STRETCH_STIFFNESS = 1.0e7
 STRETCH_DAMPING = 2.0e2
@@ -42,14 +33,6 @@ VBD_CONTACT_BUFFER = 256
 CONTACTS_PER_ENV = 512
 TRIANGLE_PAIRS_PER_ENV = 8192
 MIN_TRIANGLE_PAIRS = 1_000_000
-
-# Shared shoe geometry and display defaults.
-TONGUE_UPPER_CENTER = (-0.008, 0.02, 0.10)
-TONGUE_UPPER_SIZE = (0.05, 0.055, 0.006)
-TONGUE_UPPER_PITCH = math.radians(28.0)
-TONGUE_UPPER_Y_ROTATION = math.radians(5.0)
-CABLE_COLOR = (112.0 / 255.0, 65.0 / 255.0, 39.0 / 255.0)
-
 
 TAIL_BEND_STIFFNESS = 100.0
 TAIL_BEND_DAMPING = 2.0

@@ -66,8 +66,33 @@ To regenerate the asset after changing offline geometry or material calculations
 PXR_WORK_THREAD_LIMIT=1 uv run python -m isaaclab_tasks.contrib.shoelace.generate_asset
 ```
 
-`data/shoelace.usda` uses native segment masses, material/contact attributes, and element
-collision filters. The generator writes no custom `isaaclab:cable:*` overrides or
+`data/shoelace.usda` is the unified runtime shoe/cable asset. The source curve and
+`settled_tail_clear_segment_poses.npz` are offline generation inputs only; runtime startup events
+read their baked data from the asset rather than loading either source file. Textures remain
+external files referenced by relative paths and must be shipped alongside the USD.
+
+Offline source paths, resampling topology, shoe-tongue geometry, cable density, and cable color
+are defined in `asset_authoring.py`. Runtime `shoelace_constants.py` retains the composite asset
+path and physical defaults used by the RL task. Startup events do not import either authoring
+module; tail material weights are computed locally in `mdp/events.py`. Shared material helpers
+and runtime contact-chain lookup remain in the runtime modules and can also be reused offline.
+
+Each `/Shoelace/Shoelace{Left,Right}/geometry/mesh` retains its native `BasisCurves` geometry,
+segment masses, material/contact attributes, and element collision filters. It also stores these
+five task-only startup attributes:
+
+- `shoelace:referenceOrientations` (`Float4Array`): one xyzw quaternion per segment, computed by
+  parallel transport along the complete 360-segment centerline before selecting each free cable.
+- `shoelace:referenceSegmentLength` (`Double`): mean length [m] of the original 450 source segments.
+- `shoelace:segmentLength` (`Double`): mean length [m] of the complete resampled 360-segment centerline.
+- `shoelace:settledPositions` (`Point3fArray`): settled segment positions [m].
+- `shoelace:settledOrientations` (`Float4Array`): settled segment xyzw quaternions.
+
+All baked poses are local to the corresponding curve prim, not training-world coordinates.
+The generator verifies identity prototype curve transforms, array shapes, finite values, and unit
+quaternions before writing the attributes; a nonidentity transform requires explicit coordinate
+conversion instead of silently baking world-space poses. Startup events transform the local poses
+into each environment's world frame. The generator writes no custom `isaaclab:cable:*` overrides or
 `isaaclab:physics:fixed`. No Dahl parameters are configured; the coupled VBD solver leaves
 Dahl friction disabled.
 

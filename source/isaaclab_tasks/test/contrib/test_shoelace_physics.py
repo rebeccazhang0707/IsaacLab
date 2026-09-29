@@ -21,6 +21,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.app import launch_simulation
 from isaaclab.envs import ManagerBasedRLEnv
 
+from isaaclab_tasks.contrib.shoelace import asset_authoring
 from isaaclab_tasks.contrib.shoelace import shoelace_constants as constants
 from isaaclab_tasks.contrib.shoelace.asset_authoring import load_shoelace
 from isaaclab_tasks.contrib.shoelace.mdp.events import configure_shoelace_physics
@@ -76,6 +77,18 @@ def test_baked_asset_defers_task_physics_to_events() -> None:
         curve_path = f"/World/ShoelaceScene/Shoelace{side}/geometry/mesh"
         curve = stage.GetPrimAtPath(curve_path)
         bodies, _ = native_result["path_cable_map"][curve_path]
+        centerline, _, reference_length = load_shoelace()
+        frames = np.asarray(newton.utils.create_parallel_transport_cable_quaternions(centerline))
+        frames = frames[: len(bodies)] if side == "Left" else frames[-len(bodies) :]
+        np.testing.assert_allclose(curve.GetAttribute("shoelace:referenceOrientations").Get(), frames, atol=1.0e-7)
+        assert curve.GetAttribute("shoelace:referenceSegmentLength").Get() == reference_length
+        assert curve.GetAttribute("shoelace:segmentLength").Get() == pytest.approx(
+            np.linalg.norm(np.diff(centerline, axis=0), axis=1).mean(), rel=1.0e-12
+        )
+        with np.load(asset_authoring.SETTLED_POSES_ASSET) as state:
+            settled = state[f"shoelace_{side.lower()}"]
+            np.testing.assert_array_equal(curve.GetAttribute("shoelace:settledPositions").Get(), settled[:, :3])
+            np.testing.assert_array_equal(curve.GetAttribute("shoelace:settledOrientations").Get(), settled[:, 3:])
         geometric = np.asarray(native.body_inertia, dtype=np.float32).reshape(-1, 3, 3)[bodies]
         for name in (
             "fixedSegments",
@@ -105,17 +118,26 @@ def test_baked_asset_defers_task_physics_to_events() -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="The coupled MJWarp/VBD rollout requires CUDA")
 @pytest.mark.parametrize("regularization", [0.0, 3.0e-7, constants.CABLE_INERTIA_REGULARIZATION])
 @torch.inference_mode()
-def test_randomized_resets_preserve_shoe_lace_alignment_and_other_environments(regularization: float) -> None:
+def test_randomized_resets_preserve_shoe_lace_alignment_and_other_environments(
+    regularization: float, monkeypatch, tmp_path
+) -> None:
     """Resample selected starts without drift, stale targets, or displaced cable anchors."""
     cfg = ShoelaceEnvCfg()
     cfg.scene.num_envs = 4
     cfg.cable_inertia_regularization = regularization
     cfg.sim.device = "cuda:0"
     with launch_simulation(cfg, {"visualizer": None, "visualizer_explicit": True}):
-        env = gym.make("IsaacContrib-Shoelace-DualFranka", cfg=cfg).unwrapped
+        # Startup must use the baked USD, not reopen the offline curve or settled-pose file.
+        with monkeypatch.context() as patch:
+            patch.setattr(asset_authoring, "CURVE_ASSET", tmp_path / "missing-curve.usd")
+            patch.setattr(asset_authoring, "MODEL_ASSET", tmp_path / "missing-model.usd")
+            patch.setattr(asset_authoring, "COLLIDER_ASSET", tmp_path / "missing-collider.usd")
+            patch.setattr(asset_authoring, "SETTLED_POSES_ASSET", tmp_path / "missing-settled.npz")
+            patch.setattr(constants, "ASSET_DIR", tmp_path)
+            env = gym.make("IsaacContrib-Shoelace-DualFranka", cfg=cfg).unwrapped
         assert type(env) is ManagerBasedRLEnv
         try:
-            with np.load(constants.ASSET_DIR / "settled_tail_clear_segment_poses.npz") as state:
+            with np.load(asset_authoring.SETTLED_POSES_ASSET) as state:
                 for name in state.files:
                     defaults = env.scene[name].data.default_segment_pose_w.torch
                     expected = defaults.new_tensor(state[name]).unsqueeze(0).expand_as(defaults).clone()
@@ -136,7 +158,7 @@ def test_randomized_resets_preserve_shoe_lace_alignment_and_other_environments(r
             assert cable_solver.rigid_compliant_alm is True
             # Compare startup inertia to an independent native USD import before finalize's correction.
             native = newton.ModelBuilder()
-            imported = native.add_usd(str(constants.ASSET_DIR / "shoelace.usda"), return_deformable_results=True)
+            imported = native.add_usd(str(constants.SHOELACE_ASSET), return_deformable_results=True)
             native_inertia = np.asarray(native.body_inertia).reshape(-1, 3, 3)
             centerline, _, reference_length = load_shoelace()
             mean_length = np.linalg.norm(np.diff(centerline, axis=0), axis=1).mean()

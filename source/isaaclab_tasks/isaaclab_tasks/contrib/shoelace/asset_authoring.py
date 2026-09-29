@@ -28,6 +28,27 @@ from .shoelace_contacts import _find_chains
 if TYPE_CHECKING:
     from newton import ModelBuilder
 
+# Offline authoring inputs, not loaded by the RL environment.
+CURVE_ASSET = constants.ASSET_DIR / "curve.usd"
+MODEL_ASSET = constants.ASSET_DIR / "model.usd"
+COLLIDER_ASSET = constants.ASSET_DIR / "collider_simplified.usd"
+SETTLED_POSES_ASSET = constants.ASSET_DIR / "settled_tail_clear_segment_poses.npz"
+
+# Franka-validated cable topology and density.
+AUTHORED_SEGMENT_COUNT = 450
+SHOELACE_SEGMENT_COUNT = 360
+PINNED_FIRST = 78
+PINNED_LAST = 281
+PINNED_TUBE_SIDES = 6
+CABLE_DENSITY = 1150.0
+
+# Shoe geometry and display defaults.
+TONGUE_UPPER_CENTER = (-0.008, 0.02, 0.10)
+TONGUE_UPPER_SIZE = (0.05, 0.055, 0.006)
+TONGUE_UPPER_PITCH = math.radians(28.0)
+TONGUE_UPPER_Y_ROTATION = math.radians(5.0)
+CABLE_COLOR = (112.0 / 255.0, 65.0 / 255.0, 39.0 / 255.0)
+
 
 @dataclass
 class ShoelaceBuild:
@@ -79,11 +100,11 @@ def load_shoelace() -> tuple[np.ndarray, float, float]:
     Returns:
         Resampled centerline [m], cable radius [m], and authored mean segment length [m].
     """
-    authored_centerline, cable_radius = load_usd_curve(constants.CURVE_ASSET, "/World/Curve")
+    authored_centerline, cable_radius = load_usd_curve(CURVE_ASSET, "/World/Curve")
     authored_lengths = np.linalg.norm(np.diff(authored_centerline, axis=0), axis=1)
-    if len(authored_lengths) != constants.AUTHORED_SEGMENT_COUNT:
-        raise ValueError(f"Expected {constants.AUTHORED_SEGMENT_COUNT} authored segments, got {len(authored_lengths)}")
-    centerline = resample_centerline(authored_centerline, constants.SHOELACE_SEGMENT_COUNT)
+    if len(authored_lengths) != AUTHORED_SEGMENT_COUNT:
+        raise ValueError(f"Expected {AUTHORED_SEGMENT_COUNT} authored segments, got {len(authored_lengths)}")
+    centerline = resample_centerline(authored_centerline, SHOELACE_SEGMENT_COUNT)
     return centerline, cable_radius, float(authored_lengths.mean())
 
 
@@ -95,7 +116,7 @@ def parallel_transport_normals(centerline: np.ndarray) -> list[tuple[float, floa
     return [(float(normal[0]), float(normal[1]), float(normal[2])) for normal in normals]
 
 
-def tube_mesh(centerline: np.ndarray, radius: float, sides: int = constants.PINNED_TUBE_SIDES) -> newton.Mesh:
+def tube_mesh(centerline: np.ndarray, radius: float, sides: int = PINNED_TUBE_SIDES) -> newton.Mesh:
     """Build an open triangulated tube around a fixed centerline [m]."""
     tangents = np.gradient(centerline, axis=0)
     tangents /= np.linalg.norm(tangents, axis=1, keepdims=True)
@@ -120,7 +141,7 @@ def tube_mesh(centerline: np.ndarray, radius: float, sides: int = constants.PINN
 
 def pinned_shoelace_spawner(centerline: np.ndarray, cable_radius: float) -> sim_utils.SpawnerCfg:
     """Build a cloned spawner for the fixed eyelet-held shoelace span."""
-    pinned_centerline = centerline[constants.PINNED_FIRST + 1 : constants.PINNED_LAST + 1]
+    pinned_centerline = centerline[PINNED_FIRST + 1 : PINNED_LAST + 1]
 
     @sim_utils.clone
     def spawn_pinned(
@@ -140,7 +161,7 @@ def pinned_shoelace_spawner(centerline: np.ndarray, cable_radius: float) -> sim_
         mesh.CreateNormalsAttr([Gf.Vec3f(*map(float, normal)) for normal in tube.normals])
         mesh.SetNormalsInterpolation(UsdGeom.Tokens.vertex)
         mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
-        mesh.CreateDisplayColorAttr([Gf.Vec3f(*constants.CABLE_COLOR)])
+        mesh.CreateDisplayColorAttr([Gf.Vec3f(*CABLE_COLOR)])
         collision_cfg = sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)
         if not sim_utils.apply_collision_properties(str(mesh.GetPath()), [collision_cfg], create_if_missing=True):
             raise RuntimeError(f"Failed to enable pinned collision mesh at {mesh.GetPath()}")
@@ -171,7 +192,7 @@ def shoe_asset_cfg(visible: bool = True) -> RigidObjectCfg:
     return RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Shoe",
         spawn=sim_utils.UsdFileCfg(
-            usd_path=str(constants.COLLIDER_ASSET),
+            usd_path=str(COLLIDER_ASSET),
             visible=visible,
             rigid_props=sim_utils.UsdPhysicsRigidBodyCfg(kinematic_enabled=True),
         ),
@@ -191,7 +212,7 @@ def shoe_visual_asset_cfg(material_path: str) -> AssetBaseCfg:
     return AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Shoe/Visual",
         spawn=sim_utils.UsdFileCfg(
-            usd_path=str(constants.MODEL_ASSET),
+            usd_path=str(MODEL_ASSET),
             visual_material_bindings={"Model": material_path},
         ),
     )
@@ -202,18 +223,18 @@ def tongue_upper_asset_cfg() -> AssetBaseCfg:
     return AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Shoe/TongueUpper",
         spawn=sim_utils.CuboidCfg(
-            size=constants.TONGUE_UPPER_SIZE,
+            size=TONGUE_UPPER_SIZE,
             visible=False,
             collision_props=sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True),
             physics_material=rigid_material(constants.SHOE_MU, constants.CONTACT_KD),
         ),
         init_state=AssetBaseCfg.InitialStateCfg(
-            pos=constants.TONGUE_UPPER_CENTER,
+            pos=TONGUE_UPPER_CENTER,
             rot=(
-                math.cos(0.5 * constants.TONGUE_UPPER_Y_ROTATION) * math.sin(0.5 * constants.TONGUE_UPPER_PITCH),
-                math.sin(0.5 * constants.TONGUE_UPPER_Y_ROTATION) * math.cos(0.5 * constants.TONGUE_UPPER_PITCH),
-                -math.sin(0.5 * constants.TONGUE_UPPER_Y_ROTATION) * math.sin(0.5 * constants.TONGUE_UPPER_PITCH),
-                math.cos(0.5 * constants.TONGUE_UPPER_Y_ROTATION) * math.cos(0.5 * constants.TONGUE_UPPER_PITCH),
+                math.cos(0.5 * TONGUE_UPPER_Y_ROTATION) * math.sin(0.5 * TONGUE_UPPER_PITCH),
+                math.sin(0.5 * TONGUE_UPPER_Y_ROTATION) * math.cos(0.5 * TONGUE_UPPER_PITCH),
+                -math.sin(0.5 * TONGUE_UPPER_Y_ROTATION) * math.sin(0.5 * TONGUE_UPPER_PITCH),
+                math.cos(0.5 * TONGUE_UPPER_Y_ROTATION) * math.cos(0.5 * TONGUE_UPPER_PITCH),
             ),
         ),
     )
@@ -223,10 +244,10 @@ def cable_spawn_cfg(centerline: np.ndarray, cable_radius: float, reference_segme
     """Build the prototype cable from its centerline, radius, and reference segment length [m]."""
     return sim_utils.CableCfg(
         positions=[tuple(point) for point in centerline],
-        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=constants.CABLE_COLOR, roughness=0.8),
+        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=CABLE_COLOR, roughness=0.8),
         physics_material=sim_utils.CableMaterialCfg(
             thickness=2.0 * cable_radius,
-            density=constants.CABLE_DENSITY,
+            density=CABLE_DENSITY,
             stretch_stiffness=constants.STRETCH_STIFFNESS * reference_segment_length / (math.pi * cable_radius**2),
             bend_stiffness=constants.BEND_STIFFNESS * reference_segment_length / (0.25 * math.pi * cable_radius**4),
         ),
@@ -245,11 +266,11 @@ def configure_shoelace_builder(builder: ModelBuilder, centerline: np.ndarray, ca
     Returns:
         Ordered cable body/joint indices and the mean segment length.
     """
-    if len(centerline) - 1 != constants.SHOELACE_SEGMENT_COUNT:
-        raise ValueError(f"Expected {constants.SHOELACE_SEGMENT_COUNT} cable segments, got {len(centerline) - 1}")
+    if len(centerline) - 1 != SHOELACE_SEGMENT_COUNT:
+        raise ValueError(f"Expected {SHOELACE_SEGMENT_COUNT} cable segments, got {len(centerline) - 1}")
     body_chains = _find_chains(builder.body_label, builder.body_world, 1, "edge_body")[0]
     joint_chains = _find_chains(builder.joint_label, builder.joint_world, 1, "cable")[0]
-    expected_counts = (constants.PINNED_FIRST + 1, len(centerline) - 1 - constants.PINNED_LAST)
+    expected_counts = (PINNED_FIRST + 1, len(centerline) - 1 - PINNED_LAST)
     observed = tuple((len(bodies), len(joints)) for bodies, joints in zip(body_chains, joint_chains, strict=True))
     expected = tuple((count, count - 1) for count in expected_counts)
     if observed != expected:
@@ -265,7 +286,7 @@ def configure_shoelace_builder(builder: ModelBuilder, centerline: np.ndarray, ca
     _make_body_static(builder, _label_index(body_by_label, root))
 
     quaternions = newton.utils.create_parallel_transport_cable_quaternions([wp.vec3(*point) for point in centerline])
-    segment_ranges = (range(0, constants.PINNED_FIRST + 1), range(constants.PINNED_LAST, len(centerline) - 1))
+    segment_ranges = (range(0, PINNED_FIRST + 1), range(PINNED_LAST, len(centerline) - 1))
     neighbor_window = _neighbor_filter_window(centerline, cable_radius)
     chain_shapes = []
     for bodies, segment_indices in zip(body_chains, segment_ranges, strict=True):
@@ -331,23 +352,3 @@ def _correct_capsule_mass(builder: ModelBuilder, body: int, shape: int) -> None:
     builder.body_inertia[body] *= mass_scale
     builder.body_inv_mass[body] = 1.0 / builder.body_mass[body]
     builder.body_inv_inertia[body] = wp.inverse(builder.body_inertia[body])
-
-
-def _tail_joint_blend_weights(
-    joint_count: int,
-    segment_length: float,
-    free_end_at_start: bool,
-) -> np.ndarray:
-    """Return smooth weights for the gravity-resistant distal tail material."""
-    distances = segment_length * np.arange(1, joint_count + 1, dtype=np.float64)
-    if constants.TAIL_STIFF_TRANSITION_LENGTH > 0.0:
-        weights = np.clip(
-            (constants.TAIL_STIFF_CORE_LENGTH + constants.TAIL_STIFF_TRANSITION_LENGTH - distances)
-            / constants.TAIL_STIFF_TRANSITION_LENGTH,
-            0.0,
-            1.0,
-        )
-        weights = weights * weights * (3.0 - 2.0 * weights)
-    else:
-        weights = (distances <= constants.TAIL_STIFF_CORE_LENGTH).astype(np.float64)
-    return weights if free_end_at_start else weights[::-1].copy()

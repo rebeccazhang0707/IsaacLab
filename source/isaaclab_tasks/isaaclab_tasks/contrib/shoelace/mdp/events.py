@@ -16,9 +16,8 @@ import warp as wp
 from isaaclab_newton.physics import NewtonManager
 from newton import GeoType, ModelFlags
 from newton.geometry import compute_inertia_shape
-from newton.utils import create_parallel_transport_cable_quaternions
 
-from pxr import Usd, UsdGeom
+from pxr import Gf, Usd, UsdGeom
 
 from isaaclab.assets import Articulation, CableObject, RigidObject
 from isaaclab.envs.mdp.events import reset_joints_by_offset
@@ -26,7 +25,6 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import quat_mul, sample_uniform
 
 from .. import shoelace_constants as physics
-from ..asset_authoring import _tail_joint_blend_weights, load_shoelace
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
@@ -45,14 +43,6 @@ def configure_shoelace_physics(env: ManagerBasedEnv, env_ids: torch.Tensor | Non
     regularization = env.cfg.cable_inertia_regularization
     if not math.isfinite(regularization) or regularization < 0.0:
         raise ValueError("Cable inertia regularization must be finite and nonnegative")
-    centerline, _, reference_length = load_shoelace()
-    segment_length = float(np.linalg.norm(np.diff(centerline, axis=0), axis=1).mean())
-    stiffness_scale = reference_length / segment_length
-    orientations = torch.as_tensor(
-        np.asarray(create_parallel_transport_cable_quaternions([wp.vec3(*point) for point in centerline])),
-        dtype=torch.float32,
-        device=env.device,
-    )
     model = NewtonManager.get_model()
     mass = wp.to_torch(model.body_mass)
     inverse_mass = wp.to_torch(model.body_inv_mass)
@@ -80,16 +70,21 @@ def configure_shoelace_physics(env: ManagerBasedEnv, env_ids: torch.Tensor | Non
         # VBD also uses model.body_q to derive rest invariants. Preserve the original
         # parallel-transport frames there, not just in the subsequently settled state.
         side = "Left" if free_end_at_start else "Right"
-        # Physics-only replication keeps just the source USD prim; environments differ by translation.
-        path = env.scene.env_prim_paths[0]
-        curve = env.sim.stage.GetPrimAtPath(f"{path}/ShoelaceScene/Shoelace{side}/geometry/mesh")
-        transform = UsdGeom.Xformable(curve).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        curve = _source_curve(env, side)
+        reference_length = float(_startup_array(curve, "referenceSegmentLength", ()))
+        segment_length = float(_startup_array(curve, "segmentLength", ()))
+        if reference_length <= 0.0 or segment_length <= 0.0:
+            raise ValueError(f"{curve.GetPath()}: segment lengths must be positive")
+        stiffness_scale = reference_length / segment_length
+        transform = _source_transform(curve)
         rotation = transform.ExtractRotationQuat()
         world_rotation = torch.tensor(
             (*rotation.GetImaginary(), rotation.GetReal()), dtype=torch.float32, device=env.device
         ).expand(env.num_envs, -1)
-        local_rotation = (
-            orientations[: cable.num_segments] if free_end_at_start else orientations[-cable.num_segments :]
+        local_rotation = torch.as_tensor(
+            _startup_array(curve, "referenceOrientations", (cable.num_segments, 4), quaternion=True),
+            dtype=torch.float32,
+            device=env.device,
         )
         poses = wp.to_torch(model.body_q)[bodies].clone()
         poses[..., 3:] = quat_mul(
@@ -150,24 +145,33 @@ def install_settled_default_state(env: ManagerBasedEnv, env_ids: torch.Tensor | 
         env: Environment containing both shoelace cables.
         env_ids: Unused; startup installs defaults for every environment.
     """
-    names = ("shoelace_left", "shoelace_right")
-    with np.load(physics.ASSET_DIR / "settled_tail_clear_segment_poses.npz", allow_pickle=False) as state:
-        if tuple(state.files) != names:
-            raise ValueError(f"Expected settled shoelace arrays {names}, got {tuple(state.files)}")
-        for name in names:
-            cable: CableObject = env.scene[name]
-            default_pose = cable.data.default_segment_pose_w.torch
-            local_pose = np.asarray(state[name], dtype=np.float32)
-            if local_pose.shape != default_pose.shape[1:] or not np.isfinite(local_pose).all():
-                raise ValueError(f"Invalid settled {name} poses: expected finite {tuple(default_pose.shape[1:])}")
-            if not np.allclose(np.linalg.norm(local_pose[:, 3:], axis=1), 1.0, atol=2.0e-5):
-                raise ValueError(f"Settled {name} poses contain non-unit quaternions")
-            default_pose.copy_(default_pose.new_tensor(local_pose))
-            default_pose[..., :3] += env.scene.env_origins.unsqueeze(1)
-            velocity = cable.data.default_segment_velocity_w.torch
-            velocity.zero_()
-            cable.write_segment_pose_to_sim_index(segment_pose=default_pose)
-            cable.write_segment_velocity_to_sim_index(segment_velocity=velocity)
+    for name, side in (("shoelace_left", "Left"), ("shoelace_right", "Right")):
+        cable: CableObject = env.scene[name]
+        curve = _source_curve(env, side)
+        positions = _startup_array(curve, "settledPositions", (cable.num_segments, 3))
+        orientations = _startup_array(curve, "settledOrientations", (cable.num_segments, 4), quaternion=True)
+        transform = _source_transform(curve)
+        matrix = np.asarray(transform)
+        positions = positions @ matrix[:3, :3] + matrix[3, :3]
+        rotation = transform.ExtractRotationQuat()
+        default_pose = cable.data.default_segment_pose_w.torch
+        # Remove the source environment origin before broadcasting to replicated environments.
+        positions -= env.scene.env_origins[0].cpu().numpy()
+        default_pose[..., :3] = default_pose.new_tensor(positions)
+        default_pose[..., :3] += env.scene.env_origins.unsqueeze(1)
+        local_rotation = default_pose.new_tensor(orientations)
+        world_rotation = (*rotation.GetImaginary(), rotation.GetReal())
+        # Preserve the baked float32 state exactly when no rotation needs composing.
+        if world_rotation == (0.0, 0.0, 0.0, 1.0):
+            default_pose[..., 3:] = local_rotation
+        else:
+            default_pose[..., 3:] = quat_mul(
+                default_pose.new_tensor(world_rotation).expand(cable.num_segments, -1), local_rotation
+            )
+        velocity = cable.data.default_segment_velocity_w.torch
+        velocity.zero_()
+        cable.write_segment_pose_to_sim_index(segment_pose=default_pose)
+        cable.write_segment_velocity_to_sim_index(segment_velocity=velocity)
 
 
 def reset_arm_joints(
@@ -219,3 +223,101 @@ def reset_shoe_position(
         segment_pose = cable.data.default_segment_pose_w.torch[env_ids].clone()
         segment_pose[..., :3] += offset.unsqueeze(1)
         cable.write_segment_pose_to_sim_index(segment_pose=segment_pose, env_ids=env_ids)
+
+
+def _tail_joint_blend_weights(
+    joint_count: int,
+    segment_length: float,
+    free_end_at_start: bool,
+) -> np.ndarray:
+    """Return smooth weights for the distal tail's runtime material profile.
+
+    Args:
+        joint_count: Number of joints in the cable.
+        segment_length: Mean resampled segment length [m].
+        free_end_at_start: Whether the free end precedes the fixed end in joint order.
+
+    Returns:
+        Dimensionless weights in joint order, shape [joint_count].
+    """
+    distances = segment_length * np.arange(1, joint_count + 1, dtype=np.float64)
+    if physics.TAIL_STIFF_TRANSITION_LENGTH > 0.0:
+        weights = np.clip(
+            (physics.TAIL_STIFF_CORE_LENGTH + physics.TAIL_STIFF_TRANSITION_LENGTH - distances)
+            / physics.TAIL_STIFF_TRANSITION_LENGTH,
+            0.0,
+            1.0,
+        )
+        weights = weights * weights * (3.0 - 2.0 * weights)
+    else:
+        weights = (distances <= physics.TAIL_STIFF_CORE_LENGTH).astype(np.float64)
+    return weights if free_end_at_start else weights[::-1].copy()
+
+
+def _source_curve(env: ManagerBasedEnv, side: str) -> Usd.Prim:
+    """Return the source cable prim retained by physics-only environment replication.
+
+    Args:
+        env: Environment containing the composite shoelace asset.
+        side: Cable side, either ``"Left"`` or ``"Right"``.
+
+    Returns:
+        Cable geometry prim in the first environment.
+
+    Raises:
+        ValueError: If the source cable prim is missing.
+    """
+    path = f"{env.scene.env_prim_paths[0]}/ShoelaceScene/Shoelace{side}/geometry/mesh"
+    curve = env.sim.stage.GetPrimAtPath(path)
+    if not curve:
+        raise ValueError(f"Missing shoelace source curve: {path}")
+    return curve
+
+
+def _startup_array(curve: Usd.Prim, name: str, shape: tuple[int, ...], quaternion: bool = False) -> np.ndarray:
+    """Read and validate task-local startup data baked into a cable prim.
+
+    Args:
+        curve: Source cable geometry prim.
+        name: Attribute name without the ``shoelace:`` prefix.
+        shape: Expected array shape; ``()`` denotes a scalar.
+        quaternion: Whether to require unit-length xyzw quaternions.
+
+    Returns:
+        Float64 values with the requested shape. Positions and lengths are in [m];
+        orientations are dimensionless xyzw quaternions.
+
+    Raises:
+        ValueError: If the attribute is missing, has an unexpected shape, contains
+            nonfinite values, or fails the requested quaternion validation.
+    """
+    value = curve.GetAttribute(f"shoelace:{name}").Get()
+    if value is None:
+        raise ValueError(f"{curve.GetPath()}: missing shoelace:{name}; regenerate shoelace.usda")
+    values = np.asarray(value, dtype=np.float64)
+    if values.shape != shape or not np.isfinite(values).all():
+        raise ValueError(f"{curve.GetPath()}: shoelace:{name} must have finite shape {shape}")
+    if quaternion and not np.allclose(np.linalg.norm(values, axis=-1), 1.0, atol=2.0e-5):
+        raise ValueError(f"{curve.GetPath()}: shoelace:{name} must contain unit xyzw quaternions")
+    return values
+
+
+def _source_transform(curve: Usd.Prim) -> Gf.Matrix4d:
+    """Return a rigid curve-to-world transform without scale, shear, or reflection.
+
+    Args:
+        curve: Source cable geometry prim.
+
+    Returns:
+        Local-to-world transform at the default USD time. Translation is in [m]
+        for the generated meter-based asset.
+
+    Raises:
+        ValueError: If the transform contains scale, shear, or reflection that would
+            invalidate the baked startup data's rigid-transform assumption.
+    """
+    transform = UsdGeom.Xformable(curve).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+    linear = np.asarray(transform)[:3, :3]
+    if not np.allclose(linear @ linear.T, np.eye(3), atol=1.0e-6) or np.linalg.det(linear) < 0.0:
+        raise ValueError(f"{curve.GetPath()}: bake scale/shear before using shoelace startup data")
+    return transform
