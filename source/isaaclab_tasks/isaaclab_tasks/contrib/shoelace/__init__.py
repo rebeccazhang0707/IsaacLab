@@ -12,7 +12,7 @@ from . import agents
 
 gym.register(
     id="IsaacContrib-Shoelace-DualFranka",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.shoelace_physics:create_shoelace_env",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.shoelace_env_cfg:ShoelaceEnvCfg",

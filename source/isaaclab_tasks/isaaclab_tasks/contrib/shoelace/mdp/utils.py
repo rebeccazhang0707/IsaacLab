@@ -75,8 +75,8 @@ def untying_metrics(
 
     Returns:
         Free segment-center counts in the throat, shape [N] or [N, 2] when ``per_arm_throat_counts``;
-        tail-to-midpoint distances [m], shape [N, 2]
-        in robot-arm order; absolute tail X separation [m], shape [N]; and finite position/velocity
+        tail-to-midpoint distances [m], shape [N, 2] in robot-arm order;
+        absolute tail X separation [m], shape [N]; and finite position/velocity
         flags, shape [N]. Counts alone are not valid for nonfinite cable states. This is a regional
         geometric criterion, not a topological knot classifier.
     """

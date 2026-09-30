@@ -12,6 +12,7 @@ import newton
 import numpy as np
 import pytest
 import torch
+import warp as wp
 from isaaclab_newton.cloner.newton_clone_utils import build_source_builders
 from isaaclab_newton.physics import NewtonManager
 
@@ -24,8 +25,9 @@ from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab_tasks.contrib.shoelace import asset_authoring
 from isaaclab_tasks.contrib.shoelace import shoelace_constants as constants
 from isaaclab_tasks.contrib.shoelace.asset_authoring import load_shoelace
-from isaaclab_tasks.contrib.shoelace.mdp.events import configure_shoelace_physics, reset_shoe_position
+from isaaclab_tasks.contrib.shoelace.mdp.events import reset_shoe_position
 from isaaclab_tasks.contrib.shoelace.shoelace_env_cfg import ShoelaceEnvCfg
+from isaaclab_tasks.contrib.shoelace.shoelace_physics import create_shoelace_env
 
 
 @pytest.mark.parametrize("env_ids", [slice(None), slice(1, 4, 2), slice(0, 0), torch.tensor([3, 1])])
@@ -81,17 +83,22 @@ def test_runtime_contact_capacity_scales_and_preserves_overrides(num_envs: int, 
 
 
 @pytest.mark.parametrize("regularization", [-1.0e-6, float("nan"), float("inf")])
-def test_invalid_proxy_inertia_is_rejected(regularization: float) -> None:
-    """Reject negative and nonfinite regularization before editing body properties."""
+def test_invalid_proxy_inertia_is_rejected_before_environment_construction(
+    regularization: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject invalid builder regularization at the factory entry before initializing an environment."""
     cfg = ShoelaceEnvCfg()
     cfg.cable_inertia_regularization = regularization
-    cfg.validate()
+    monkeypatch.setattr(
+        "isaaclab_tasks.contrib.shoelace.shoelace_physics.ManagerBasedRLEnv",
+        lambda **kwargs: pytest.fail("Invalid regularization must not initialize an environment"),
+    )
     with pytest.raises(ValueError, match="finite and nonnegative"):
-        configure_shoelace_physics(SimpleNamespace(cfg=cfg), None)
+        create_shoelace_env(cfg=cfg)
 
 
-def test_baked_asset_defers_task_physics_to_events() -> None:
-    """Import native geometry/materials without custom model overrides or Dahl attributes."""
+def test_baked_asset_defers_task_physics_to_builder() -> None:
+    """Import native geometry/materials before task builder overrides, without Dahl attributes."""
     cfg = ShoelaceEnvCfg()
     cfg.lace_mu, cfg.shoe_mu = 0.25, 0.5
     cfg.validate()
@@ -158,7 +165,7 @@ def test_randomized_resets_preserve_shoe_lace_alignment_and_other_environments(
     cfg.cable_inertia_regularization = regularization
     cfg.sim.device = "cuda:0"
     with launch_simulation(cfg, {"visualizer": None, "visualizer_explicit": True}):
-        # Startup must use the baked USD, not reopen the offline curve or settled-pose file.
+        # Task construction must use the baked USD, not reopen the offline curve or settled-pose file.
         with monkeypatch.context() as patch:
             patch.setattr(asset_authoring, "CURVE_ASSET", tmp_path / "missing-curve.usd")
             patch.setattr(asset_authoring, "MODEL_ASSET", tmp_path / "missing-model.usd")
@@ -167,6 +174,8 @@ def test_randomized_resets_preserve_shoe_lace_alignment_and_other_environments(
             patch.setattr(constants, "ASSET_DIR", tmp_path)
             env = gym.make("IsaacContrib-Shoelace-DualFranka", cfg=cfg).unwrapped
         assert type(env) is ManagerBasedRLEnv
+        assert not any(change & newton.ModelFlags.SHAPE_PROPERTIES for change in NewtonManager._model_changes)
+        assert not NewtonManager._per_world_builder_hooks
         try:
             with np.load(asset_authoring.SETTLED_POSES_ASSET) as state:
                 for name in state.files:
@@ -187,18 +196,25 @@ def test_randomized_resets_preserve_shoe_lace_alignment_and_other_environments(
             assert isinstance(cable_solver, newton.solvers.SolverVBD)
             assert cable_solver.enable_dahl_friction is False
             assert cable_solver.rigid_compliant_alm is True
-            # Compare startup inertia to an independent native USD import before finalize's correction.
+            # Include native finalize-time validation in the independent inertia reference.
             native = newton.ModelBuilder()
             imported = native.add_usd(str(constants.SHOELACE_ASSET), return_deformable_results=True)
             native_inertia = np.asarray(native.body_inertia).reshape(-1, 3, 3)
             centerline, _, reference_length = load_shoelace()
             mean_length = np.linalg.norm(np.diff(centerline, axis=0), axis=1).mean()
-            authored_frames = np.asarray(newton.utils.create_parallel_transport_cable_quaternions(centerline))
+            native_frames = np.asarray(native.body_q)[:, 3:]
             for side, fixed in (("Left", -1), ("Right", 0)):
                 path = f"/Shoelace/Shoelace{side}/geometry/mesh"
                 bodies, _ = imported["path_cable_map"][path]
                 expected = native_inertia[bodies] + np.eye(3) * regularization
                 expected[fixed] = 0.0
+                inertia_reference = newton.ModelBuilder()
+                for segment, body in enumerate(bodies):
+                    inertia_reference.add_body(
+                        mass=0.0 if segment == fixed % len(bodies) else native.body_mass[body],
+                        inertia=wp.mat33(expected[segment]),
+                    )
+                expected = inertia_reference.finalize(device="cpu").body_inertia.numpy()
                 for world in range(env.num_envs):
                     prefix = f"/World/envs/env_{world}/ShoelaceScene/Shoelace{side}/geometry/mesh"
                     indices = [model.body_label.index(f"{prefix}_edge_body_{i}") for i in range(len(bodies))]
@@ -220,8 +236,9 @@ def test_randomized_resets_preserve_shoe_lace_alignment_and_other_environments(
                         atol=1.0e-6,
                     )
                     assert model.body_mass.numpy()[indices[fixed]] == 0.0
-                    frames = authored_frames[: len(bodies)] if side == "Left" else authored_frames[-len(bodies) :]
-                    np.testing.assert_allclose(model.body_q.numpy()[indices, 3:], frames, atol=1.0e-6)
+                    frames = native_frames[bodies]
+                    # World-translated float32 centerlines incur rounding before native frame construction.
+                    np.testing.assert_allclose(model.body_q.numpy()[indices, 3:], frames, atol=2.0e-5)
                     # Independently sample the material profile's core and ordinary regions.
                     joint_indices = [model.joint_label.index(f"{prefix}_cable_{i}") for i in range(1, len(bodies))]
                     slots = model.joint_qd_start.numpy()[joint_indices, None] + np.arange(4)
@@ -269,6 +286,7 @@ def test_randomized_resets_preserve_shoe_lace_alignment_and_other_environments(
                     shape = model.shape_label.index(root + suffix)
                     assert model.shape_body.numpy()[shape] == body
 
+            assert cfg.sim.physics.use_cuda_graph
             for selector in (selected, slice(0, env.num_envs, 2), selected):
                 shoe_before = shoe.data.root_pose_w.torch.clone()
                 robot_before = [robot.data.joint_pos.torch.clone() for robot in robots]
@@ -333,6 +351,7 @@ def test_randomized_resets_preserve_shoe_lace_alignment_and_other_environments(
                 for _ in range(10):
                     observations, *_ = env.step(actions)
                     assert torch.isfinite(observations["policy"]).all()
+                assert NewtonManager._graph is not None
                 torch.testing.assert_close(shoe.data.root_pose_w.torch, shoe_start)
                 for cable, segment, anchor in zip(cables, (-1, 0), anchors, strict=True):
                     torch.testing.assert_close(cable.data.segment_pose_w.torch[:, segment], anchor)

@@ -203,7 +203,6 @@ class ObservationsCfg:
 class EventsCfg:
     """Restore defaults, then perturb arm joints and translate the shoe with its laces."""
 
-    configure_physics = EventTerm(func=mdp.configure_shoelace_physics, mode="startup")
     settled_defaults = EventTerm(func=mdp.install_settled_default_state, mode="startup")
 
     reset_scene = EventTerm(

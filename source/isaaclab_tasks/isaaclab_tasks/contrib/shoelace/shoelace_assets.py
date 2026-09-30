@@ -43,8 +43,6 @@ def spawn_shoelace_usd(
     Returns:
         The spawned root prim.
     """
-    if cfg.inertia_regularization is not None:
-        raise ValueError("Set ShoelaceEnvCfg.cable_inertia_regularization for the startup event, not ShoelaceUsdCfg.")
     if any(not math.isfinite(value) or value < 0.0 for value in cfg.friction_overrides.values()):
         raise ValueError("Friction overrides must be finite and nonnegative")
     root = sim_utils.spawn_from_usd(prim_path, cfg, translation, orientation, **kwargs)
@@ -74,8 +72,6 @@ class ShoelaceUsdCfg(sim_utils.UsdFileCfg):
     func: Callable = spawn_shoelace_usd
     friction_overrides: dict[str, float] = {}
     """Asset-relative collision-prim expressions and their friction coefficients."""
-    inertia_regularization: float | None = None
-    """Deprecated inertia addition [kg*m^2]. Rejected; use ``ShoelaceEnvCfg.cable_inertia_regularization``."""
 
 
 def rigid_material(friction: float, damping: float) -> list[UsdPhysicsRigidBodyMaterialCfg | NewtonMaterialCfg]:
