@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Literal
 
 from isaaclab_newton.physics import NewtonCollisionPipelineCfg, NewtonSolverCfg
 
-from isaaclab.utils.configclass import configclass
+from isaaclab.utils import configclass
 
 if TYPE_CHECKING:
     from isaaclab_newton.physics import NewtonManager
@@ -162,20 +162,17 @@ class CouplerAdmmCfg(CouplerCfg):
     """Configuration for Newton's linearized ADMM coupling."""
 
     contact_max_triangle_pairs: int | None = None
-    """Triangle-pair capacity of the internal ADMM collision pipeline.
+    """Internal ADMM triangle-pair capacity across all environments in one process.
 
-    This budget covers all environments in one process. It is independent of
-    :attr:`isaaclab_newton.physics.NewtonCfg.collision_cfg`, which configures outer contacts.
-    ``None`` preserves Newton's default. Increase it for internal triangle-pair overflows.
-    With rigid contact matching enabled, Newton 1.6 requires this capacity to be below
-    ``2**20``. Increase the hashtable size factor instead for reduction-table warnings.
+    ``None`` uses Newton's default. Must be less than ``2**20`` with
+    :attr:`rigid_contact_matching` set to ``"latest"`` or ``"sticky"``;
+    larger capacities require ``"disabled"``.
     """
 
     contact_reduction_hashtable_size_factor: float | None = None
-    """Multiplier of the internal ADMM triangle-pair capacity used for contact reduction.
+    """Contact-reduction hash table size relative to the internal triangle-pair capacity.
 
-    Newton rounds the resulting table capacity up to a power of two. ``None`` preserves
-    Newton's default. Increase it for contact-reduction hashtable fill or insertion warnings.
+    ``None`` uses Newton's default. Increase it for hash table fill or insertion warnings.
     """
 
     contact_pairs: list[tuple[str, str]] | None = None

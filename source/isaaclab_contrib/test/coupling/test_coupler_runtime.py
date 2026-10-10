@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import warp as wp
@@ -30,7 +32,7 @@ from isaaclab_contrib.coupling import (
 def isolated_newton_manager(monkeypatch: pytest.MonkeyPatch):
     """Isolate every global manager slot touched by coupler construction."""
     clean_values = {
-        "_model": None,
+        "backend": SimpleNamespace(model=None),
         "_solver": None,
         "_use_single_state": None,
         "_contacts": None,
@@ -47,8 +49,13 @@ def isolated_newton_manager(monkeypatch: pytest.MonkeyPatch):
 
 
 def _build_overlapping_body_model(*, mesh_contact: bool = False) -> Model:
-    """Build two labeled free bodies with one rigid contact on the CPU."""
-    builder = ModelBuilder(gravity=-9.81)
+    """Build two labeled free bodies with one rigid contact on the CPU.
+
+    Args:
+        mesh_contact: Replace the source sphere with a triangle mesh to exercise
+            triangle-pair allocation and contact reduction in the capacity test.
+    """
+    builder = ModelBuilder(gravity=(0.0, 0.0, -9.81))
     for x, label in ((-0.09, "/World/Source/body"), (0.09, "/World/Destination/body")):
         body = builder.add_body(
             xform=wp.transform(wp.vec3(x, 0.0, 1.0), wp.quat_identity()),
@@ -105,7 +112,7 @@ def test_proxy_destination_can_receive_only_proxy_bodies(isolated_newton_manager
         ],
     )
 
-    NewtonManager._model = model
+    NewtonManager.backend.model = model
     NewtonCouplerManager._build_solver(model, solver_cfg)
 
     assert NewtonManager._solver._entries["destination"].proxy_body_local_indices.numpy().tolist() == [0]
@@ -124,7 +131,7 @@ def test_real_coupler_constructs_resets_and_steps(
     expected_solver_type: type,
     isolated_newton_manager,
 ):
-    """Construct, prepare contacts, reset, and step the pinned Newton solver."""
+    """Exercise supported coupling configurations or reject unsupported capacity overrides."""
     model = _build_overlapping_body_model(mesh_contact=algorithm == "admm_capacity")
     entries = _entry_configs()
     if algorithm == "proxy":
@@ -149,7 +156,11 @@ def test_real_coupler_constructs_resets_and_steps(
             solver_cfg.contact_matching_pos_threshold = 0.001
             solver_cfg.contact_matching_normal_dot_threshold = 0.9
 
-    NewtonManager._model = model
+    NewtonManager.backend.model = model
+    if algorithm == "admm_capacity" and not hasattr(SolverCoupledADMM.Config, "contact_max_triangle_pairs"):
+        with pytest.raises(RuntimeError, match=r"Newton.*does not support contact_max_triangle_pairs"):
+            NewtonCouplerManager._build_solver(model, solver_cfg)
+        return
     NewtonCouplerManager._build_solver(model, solver_cfg)
     solver = NewtonManager._solver
 

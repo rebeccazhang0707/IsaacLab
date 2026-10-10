@@ -9,20 +9,61 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
+
+from pxr import Gf, Usd, UsdGeom
 
 from isaaclab.assets import Articulation, CableObject, RigidObject
 from isaaclab.envs.mdp.events import reset_joints_by_offset
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.utils.math import sample_uniform
+from isaaclab.utils.math import quat_mul, sample_uniform
+
+from ..shoelace_assets import read_shoelace_attribute
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
 
+def install_settled_default_state(env: ManagerBasedEnv, env_ids: torch.Tensor | None) -> None:
+    """Install the offline gravity-settled cable poses as defaults at startup.
+
+    Args:
+        env: Environment containing both shoelace cables.
+        env_ids: Unused; startup installs defaults for every environment.
+    """
+    for name, side in (("shoelace_left", "Left"), ("shoelace_right", "Right")):
+        cable: CableObject = env.scene[name]
+        curve = _source_curve(env, side)
+        positions = read_shoelace_attribute(curve, "settledPositions", (cable.num_segments, 3))
+        orientations = read_shoelace_attribute(curve, "settledOrientations", (cable.num_segments, 4), quaternion=True)
+        transform = _source_transform(curve)
+        matrix = np.asarray(transform)
+        positions = positions @ matrix[:3, :3] + matrix[3, :3]
+        rotation = transform.ExtractRotationQuat()
+        default_pose = cable.data.default_segment_pose_w.torch
+        # Remove the source environment origin before broadcasting to replicated environments.
+        positions -= env.scene.env_origins[0].cpu().numpy()
+        default_pose[..., :3] = default_pose.new_tensor(positions)
+        default_pose[..., :3] += env.scene.env_origins.unsqueeze(1)
+        local_rotation = default_pose.new_tensor(orientations)
+        world_rotation = (*rotation.GetImaginary(), rotation.GetReal())
+        # Preserve the baked float32 state exactly when no rotation needs composing.
+        if world_rotation == (0.0, 0.0, 0.0, 1.0):
+            default_pose[..., 3:] = local_rotation
+        else:
+            default_pose[..., 3:] = quat_mul(
+                default_pose.new_tensor(world_rotation).expand(cable.num_segments, -1), local_rotation
+            )
+        velocity = cable.data.default_segment_velocity_w.torch
+        velocity.zero_()
+        cable.write_segment_pose_to_sim_index(segment_pose=default_pose)
+        cable.write_segment_velocity_to_sim_index(segment_velocity=velocity)
+
+
 def reset_arm_joints(
     env: ManagerBasedEnv,
-    env_ids: torch.Tensor,
+    env_ids: torch.Tensor | slice,
     position_range: tuple[float, float],
     asset_cfg: SceneEntityCfg,
 ) -> None:
@@ -42,7 +83,7 @@ def reset_arm_joints(
 
 def reset_shoe_position(
     env: ManagerBasedEnv,
-    env_ids: torch.Tensor,
+    env_ids: torch.Tensor | slice,
     position_range: dict[str, tuple[float, float]],
 ) -> None:
     """Translate the shoe and both laces together about their default positions.
@@ -59,8 +100,8 @@ def reset_shoe_position(
     """
     shoe: RigidObject = env.scene["shoe"]
     bounds = torch.tensor([position_range.get(axis, (0.0, 0.0)) for axis in "xyz"], device=env.device)
-    offset = sample_uniform(bounds[:, 0], bounds[:, 1], (len(env_ids), 3), env.device)
     root_pose = shoe.data.default_root_pose.torch[env_ids].clone()
+    offset = sample_uniform(bounds[:, 0], bounds[:, 1], (root_pose.shape[0], 3), env.device)
     root_pose[:, :3] += env.scene.env_origins[env_ids] + offset
     shoe.write_root_pose_to_sim_index(root_pose=root_pose, env_ids=env_ids)
 
@@ -69,3 +110,28 @@ def reset_shoe_position(
         segment_pose = cable.data.default_segment_pose_w.torch[env_ids].clone()
         segment_pose[..., :3] += offset.unsqueeze(1)
         cable.write_segment_pose_to_sim_index(segment_pose=segment_pose, env_ids=env_ids)
+
+
+def _source_curve(env: ManagerBasedEnv, side: str) -> Usd.Prim:
+    """Return the first environment's ``Left`` or ``Right`` cable prim.
+
+    Physics-only replication retains this source prim. Raise ``ValueError`` if missing.
+    """
+    path = f"{env.scene.env_prim_paths[0]}/ShoelaceScene/Shoelace{side}/geometry/mesh"
+    curve = env.sim.stage.GetPrimAtPath(path)
+    if not curve:
+        raise ValueError(f"Missing shoelace source curve: {path}")
+    return curve
+
+
+def _source_transform(curve: Usd.Prim) -> Gf.Matrix4d:
+    """Return the default-time curve-to-world transform, with translation in [m].
+
+    The generated asset is meter-based. Raise ``ValueError`` for scale, shear, or
+    reflection, which violate the baked startup data's rigid-transform assumption.
+    """
+    transform = UsdGeom.Xformable(curve).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+    linear = np.asarray(transform)[:3, :3]
+    if not np.allclose(linear @ linear.T, np.eye(3), atol=1.0e-6) or np.linalg.det(linear) < 0.0:
+        raise ValueError(f"{curve.GetPath()}: bake scale/shear before using shoelace startup data")
+    return transform
