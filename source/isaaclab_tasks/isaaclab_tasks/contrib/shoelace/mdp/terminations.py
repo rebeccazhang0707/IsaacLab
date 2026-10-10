@@ -83,8 +83,8 @@ class shoelace_bilateral_pull_success(ManagerTermBase):
             contact_std: Finger-tail surface-distance width [m].
             relative_speed_std: Tail-to-TCP relative-speed width [m/s].
             grasp_filter_time_constant: Exponential grasp filter time constant [s].
-            open_position: Open finger joint position [m].
-            closed_position: Closed finger joint position [m].
+            open_position: Open finger joint position [m or rad, depending on joint type].
+            closed_position: Closed finger joint position [m or rad, depending on joint type].
             cable_cfgs: Left and right cable scene entities.
             robot_cfgs: Left and right robot entities with resolved finger joint and hand body indices.
             contact_penetration_tolerance: Allowed contact-solver penetration [m].
