@@ -9,13 +9,19 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import logging
+import time
+from datetime import datetime
+from pathlib import Path
+
+import torch
 import os
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
 from isaaclab.app import add_launcher_args, launch_simulation
-from isaaclab.envs import DirectMARLEnvCfg
+from isaaclab.envs import DirectMARLEnvCfg, ManagerBasedRLEnvCfg
 from isaaclab.utils import to_dict
 from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.seed import configure_seed
@@ -28,6 +34,7 @@ from ...rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 from ...utils.wandb import is_wandb_checkpoint, resolve_wandb_checkpoint
 from ..common import (
     CHECKPOINT_SELECTORS,
+    EpisodeSuccessEvaluator,
     add_common_play_args,
     apply_env_overrides,
     apply_video_recording,
@@ -63,12 +70,48 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--external_callback", default=None, help="Fully qualified path to an externally defined callback."
     )
+    parser.add_argument("--eval_episodes", type=int, default=None, help="Evaluate exactly this many episodes, then exit.")
+    parser.add_argument("--eval_success_term", default="success", help="Manager termination term used to count successes.")
+    parser.add_argument(
+        "--eval_output", type=str, default=None, help="Evaluation JSON path (default: checkpoint directory/eval)."
+    )
+    parser.add_argument(
+        "--video_grid", action="store_true", help="Record a headless Newton GL camera grid, one tile per environment."
+    )
+    parser.add_argument(
+        "--video_eye", type=float, nargs=3, default=(4.0, -4.0, 3.0), help="Grid camera offset from each env origin [m]."
+    )
+    parser.add_argument("--video_lookat", type=float, nargs=3, default=(0.0, 0.0, 0.0), help="Grid look-at offset [m].")
+    parser.add_argument(
+        "--video_closeup_env", type=int, default=None, help="Replace the bottom-right 2x2 tiles with this env."
+    )
+    parser.add_argument(
+        "--video_closeup_eye", type=float, nargs=3, default=(0.0, -0.35, 0.525), help="Closeup eye offset from target [m]."
+    )
+    parser.add_argument(
+        "--video_closeup_offset",
+        type=float,
+        nargs=3,
+        default=(0.0, 0.0, 0.0),
+        help="Closeup target offset from env origin [m].",
+    )
     cli_args.add_rsl_rl_args(parser)
     add_launcher_args(parser)
     remaining_args_env_registration = cli_args.register_external_tasks(argv)
     args_cli, remaining_args = setup_preset_cli(parser, argv)
     if remaining_args_env_registration is not None:
         _, remaining_args_env_registration = setup_preset_cli(parser, remaining_args_env_registration)
+    if args_cli.eval_episodes is not None and args_cli.eval_episodes <= 0:
+        parser.error("--eval_episodes must be positive.")
+    if args_cli.eval_output and args_cli.eval_episodes is None:
+        parser.error("--eval_output requires --eval_episodes.")
+    if args_cli.video_closeup_env is not None and not args_cli.video_grid:
+        parser.error("--video_closeup_env requires --video_grid.")
+    if args_cli.video_grid:
+        if args_cli.visualizer not in (None, ["newton_gl"]):
+            parser.error("--video_grid requires --visualizer newton_gl (or no explicit visualizer).")
+        args_cli.video = "viz:newton_gl"
+        args_cli.visualizer = ["newton_gl"]
     enable_cameras_for_video(args_cli)
     set_hydra_args(list_intersection(remaining_args, remaining_args_env_registration))
     return args_cli
@@ -100,11 +143,41 @@ def _resolve_checkpoint(
     return get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
 
+def _configure_evaluation(env_cfg: object, args_cli: argparse.Namespace) -> None:
+    """Validate evaluation and configure an optional grid before launching simulation."""
+    if args_cli.eval_episodes is not None:
+        if not isinstance(env_cfg, ManagerBasedRLEnvCfg):
+            raise ValueError("--eval_episodes requires a manager-based environment with a success termination term.")
+        success_cfg = getattr(env_cfg.terminations, args_cli.eval_success_term, None)
+        if isinstance(env_cfg.terminations, dict):
+            success_cfg = env_cfg.terminations.get(args_cli.eval_success_term)
+        if success_cfg is None or success_cfg.time_out:
+            raise ValueError(f"Expected an active non-timeout termination term: {args_cli.eval_success_term!r}.")
+    if args_cli.video_grid:
+        from isaaclab_rl.entrypoints._newton_gl_video import _NewtonGLVideoGridCfg
+
+        num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+        if args_cli.video_closeup_env is not None:
+            if num_envs < 9 or not 0 <= args_cli.video_closeup_env < num_envs:
+                raise ValueError("The 2x2 closeup requires at least 9 environments and a valid --video_closeup_env.")
+        env_cfg.sim.visualizer_cfgs = [
+            _NewtonGLVideoGridCfg(
+                grid_num_envs=num_envs,
+                grid_eye=tuple(args_cli.video_eye),
+                grid_lookat=tuple(args_cli.video_lookat),
+                closeup_env=args_cli.video_closeup_env,
+                closeup_eye=tuple(args_cli.video_closeup_eye),
+                closeup_offset=tuple(args_cli.video_closeup_offset),
+            )
+        ]
+
+
 def run(argv: list[str]) -> None:
     """Play a checkpoint of an RSL-RL agent."""
     args_cli = _parse_args(argv)
     with startup_screen(args_cli, num_stages=3) as screen:
         env_cfg, agent_cfg = resolve_task_config(args_cli.task, args_cli.agent, play_mode=not args_cli.train_env_cfg)
+        _configure_evaluation(env_cfg, args_cli)
         pre_launch_video_config(env_cfg, args_cli)
         screen.stage("Launching simulation")
         with launch_simulation(env_cfg, args_cli), contextlib.ExitStack() as cleanup:
@@ -153,11 +226,56 @@ def run(argv: list[str]) -> None:
 
             obs = env.get_observations()
 
+            evaluator = (
+                EpisodeSuccessEvaluator(env.num_envs, args_cli.eval_episodes, env.unwrapped.device)
+                if args_cli.eval_episodes is not None else None
+            )
+
             def step() -> None:
                 nonlocal obs
                 obs, _, dones, _ = env.step(policy(obs))
                 # reset recurrent states for episodes that have terminated
                 policy.reset(dones)
+                if evaluator is not None:
+                    successes = env.unwrapped.termination_manager.get_term(args_cli.eval_success_term)
+                    evaluator.update(dones, successes)
 
             screen.close()
-            run_playback(step, dt=env.unwrapped.step_dt, args_cli=args_cli, env_cfg=env_cfg)
+            if evaluator is None:
+                run_playback(step, dt=env.unwrapped.step_dt, args_cli=args_cli, env_cfg=env_cfg)
+                return
+            dt = env.unwrapped.step_dt
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            eval_output = (
+                Path(args_cli.eval_output) if args_cli.eval_output
+                else Path(log_dir) / "eval" / f"{Path(resume_path).stem}_{timestamp}.json"
+            )
+            logger.info("Evaluating %s episodes; results: %s", evaluator.num_episodes, eval_output)
+            try:
+                with contextlib.suppress(KeyboardInterrupt), torch.inference_mode():
+                    while not evaluator.complete:
+                        start_time = time.time()
+                        step()
+                        sleep_time = dt - (time.time() - start_time)
+                        if args_cli.real_time and sleep_time > 0:
+                            time.sleep(sleep_time)
+            finally:
+                completed = len(evaluator.episodes)
+                result = {
+                    "task": args_cli.task,
+                    "checkpoint": str(Path(resume_path).resolve()),
+                    "seed": env_cfg.seed,
+                    "num_envs": env.num_envs,
+                    "success_term": args_cli.eval_success_term,
+                    "requested_episodes": evaluator.num_episodes,
+                    "completed_episodes": completed,
+                    "complete": evaluator.complete,
+                    "successes": evaluator.successes,
+                    "success_rate": evaluator.successes / completed if completed else None,
+                    "step_dt": dt,
+                    "episode_quotas": evaluator.quotas.tolist(),
+                    "episodes": evaluator.episodes,
+                }
+                eval_output.parent.mkdir(parents=True, exist_ok=True)
+                eval_output.write_text(json.dumps(result, indent=2) + "\n")
+                logger.info("Saved %s evaluation results: %s", "complete" if evaluator.complete else "partial", eval_output)
