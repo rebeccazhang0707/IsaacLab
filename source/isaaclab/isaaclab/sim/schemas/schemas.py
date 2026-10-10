@@ -354,7 +354,7 @@ def apply_articulation_root_properties(
     success = not any_skipped
     for root in targets:
         if fix_root_link:
-            root = sim.physics_manager.fix_articulation_root(root, stage)
+            root = sim.backend_manager.fix_articulation_root(root, stage)
         elif fix_root_link is False:
             joint = find_global_fixed_joint_prim(root.GetPath().pathString, stage=stage)
             if joint is not None:
@@ -808,7 +808,7 @@ def _apply_deformable_body_properties(
             sim_mesh_prim, vis_mesh_prim = _setup_deformable_meshes(
                 prim, deformable_type, sim_mesh_prim_path, stage, tetrahedralization_edge_length_fac
             )
-            sim.physics_manager.setup_deformable_body(prim, deformable_type, sim_mesh_prim, vis_mesh_prim)
+            sim.backend_manager.setup_deformable_body(prim, deformable_type, sim_mesh_prim, vis_mesh_prim)
             targets.append(prim)
     if not targets:
         if not any_skipped:
@@ -918,9 +918,10 @@ def apply_mesh_collision(
     standard ``UsdPhysics.MeshCollisionAPI``) on top of its own backend cooking namespace.
 
     The token is *not* a plain namespaced attribute -- it is shared state on the family anchor implied
-    by the present cooking fragment. Each fragment carries a :attr:`mesh_approximation_name` whose
-    default encodes the token its schema implies (e.g. ``"convexHull"`` for :class:`PhysxConvexHullCfg`,
-    ``"sdf"`` for :class:`PhysxSDFMeshCfg`). A name of ``"none"`` leaves the token unchanged, so when
+    by the present cooking fragment. The core and PhysX fragments carry a :attr:`mesh_approximation_name`
+    whose default encodes the token their schema implies (e.g. ``"convexHull"`` for :class:`PhysxConvexHullCfg`,
+    ``"sdf"`` for :class:`PhysxSDFMeshCfg`); the Newton cooking fragments carry none and leave the token
+    unchanged. A name of ``"none"`` also leaves the token unchanged, so when
     several fragments are dispatched in order by :func:`apply_mesh_collision_properties` the last one
     with a non-``"none"`` name wins -- this is how a core fragment composes with a backend cooking
     fragment. The name is validated against :const:`MESH_APPROXIMATION_TOKENS`; an unknown name raises

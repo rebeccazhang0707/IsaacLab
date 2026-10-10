@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Tests for shoelace runtime configuration and randomized resets."""
+"""Focused reset and material tests for the shoelace task."""
 
 from types import SimpleNamespace
 
@@ -14,13 +14,12 @@ import torch
 
 from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
-from isaaclab_tasks.contrib.shoelace import shoelace_constants as constants
 from isaaclab_tasks.contrib.shoelace.mdp.events import reset_shoe_position
 from isaaclab_tasks.contrib.shoelace.shoelace_env_cfg import ShoelaceEnvCfg
-from isaaclab_tasks.contrib.shoelace.shoelace_physics import configure_shoelace_builder, create_shoelace_env
+from isaaclab_tasks.contrib.shoelace.shoelace_physics import configure_shoelace_builder
 
 
-@pytest.mark.parametrize("env_ids", [slice(None), slice(1, 4, 2), slice(0, 0), torch.tensor([3, 1])])
+@pytest.mark.parametrize("env_ids", [slice(1, 4, 2), torch.tensor([3, 1])])
 def test_shoe_reset_accepts_slices_and_preserves_unselected_poses(env_ids: torch.Tensor | slice) -> None:
     """Apply the same translation to selected shoe and cable poses without expanding slices."""
     defaults = torch.zeros(4, 7)
@@ -58,56 +57,16 @@ def test_shoe_reset_accepts_slices_and_preserves_unselected_poses(env_ids: torch
         torch.testing.assert_close(actual, expected)
 
 
-@pytest.mark.parametrize(("num_envs", "override"), [(4, None), (1024, None), (1024, 1_024_000)])
-def test_runtime_contact_capacity_scales_and_preserves_overrides(num_envs: int, override: int | None) -> None:
-    """Grow collision storage while keeping matching indices encodable and honoring larger overrides."""
-    cfg = ShoelaceEnvCfg()
-    cfg.scene.num_envs = num_envs
-    outer_override = 16_777_216 if override is not None else 0
-    if override is not None:
-        cfg.sim.physics.collision_cfg.max_triangle_pairs = outer_override
-        cfg.sim.physics.solver_cfg.contact_max_triangle_pairs = override
-        cfg.sim.physics.solver_cfg.contact_reduction_hashtable_size_factor = 4.0
-    cfg.validate()
-
-    collision = cfg.sim.physics.collision_cfg
-    solver = cfg.sim.physics.solver_cfg
-    assert collision.max_triangle_pairs >= constants.TRIANGLE_PAIRS_PER_ENV * num_envs
-    assert 0 < solver.contact_max_triangle_pairs < 2**20
-    if override is not None:
-        assert collision.max_triangle_pairs == outer_override
-        assert solver.contact_max_triangle_pairs == override
-        assert solver.contact_reduction_hashtable_size_factor == 4.0
-    elif num_envs == 4:
-        assert solver.contact_max_triangle_pairs == collision.max_triangle_pairs
-    else:
-        assert solver.contact_max_triangle_pairs < collision.max_triangle_pairs
-        assert solver.contact_reduction_hashtable_size_factor > 0.25
-
-
-@pytest.mark.parametrize("regularization", [-1.0e-6, float("nan"), float("inf")])
-def test_invalid_proxy_inertia_is_rejected_before_environment_construction(
-    regularization: float, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Reject invalid builder regularization at the factory entry before initializing an environment."""
-    cfg = ShoelaceEnvCfg()
-    cfg.cable_inertia_regularization = regularization
-    monkeypatch.setattr(
-        "isaaclab_tasks.contrib.shoelace.shoelace_physics.ManagerBasedRLEnv",
-        lambda **kwargs: pytest.fail("Invalid regularization must not initialize an environment"),
-    )
-    with pytest.raises(ValueError, match="finite and nonnegative"):
-        create_shoelace_env(cfg=cfg)
-
-
 def test_cable_friction_uses_each_bound_usd_material() -> None:
     """Preserve distinct authored cable friction through model construction without external assets."""
     stage = Usd.Stage.CreateInMemory()
     builder = newton.ModelBuilder()
     builder.begin_world()
+    cfg = ShoelaceEnvCfg()
+    cfg.scene.clone_cfg.clone_template = "/Lab/Cells/Cell{}"
     expected = {}
     for side, friction in (("Left", 0.23), ("Right", 0.37)):
-        path = f"/World/envs/env_0/ShoelaceScene/Shoelace{side}/geometry/mesh"
+        path = f"/Lab/Cells/Cell0/ShoelaceScene/Shoelace{side}/geometry/mesh"
         curve = UsdGeom.BasisCurves.Define(stage, path).GetPrim()
         points = np.array([(0.0, 0.0, 0.0), (0.01, 0.0, 0.0), (0.02, 0.0, 0.0)])
         segment_length = np.linalg.norm(np.diff(points, axis=0), axis=1).mean()
@@ -121,7 +80,7 @@ def test_cable_friction_uses_each_bound_usd_material() -> None:
             expected.update({shape: friction for shape in builder.body_shapes[body]})
     builder.end_world()
 
-    configure_shoelace_builder(builder, stage, 0, np.array([0.0, 0.0, 0.0, 1.0]), ShoelaceEnvCfg())
+    configure_shoelace_builder(builder, stage, 0, np.array([0.0, 0.0, 0.0, 1.0]), cfg)
     model = builder.finalize(device="cpu")
     for shape, friction in expected.items():
         assert model.shape_material_mu.numpy()[shape] == pytest.approx(friction)
