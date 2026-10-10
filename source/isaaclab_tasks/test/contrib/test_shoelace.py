@@ -14,10 +14,82 @@ import torch
 
 from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
+from isaaclab.managers import SceneEntityCfg
+
 from isaaclab_tasks.contrib.shoelace import shoelace_constants as constants
 from isaaclab_tasks.contrib.shoelace.mdp.events import reset_shoe_position
+from isaaclab_tasks.contrib.shoelace.mdp.grasp import shoelace_grasp_quality
+from isaaclab_tasks.contrib.shoelace.mdp.observations import gripper_close_error, tail_tcp_relative_speed, tails_to_tcp
 from isaaclab_tasks.contrib.shoelace.shoelace_env_cfg import ShoelaceEnvCfg
 from isaaclab_tasks.contrib.shoelace.shoelace_physics import configure_shoelace_builder, create_shoelace_env
+
+
+@pytest.mark.parametrize(("open_position", "closed_position", "direction"), [(0.04, 0.0, -1.0), (0.0, 1.2, 1.0)])
+def test_finger_closure_quality_and_residual_support_both_joint_directions(
+    open_position: float, closed_position: float, direction: float
+) -> None:
+    """Closing prismatic and revolute fingers must gain grasp quality and reduce obstruction residuals."""
+    positions = torch.tensor([[open_position], [(open_position + closed_position) / 2], [closed_position]])
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            joint_pos=SimpleNamespace(torch=positions),
+            joint_pos_target=SimpleNamespace(torch=torch.full_like(positions, closed_position)),
+            body_quat_w=SimpleNamespace(torch=torch.tensor([0.0, 0.0, 0.0, 1.0]).expand(3, 1, 4)),
+            body_link_vel_w=SimpleNamespace(torch=torch.zeros(3, 1, 6)),
+        )
+    )
+    cable = SimpleNamespace(
+        data=SimpleNamespace(
+            segment_pose_w=SimpleNamespace(torch=torch.zeros(3, 3, 7)),
+            segment_velocity_w=SimpleNamespace(torch=torch.zeros(3, 3, 6)),
+        )
+    )
+    env = SimpleNamespace(
+        num_envs=3,
+        cfg=SimpleNamespace(),
+        scene={
+            "robot": robot,
+            "left": cable,
+            "right": cable,
+            "finger_tail_contacts": SimpleNamespace(data=torch.zeros(3, 4)),
+        },
+    )
+    robot_cfgs = (SceneEntityCfg("robot", joint_ids=[0], body_ids=[0]),) * 2
+    quality, finite = shoelace_grasp_quality(
+        env, 0.001, 0.08, open_position, closed_position, (SceneEntityCfg("left"), SceneEntityCfg("right")), robot_cfgs
+    )
+    torch.testing.assert_close(quality, torch.tensor([[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]]), atol=1.0e-5, rtol=0.0)
+    assert finite.all()
+    residual = gripper_close_error(env, robot_cfgs, closing_direction=direction) / abs(closed_position - open_position)
+    torch.testing.assert_close(residual, torch.tensor([[1.0, 1.0], [0.5, 0.5], [0.0, 0.0]]))
+
+
+def test_tcp_observations_use_each_hand_offset_for_position_and_angular_velocity() -> None:
+    """Distinct hand TCPs must rotate their positions and include angular motion when measuring slip."""
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            root_quat_w=SimpleNamespace(torch=torch.tensor([[0.0, 0.0, 0.0, 1.0]])),
+            body_pos_w=SimpleNamespace(torch=torch.zeros(1, 1, 3)),
+            body_quat_w=SimpleNamespace(torch=torch.tensor([[[0.0, 0.0, 2**-0.5, 2**-0.5]]])),
+            body_link_vel_w=SimpleNamespace(torch=torch.tensor([[[0.0, 0.0, 0.0, 0.0, 0.0, 2.0]]])),
+        )
+    )
+    cable = SimpleNamespace(
+        data=SimpleNamespace(
+            segment_pose_w=SimpleNamespace(torch=torch.zeros(1, 3, 7)),
+            segment_velocity_w=SimpleNamespace(torch=torch.zeros(1, 3, 6)),
+        )
+    )
+    env = SimpleNamespace(
+        cfg=SimpleNamespace(tcp_offsets=((0.1, 0.0, 0.0), (0.0, 0.2, 0.0))),
+        scene={"robot": robot, "left": cable, "right": cable},
+    )
+    robot_cfgs = (SceneEntityCfg("robot", body_ids=[0]),) * 2
+    cable_cfgs = (SceneEntityCfg("left"), SceneEntityCfg("right"))
+    torch.testing.assert_close(
+        tails_to_tcp(env, cable_cfgs, robot_cfgs), torch.tensor([[0.0, -0.1, 0.0, 0.2, 0.0, 0.0]])
+    )
+    torch.testing.assert_close(tail_tcp_relative_speed(env, cable_cfgs, robot_cfgs), torch.tensor([[0.2, 0.4]]))
 
 
 @pytest.mark.parametrize("env_ids", [slice(None), slice(1, 4, 2), slice(0, 0), torch.tensor([3, 1])])

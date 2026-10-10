@@ -145,8 +145,8 @@ class dense_task_reward(ManagerTermBase):
             contact_std: Contact-distance width [m]; gaps and deep penetration reduce grasp quality.
             relative_speed_std: Tail-TCP slip-speed width [m/s].
             grasp_filter_time_constant: Grasp-quality low-pass time constant [s].
-            open_position: Driven finger-joint position when open [m].
-            closed_position: Driven finger-joint position when closed [m].
+            open_position: Driven finger-joint position when open [m or rad, depending on joint type].
+            closed_position: Driven finger-joint position when closed [m or rad, depending on joint type].
             success_x_separation: X-separation target for the pull scale [m]; success is checked separately.
             cable_cfgs: Required left and right cable scene entities.
             robot_cfgs: Required left and right robot hand and finger scene entities.
@@ -338,8 +338,8 @@ class grasp_hold_reward(ManagerTermBase):
             contact_std: Finger-tail contact-distance width [m].
             relative_speed_std: Tail-TCP slip-speed width [m/s].
             grasp_filter_time_constant: Grasp-quality low-pass time constant [s].
-            open_position: Driven finger-joint position when open [m].
-            closed_position: Driven finger-joint position when closed [m].
+            open_position: Driven finger-joint position when open [m or rad, depending on joint type].
+            closed_position: Driven finger-joint position when closed [m or rad, depending on joint type].
             cable_cfgs: Left and right cable scene entities.
             robot_cfgs: Left and right hand and finger scene entities.
             bilateral_grasp_fraction: Bilateral share in [0, 1]; the remainder rewards each arm independently.
@@ -423,8 +423,8 @@ class pregrasp_progress_reward(ManagerTermBase):
             alignment_std: Gaussian width for TCP-to-tail-center distance [m].
             closure_radius: TCP-centered radius beyond which closure earns no credit [m].
                 The gate is ``max(1 - (distance / radius)**2, 0)**2`` and is smooth at its boundary.
-            open_position: Driven finger-joint position when open [m].
-            closed_position: Driven finger-joint position when closed [m].
+            open_position: Driven finger-joint position when open [m or rad, depending on joint type].
+            closed_position: Driven finger-joint position when closed [m or rad, depending on joint type].
             cable_cfgs: Left and right cable scene entities.
             robot_cfgs: Left and right hand and finger scene entities.
             alignment_weight: Nonnegative fine-alignment potential budget, averaged over the two arms.
@@ -438,7 +438,7 @@ class pregrasp_progress_reward(ManagerTermBase):
 
         Raises:
             ValueError: If widths are not finite and positive, component weights are not finite and
-                nonnegative, or the open position does not exceed the closed position.
+                nonnegative, or the open and closed positions coincide.
         """
         if not all(math.isfinite(value) and value > 0.0 for value in (alignment_std, closure_radius)):
             raise ValueError("alignment_std and closure_radius must be finite and positive")
@@ -446,9 +446,9 @@ class pregrasp_progress_reward(ManagerTermBase):
             raise ValueError("alignment_weight and closure_weight must be finite and nonnegative")
         if (
             not all(math.isfinite(value) for value in (open_position, closed_position))
-            or open_position <= closed_position
+            or open_position == closed_position
         ):
-            raise ValueError("Gripper positions must be finite with open_position greater than closed_position")
+            raise ValueError("Gripper positions must be finite and distinct")
 
         vectors = tails_to_tcp(env, cable_cfgs, robot_cfgs).reshape(env.num_envs, 2, 3)
         distance = torch.linalg.vector_norm(vectors, dim=-1)

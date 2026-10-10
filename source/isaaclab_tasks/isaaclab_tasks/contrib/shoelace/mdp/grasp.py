@@ -35,8 +35,8 @@ def shoelace_grasp_quality(
         env: Shoelace environment with current finger-tail contact observations.
         contact_std: Finger-tail surface-distance width [m].
         relative_speed_std: Tail-to-TCP relative-speed width [m/s].
-        open_position: Open finger joint position [m].
-        closed_position: Closed finger joint position [m].
+        open_position: Open finger joint position [m or rad, depending on joint type].
+        closed_position: Closed finger joint position [m or rad, depending on joint type].
         cable_cfgs: Left and right cable scene entities.
         robot_cfgs: Left and right robot entities with resolved finger joint and hand body indices.
         contact_penetration_tolerance: Allowed contact-solver penetration [m].
@@ -55,7 +55,8 @@ def shoelace_grasp_quality(
     positions = torch.stack(
         [env.scene[cfg.name].data.joint_pos.torch[:, cfg.joint_ids[0]] for cfg in robot_cfgs], dim=1
     )
-    closure = ((open_position - positions) / max(open_position - closed_position, 1.0e-6)).clamp(0.0, 1.0)
+    span = math.copysign(max(abs(open_position - closed_position), 1.0e-6), open_position - closed_position)
+    closure = ((open_position - positions) / span).clamp(0.0, 1.0)
     finite = (
         torch.isfinite(signed_distance).all(dim=(1, 2))
         & torch.isfinite(relative_speed).all(dim=1)
