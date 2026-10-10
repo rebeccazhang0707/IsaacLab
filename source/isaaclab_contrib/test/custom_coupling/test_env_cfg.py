@@ -8,30 +8,24 @@
 import pytest
 
 import isaaclab_contrib.custom_coupling.tasks  # noqa: F401
-from isaaclab_contrib.custom_coupling.franka_soft_env_cfg import PhysicsCfg
+from isaaclab_contrib.coupling import CouplerProxyCfg
+from isaaclab_contrib.custom_coupling import CoupledMJWarpVBDSolverCfg
 
-from isaaclab_tasks.core.lift.config.franka_soft.franka_soft_env_cfg import PhysicsCfg as CorePhysicsCfg
 from isaaclab_tasks.utils import resolve_task_config
-
-MANUAL_MANAGER = "isaaclab_contrib.custom_coupling.coupled_mjwarp_vbd_manager:NewtonCoupledMJWarpVBDManager"
-PROXY_MANAGER = "isaaclab_contrib.coupling.coupler:NewtonCouplerManager"
 
 
 def test_example_default_preset_uses_the_manual_coupler() -> None:
     """Importing the example must select its own manual coupling preset."""
     env_cfg, _ = resolve_task_config("IsaacContrib-Lift-Soft-Franka-Custom-Coupling", "", overrides=())
 
-    assert env_cfg.sim.physics.class_type == MANUAL_MANAGER
+    assert isinstance(env_cfg.sim.physics.solver_cfg, CoupledMJWarpVBDSolverCfg)
 
+    # The moved preset name is selectable on the contrib example.
+    env_cfg, _ = resolve_task_config(
+        "IsaacContrib-Lift-Soft-Franka-Custom-Coupling", "", overrides=("physics=newton_mjwarp_vbd",)
+    )
 
-def test_core_declares_only_the_proxy_preset() -> None:
-    """The manual preset lives in contrib; core declares only the proxy variant."""
-    core_variants = set(type(CorePhysicsCfg()).__dataclass_fields__)
-    contrib_variants = set(type(PhysicsCfg()).__dataclass_fields__)
-
-    assert "newton_mjwarp_vbd_proxy" in core_variants
-    assert "newton_mjwarp_vbd" not in core_variants
-    assert "newton_mjwarp_vbd" in contrib_variants
+    assert isinstance(env_cfg.sim.physics.solver_cfg, CoupledMJWarpVBDSolverCfg)
 
 
 def test_core_task_rejects_the_removed_preset_name() -> None:
@@ -48,11 +42,11 @@ def test_proxy_preset_selectable_on_example() -> None:
         "IsaacContrib-Lift-Soft-Franka-Custom-Coupling", "", overrides=("physics=newton_mjwarp_vbd_proxy",)
     )
 
-    assert env_cfg.sim.physics.class_type == PROXY_MANAGER
+    assert isinstance(env_cfg.sim.physics.solver_cfg, CouplerProxyCfg)
 
 
 def test_cloth_camera_task_uses_proxy_coupling() -> None:
     """The cloth camera task uses the core proxy coupling by default."""
     env_cfg, _ = resolve_task_config("Isaac-Lift-Soft-Franka-Camera", "", overrides=())
 
-    assert env_cfg.sim.physics.class_type == PROXY_MANAGER
+    assert isinstance(env_cfg.sim.physics.solver_cfg, CouplerProxyCfg)

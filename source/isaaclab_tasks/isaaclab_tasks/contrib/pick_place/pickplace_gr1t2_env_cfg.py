@@ -20,21 +20,20 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
+from isaaclab.utils import configclass, replace
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retrieve_file_path
-from isaaclab.utils.configclass import configclass
 from isaaclab.visualizers import VisualizerCfg
+
+from isaaclab_tasks.contrib import ISAACLAB_TELEOP_AVAILABLE
 
 from . import mdp
 
 from isaaclab_assets.robots.fourier import GR1T2_HIGH_PD_CFG  # isort: skip
-from isaaclab_teleop.haptic_feedback import GloveHapticFeedbackCfg  # isort: skip
-from isaaclab_teleop.isaac_teleop_cfg import IsaacTeleopCfg, XrCameraFeedCfg  # isort: skip
-from isaaclab_teleop.xr_cfg import XrCfg  # isort: skip
 from isaaclab_tasks.contrib.robot_pov_camera_cfg import robot_pov_camera_cfg  # isort: skip
 
 
-def _build_gr1t2_pickplace_pipeline():
-    """Build an IsaacTeleop retargeting pipeline for GR1T2 pick-place teleoperation.
+def build_gr1t2_pickplace_pipeline():
+    """Build an Isaac Capture retargeting pipeline for GR1T2 pick-place teleoperation.
 
     Creates two Se3AbsRetargeters for left and right wrist pose tracking and
     two DexHandRetargeters for left and right dexterous hand finger control
@@ -284,7 +283,7 @@ class ObjectTableSceneCfg(InteractiveSceneCfg):
         init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.55, 0.0], rot=[0.0, 0.0, 0.0, 1.0]),
         spawn=UsdFileCfg(
             usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/PackingTable/packing_table.usd",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            rigid_props=sim_utils.UsdPhysicsRigidBodyCfg(kinematic_enabled=True),
         ),
     )
 
@@ -294,12 +293,13 @@ class ObjectTableSceneCfg(InteractiveSceneCfg):
         spawn=UsdFileCfg(
             usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Mimic/pick_place_task/pick_place_assets/steering_wheel.usd",
             scale=(0.75, 0.75, 0.75),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+            rigid_props=sim_utils.UsdPhysicsRigidBodyCfg(),
         ),
     )
 
     # Humanoid robot configured for pick-place manipulation tasks
-    robot: ArticulationCfg = GR1T2_HIGH_PD_CFG.replace(
+    robot: ArticulationCfg = replace(
+        GR1T2_HIGH_PD_CFG,
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0, 0, 0.93),
@@ -535,12 +535,10 @@ class PickPlaceGR1T2ObservationsCfg(ObservationsCfg):
     @configclass
     class PolicyCfg(ObservationsCfg.PolicyCfg):
         robot_pov_cam = ObsTerm(
-            func=base_mdp.image,
+            func=base_mdp.image_rgb,
             params={
                 "sensor_cfg": SceneEntityCfg("robot_pov_cam"),
-                "data_type": "rgb",
                 "normalize": False,
-                "clone": False,
             },
         )
 
@@ -585,7 +583,7 @@ class PickPlaceGR1T2EnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the GR1T2 environment."""
 
     # Scene settings
-    scene: PickPlaceGR1T2SceneCfg = PickPlaceGR1T2SceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=True)
+    scene: PickPlaceGR1T2SceneCfg = PickPlaceGR1T2SceneCfg(num_envs=1, env_spacing=2.5)
     # Basic settings
     observations: PickPlaceGR1T2ObservationsCfg = PickPlaceGR1T2ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
@@ -649,7 +647,7 @@ class PickPlaceGR1T2EnvCfg(ManagerBasedRLEnvCfg):
         self.decimation = 6
         self.episode_length_s = 20.0
         # visualizer camera settings
-        self.sim.default_visualizer_cfg = VisualizerCfg(eye=(7.5, 7.5, 7.5), lookat=(0.0, 0.0, 0.0))
+        self.sim.visualizer_cfgs = VisualizerCfg(eye=(7.5, 7.5, 7.5), lookat=(0.0, 0.0, 0.0))
         # simulation settings
         self.sim.dt = 1 / 120  # 120Hz
         self.sim.render_interval = 2
@@ -659,32 +657,36 @@ class PickPlaceGR1T2EnvCfg(ManagerBasedRLEnvCfg):
         self.actions.upper_body_ik.controller.usd_path = self.scene.robot.spawn.usd_path
         self.actions.upper_body_ik.controller.urdf_output_dir = self.temp_urdf_dir
 
-        # IsaacTeleop-based teleoperation pipeline.
-        self.xr = XrCfg(
-            anchor_pos=(0.0, 0.0, 0.0),
-            anchor_rot=(0.0, 0.0, 0.0, 1.0),
-        )
-        self.isaac_teleop = IsaacTeleopCfg(
-            pipeline_builder=lambda: _build_gr1t2_pickplace_pipeline()[0],
-            sim_device=self.sim.device,
-            xr_cfg=self.xr,
-            xr_camera_feeds=[
-                XrCameraFeedCfg(
-                    camera_name="robot_pov_cam",
-                    enable_dlss_ray_reconstruction=True,
-                    dlss_exec_mode="quality",
-                    offset_m=(0.0, -0.15),
-                    max_update_hz=0.0,
-                )
-            ],
-        )
         self.image_obs_list = ["robot_pov_cam"]
 
-        # Per-finger haptic glove feedback: vibrate each finger of the operator's
-        # glove in proportion to how tightly it grips the object. The session
-        # always requests the push-tensor extension the glove device needs, so
-        # this stays inert (no glove connected) rather than failing.
-        self.haptic_feedback = GloveHapticFeedbackCfg(
-            left_sensor_name="left_hand_contact",
-            right_sensor_name="right_hand_contact",
-        )
+        if ISAACLAB_TELEOP_AVAILABLE:
+            from isaaclab_teleop import GloveHapticFeedbackCfg, IsaacTeleopCfg, XrCameraFeedCfg, XrCfg
+
+            # Isaac Capture-based teleoperation pipeline.
+            self.xr = XrCfg(
+                anchor_pos=(0.0, 0.0, 0.0),
+                anchor_rot=(0.0, 0.0, 0.0, 1.0),
+            )
+            self.isaac_teleop = IsaacTeleopCfg(
+                pipeline_builder=lambda: build_gr1t2_pickplace_pipeline()[0],
+                sim_device=self.sim.device,
+                xr_cfg=self.xr,
+                xr_camera_feeds=[
+                    XrCameraFeedCfg(
+                        camera_name="robot_pov_cam",
+                        enable_dlss_ray_reconstruction=True,
+                        dlss_exec_mode="quality",
+                        offset_m=(0.0, -0.15),
+                        max_update_hz=0.0,
+                    )
+                ],
+            )
+
+            # Per-finger haptic glove feedback: vibrate each finger of the operator's
+            # glove in proportion to how tightly it grips the object. The session
+            # always requests the push-tensor extension the glove device needs, so
+            # this stays inert (no glove connected) rather than failing.
+            self.haptic_feedback = GloveHapticFeedbackCfg(
+                left_sensor_name="left_hand_contact",
+                right_sensor_name="right_hand_contact",
+            )

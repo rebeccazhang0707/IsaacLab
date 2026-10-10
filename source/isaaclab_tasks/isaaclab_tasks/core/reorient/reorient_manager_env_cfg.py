@@ -22,13 +22,18 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sim.simulation_cfg import SimulationCfg
+from isaaclab.sim import SimulationCfg
 from isaaclab.sim.spawners.materials import RigidBodyMaterialBaseCfg
-from isaaclab.utils.configclass import configclass
-from isaaclab.visualizers import VisualizerCfg
+from isaaclab.utils import configclass
 
-import isaaclab_tasks.core.reorient.mdp as mdp
 from isaaclab_tasks.utils import PresetCfg
+
+from . import mdp
+from .utils import GOAL_MARKER_OFFSET, VISUALIZER_CFG
+
+##
+# Scene definition
+##
 
 
 @configclass
@@ -47,6 +52,11 @@ class ReorientSceneBaseCfg(InteractiveSceneCfg):
     )
 
 
+##
+# MDP settings
+##
+
+
 @configclass
 class CommandsCfg:
     """In-hand goal pose, re-drawn on success."""
@@ -57,7 +67,7 @@ class CommandsCfg:
         update_goal_on_success=True,
         orientation_success_threshold=MISSING,
         make_quat_unique=False,
-        fixed_marker_pos=(-0.2, -0.45, 0.68),
+        marker_pos_offset=GOAL_MARKER_OFFSET,
         debug_vis=True,
     )
 
@@ -171,6 +181,11 @@ class TerminationsCfg:
     )
 
 
+##
+# Environment configuration
+##
+
+
 @configclass
 class ReorientManagerEnvBaseCfg(ManagerBasedRLEnvCfg):
     """Manager-based reorientation with Direct-compatible semantics.
@@ -188,19 +203,24 @@ class ReorientManagerEnvBaseCfg(ManagerBasedRLEnvCfg):
     goal_marker_cfg: VisualizationMarkersCfg = MISSING
     """Marker spawned at the goal pose."""
 
+    # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     commands: CommandsCfg = CommandsCfg()
+    # MDP settings
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
 
+    # general settings
     episode_length_s = 10.0
+    # simulation settings
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 120,
         physics_material=RigidBodyMaterialBaseCfg(static_friction=1.0, dynamic_friction=1.0),
     )
 
     def __post_init__(self):
+        """Post initialization."""
         for group in vars(self.observations).values():
             for name in ("fingertip_pose", "fingertip_vel"):
                 term = getattr(group, name, None)
@@ -212,8 +232,12 @@ class ReorientManagerEnvBaseCfg(ManagerBasedRLEnvCfg):
         self.commands.object_pose.orientation_success_threshold = self.goal_orientation_threshold
         self.commands.object_pose.goal_pose_visualizer_cfg = self.goal_marker_cfg
         self.sim.render_interval = self.decimation
-        # Frame the hand, which lies horizontal around (0, -0.25, 0.51). Looking at the origin
-        # from 2 m away renders a 20 cm hand a few pixels wide, so a recorded video shows nothing.
-        self.sim.default_visualizer_cfg = VisualizerCfg(
-            eye=(0.62, -0.80, 0.85), lookat=(0.0, -0.28, 0.53), focal_length=35.0
-        )
+
+    def play_mode(self) -> None:
+        """Frame one hand after applying the shared play-mode scene size."""
+        super().play_mode()
+        viewers = self.sim.visualizer_cfgs
+        for viewer in viewers if isinstance(viewers, list) else [viewers]:
+            viewer.eye = VISUALIZER_CFG.eye
+            viewer.lookat = VISUALIZER_CFG.lookat
+            viewer.focal_length = VISUALIZER_CFG.focal_length

@@ -4,12 +4,20 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import glob
+import importlib.metadata
+import json
+import logging
 import os
 import shutil
 import subprocess
+from datetime import date
+from typing import Any
 
 import jinja2
+import tomllib
 from common import MULTI_AGENT_ALGORITHMS, SINGLE_AGENT_ALGORITHMS, TASKS_DIR, TEMPLATE_DIR
+
+logger = logging.getLogger(__name__)
 
 jinja_env = jinja2.Environment(
     loader=jinja2.FileSystemLoader(TEMPLATE_DIR),
@@ -20,7 +28,7 @@ jinja_env = jinja2.Environment(
 
 
 def _setup_git_repo(project_dir: str) -> None:
-    """Setup the git repository.
+    """Set up the git repository with an initial commit, warning with the commands left to run if one fails.
 
     Args:
         project_dir: The directory of the project.
@@ -30,10 +38,19 @@ def _setup_git_repo(project_dir: str) -> None:
         ["git", "add", "-f", "."],
         ["git", "commit", "-q", "-m", "Initial commit"],
     ]
-    for command in commands:
+    for index, command in enumerate(commands):
         result = subprocess.run(command, capture_output=True, text=True, cwd=project_dir)
         for line in result.stdout.splitlines():
             print(f"  |  {line}")
+        if result.returncode != 0:
+            remaining = "\n".join(
+                " ".join(f'"{arg}"' if " " in arg else arg for arg in pending) for pending in commands[index:]
+            )
+            logger.warning(
+                f"'{' '.join(command[:2])}' failed with exit code {result.returncode}:\n{result.stderr.strip()}\n"
+                f"Fix the error above, then run in {project_dir}:\n{remaining}"
+            )
+            return
 
 
 def _write_file(dst: str, content: str) -> None:
@@ -74,23 +91,13 @@ def _generate_task_per_workflow(task_dir: str, specification: dict) -> None:
                     f" algorithm '{algorithm}'. Add the template or drop the algorithm from the selection."
                 ) from exc
             _write_file(os.path.join(agents_dir, file_name + file_ext), content=template.render(**specification))
-    if task_spec["workflow"]["name"] == "direct":
-        template = jinja_env.get_template(f"tasks/direct_{task_spec['workflow']['type']}/env_cfg")
-        _write_file(
-            os.path.join(task_dir, f"{task_spec['env_cfg_filename']}.py"), content=template.render(**specification)
-        )
-        template = jinja_env.get_template(f"tasks/direct_{task_spec['workflow']['type']}/env")
-        _write_file(os.path.join(task_dir, f"{task_spec['env_filename']}.py"), content=template.render(**specification))
-    elif task_spec["workflow"]["name"] == "manager-based":
-        template = jinja_env.get_template(f"tasks/manager-based_{task_spec['workflow']['type']}/env_cfg")
-        _write_file(
-            os.path.join(task_dir, f"{task_spec['env_cfg_filename']}.py"), content=template.render(**specification)
-        )
-        shutil.copytree(
-            os.path.join(TEMPLATE_DIR, "tasks", f"manager-based_{task_spec['workflow']['type']}", "mdp"),
-            os.path.join(task_spec["family_dir"], "mdp"),
-            dirs_exist_ok=True,
-        )
+    initial_content = specification.get("initial_content", "cartpole") if specification["external"] else "cartpole"
+    template = jinja_env.get_template(f"tasks/{initial_content}.jinja")
+    task_files = template.make_module(specification).files
+    for filename, content in task_files.items():
+        destination = os.path.join(task_spec["family_dir"], filename)
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        _write_file(destination, content=content)
 
 
 def _generate_tasks(specification: dict, task_dir: str) -> list[dict]:
@@ -115,6 +122,18 @@ def _generate_tasks(specification: dict, task_dir: str) -> list[dict]:
         for item in robot_name.split("_")
     )
     for workflow in specification["workflows"]:
+        supported_algorithms = SINGLE_AGENT_ALGORITHMS if workflow["type"] == "single-agent" else MULTI_AGENT_ALGORITHMS
+        preferred_algorithm = "ppo" if workflow["type"] == "single-agent" else "mappo"
+        task_rl_libraries = []
+        for rl_library in specification["rl_libraries"]:
+            algorithms = [
+                algorithm for algorithm in rl_library.get("algorithms", []) if algorithm.upper() in supported_algorithms
+            ]
+            if algorithms:
+                canonical_algorithm = preferred_algorithm if preferred_algorithm in algorithms else algorithms[0]
+                task_rl_libraries.append(
+                    {**rl_library, "algorithms": algorithms, "canonical_algorithm": canonical_algorithm}
+                )
         task_name = general_task_name + ("-Marl" if workflow["type"] == "multi-agent" else "")
         filename = task_name.replace("-", "_").lower()
         family_name = f"{filename}_direct" if workflow["name"] == "direct" else filename
@@ -132,6 +151,9 @@ def _generate_tasks(specification: dict, task_dir: str) -> list[dict]:
             "env_cfg_filename": "env_cfg" if specification["external"] else f"{filename}_env_cfg",
             "env_filename": "env" if specification["external"] else f"{filename}_env",
             "id": task_id,
+            "amp_selected": any(
+                rl_library["name"] == "skrl" and "amp" in rl_library["algorithms"] for rl_library in task_rl_libraries
+            ),
         }
         print(f"  |    |-- Generating '{task['id']}' task...")
         for package_dir in (family_dir, os.path.join(family_dir, "config")):
@@ -139,7 +161,7 @@ def _generate_tasks(specification: dict, task_dir: str) -> list[dict]:
             package_init = os.path.join(package_dir, "__init__.py")
             if not os.path.exists(package_init):
                 shutil.copyfile(os.path.join(TEMPLATE_DIR, "extension", "__init__task_family"), package_init)
-        task_specification = {**specification, "task": task}
+        task_specification = {**specification, "task": task, "rl_libraries": task_rl_libraries}
         _generate_task_per_workflow(task["dir"], task_specification)
         specifications.append(task_specification)
     return specifications
@@ -154,10 +176,13 @@ def _external(specification: dict) -> None:
     name = specification["name"]
     project_dir = os.path.join(specification["path"], name)
     os.makedirs(project_dir, exist_ok=True)
+    specification = _prepare_external_dependencies(specification, project_dir)
     print("  |-- Copying repo files...")
-    for filename in [".gitattributes", ".gitignore", ".pre-commit-config.yaml", "LICENSE"]:
+    for filename in [".gitattributes", ".gitignore", ".pre-commit-config.yaml"]:
         shutil.copyfile(os.path.join(TEMPLATE_DIR, "external", filename), os.path.join(project_dir, filename))
-    template = jinja_env.get_template("external/pyproject.toml")
+    template = jinja_env.get_template("external/LICENSE")
+    _write_file(os.path.join(project_dir, "LICENSE"), content=template.render(**specification))
+    template = jinja_env.get_template("external/pyproject.toml.jinja")
     _write_file(os.path.join(project_dir, "pyproject.toml"), content=template.render(**specification))
     print("  |-- Copying utility scripts...")
     scripts_dir = os.path.join(project_dir, "scripts")
@@ -173,6 +198,13 @@ def _external(specification: dict) -> None:
     shutil.copyfile(os.path.join(TEMPLATE_DIR, "extension", "__init__tasks"), os.path.join(tasks_dir, "__init__.py"))
     template = jinja_env.get_template("external/__init__package")
     _write_file(os.path.join(module_dir, "__init__.py"), content=template.render(**specification))
+    print("  |-- Creating project asset structure...")
+    assets_dir = os.path.join(module_dir, "assets")
+    asset_data_dir = os.path.join(assets_dir, "data")
+    os.makedirs(asset_data_dir, exist_ok=True)
+    _write_file(os.path.join(asset_data_dir, ".gitkeep"), "")
+    template = jinja_env.get_template("external/__init__assets")
+    _write_file(os.path.join(assets_dir, "__init__.py"), content=template.render(**specification))
     template = jinja_env.get_template("external/README.md")
     _write_file(
         os.path.join(project_dir, "README.md"), content=template.render(specifications=specifications, **specification)
@@ -215,6 +247,81 @@ def _external(specification: dict) -> None:
     print("-" * 80)
 
 
+def _prepare_external_dependencies(specification: dict, project_dir: str) -> dict:
+    """Resolve generated dependencies against a wheel or the active source checkout."""
+    specification = specification.copy()
+    source_path = specification.get("isaaclab_source_path")
+    if not source_path:
+        # Accept patch releases of the installed version, without its local label such as "+build7".
+        installed_version = specification.get("isaaclab_version")
+        specification["isaaclab_release"] = installed_version.split("+", 1)[0] if installed_version else None
+        specification["isaaclab_dependency"] = "isaaclab"
+        specification["isaaclab_environments"] = []
+        specification["isaaclab_indexes"] = []
+        specification["isaaclab_overrides"] = []
+        specification["isaaclab_sources"] = []
+        optional_extras = specification.get("isaaclab_optional_extras")
+        if optional_extras is None:
+            optional_extras = importlib.metadata.distribution("isaaclab").metadata.get_all("Provides-Extra") or []
+        specification["isaaclab_optional_extras"] = sorted(set(optional_extras))
+        return specification
+
+    source_root = os.path.realpath(source_path)
+    with open(os.path.join(source_root, "pyproject.toml"), "rb") as file:
+        source_config = tomllib.load(file)
+
+    uv_config = source_config["tool"]["uv"]
+    sources = []
+    for package_name, source in source_config["tool"]["uv"]["sources"].items():
+        if isinstance(source, dict) and "path" in source:
+            source = source.copy()
+            package_path = os.path.join(source_root, source["path"])
+            source["path"] = _project_source_path(package_path, project_dir)
+        sources.append({"name": package_name, "value": _format_toml_value(source)})
+    sources.append(
+        {
+            "name": source_config["project"]["name"],
+            "value": _format_toml_value(
+                {
+                    "path": _project_source_path(source_root, project_dir),
+                    "editable": True,
+                }
+            ),
+        }
+    )
+    specification["isaaclab_dependency"] = source_config["project"]["name"]
+    specification["isaaclab_release"] = None
+    specification["isaaclab_optional_extras"] = sorted(source_config["project"].get("optional-dependencies", {}).keys())
+    specification["isaaclab_environments"] = uv_config.get("environments", [])
+    specification["isaaclab_indexes"] = uv_config.get("index", [])
+    specification["isaaclab_overrides"] = uv_config.get("override-dependencies", [])
+    specification["isaaclab_sources"] = sorted(sources, key=lambda source: source["name"])
+    return specification
+
+
+def _project_source_path(source_path: str, project_dir: str) -> str:
+    """Return a portable source path, falling back to absolute paths across Windows drives."""
+    try:
+        path = os.path.relpath(source_path, project_dir)
+    except ValueError:
+        path = os.path.realpath(source_path)
+    return path.replace("\\", "/")
+
+
+def _format_toml_value(value: Any) -> str:
+    """Format the subset of TOML values used by ``tool.uv.sources``."""
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, list):
+        return "[" + ", ".join(_format_toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        items = ", ".join(f"{key} = {_format_toml_value(item)}" for key, item in value.items())
+        return "{ " + items + " }"
+    raise TypeError(f"Unsupported TOML value: {value!r}")
+
+
 def get_algorithms_per_rl_library(single_agent: bool = True, multi_agent: bool = True):
     assert single_agent or multi_agent, "At least one of 'single_agent' or 'multi_agent' must be True"
     data = {"rsl_rl": [], "rl_games": [], "skrl": [], "sb3": []}
@@ -245,20 +352,49 @@ def generate(specification: dict) -> None:
     print("\nValidating specification...")
     specification = specification.copy()
     assert "external" in specification, "External flag is required"
-    assert specification.get("name", "").isidentifier(), "Name must be a valid identifier"
+    assert specification.get("name", "").isascii() and specification["name"].isidentifier(), (
+        "Name must be an ASCII identifier"
+    )
     if specification["external"]:
         specification.setdefault("task_name", "balance")
         specification.setdefault("robot_name", "cartpole")
         specification.setdefault("include_ui_extension", False)
+        specification.setdefault("initial_content", "cartpole")
+        specification.setdefault("authors", ["Isaac Lab Project Developers"])
+        specification["copyright_year"] = date.today().year
         specification["task_id_prefix"] = "".join(item.capitalize() for item in specification["name"].split("_"))
-        assert specification["task_name"].isidentifier(), "Task family name must be a valid identifier"
-        assert specification["robot_name"].isidentifier(), "Robot/config name must be a valid identifier"
+        assert specification["authors"] and all(author.strip() for author in specification["authors"]), (
+            "At least one author is required"
+        )
+        specification["authors_toml"] = json.dumps(", ".join(specification["authors"]))[1:-1]
+        assert specification["initial_content"] in ("blank", "cartpole", "stubbed"), "Invalid initial project content"
+        assert specification["task_name"].isascii() and specification["task_name"].isidentifier(), (
+            "Task family name must be an ASCII identifier"
+        )
+        assert specification["robot_name"].isascii() and specification["robot_name"].isidentifier(), (
+            "Robot/config name must be an ASCII identifier"
+        )
     for workflow in specification["workflows"]:
         assert workflow["name"] in ["direct", "manager-based"], f"Invalid workflow: {workflow}"
         assert workflow["type"] in ["single-agent", "multi-agent"], f"Invalid workflow type: {workflow}"
+        if workflow["name"] == "manager-based" and workflow["type"] == "multi-agent":
+            raise ValueError("Manager-based workflows only support single-agent tasks")
+    selected_workflow_types = {workflow["type"] for workflow in specification["workflows"]}
+    allowed_algorithms = set()
+    if "single-agent" in selected_workflow_types:
+        allowed_algorithms.update(algorithm.lower() for algorithm in SINGLE_AGENT_ALGORITHMS)
+    if "multi-agent" in selected_workflow_types:
+        allowed_algorithms.update(algorithm.lower() for algorithm in MULTI_AGENT_ALGORITHMS)
+    normalized_libraries = []
+    for rl_library in specification["rl_libraries"]:
+        algorithms = [algorithm.lower() for algorithm in rl_library.get("algorithms", [])]
+        invalid_algorithms = sorted(set(algorithms) - allowed_algorithms)
+        if invalid_algorithms:
+            raise ValueError(f"Algorithms {invalid_algorithms} are not supported by the selected workflows")
+        normalized_libraries.append({**rl_library, "algorithms": algorithms})
+    specification["rl_libraries"] = normalized_libraries
     if specification["external"]:
         assert "path" in specification, "Path is required for external projects"
-    if specification["external"]:
         print("Generating external project...")
         _external(specification)
     else:

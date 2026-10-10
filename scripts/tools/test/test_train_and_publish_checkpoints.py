@@ -6,12 +6,15 @@
 """Tests for the pretrained-checkpoint training utility."""
 
 from argparse import Namespace
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
+import gymnasium as gym
 import pytest
 
-from isaaclab_tasks.utils.preset_target import PresetTarget
+from isaaclab_tasks.utils.hydra import PresetTarget, collect_presets, enumerate_task_presets
+from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 
 from scripts.tools.train_and_publish_checkpoints import (
     CheckpointJob,
@@ -22,6 +25,42 @@ from scripts.tools.train_and_publish_checkpoints import (
     collect_pretrained_checkpoint,
     publish_pretrained_checkpoint,
 )
+
+
+def test_cartpole_feature_presets_are_in_pretrained_checkpoint_matrix() -> None:
+    """Every Cartpole feature policy for the preferred workflow must receive a distinct checkpoint."""
+    task_spec = gym.spec("Isaac-Cartpole-Camera")
+    workflow = task_spec.kwargs["default_agent"]
+    agent_cfg = load_cfg_from_registry(task_spec.id, f"{workflow}_cfg_entry_point")
+    feature_presets = set(collect_presets(agent_cfg)[""]) - {"default"}
+
+    assert set(task_spec.kwargs["pretrained_checkpoint_preset_compatibility"][workflow]) == feature_presets
+
+
+def test_checkpoint_preset_metadata_references_registered_variants() -> None:
+    """Checkpoint declarations must name registered workflows and domain presets."""
+    for task_spec in gym.registry.values():
+        checkpoint_declarations = [
+            (workflow, preset_names)
+            for metadata_key in (
+                "pretrained_checkpoint_preset_compatibility",
+                "pretrained_checkpoint_training_presets",
+            )
+            for workflow, preset_names in task_spec.kwargs.get(metadata_key, {}).items()
+        ]
+        if not checkpoint_declarations:
+            continue
+
+        preset_map = enumerate_task_presets(task_spec.id) or {}
+        domain_presets = set(preset_map.get(PresetTarget.DOMAIN, ()))
+        for workflow, preset_names in checkpoint_declarations:
+            assert f"{workflow}_cfg_entry_point" in task_spec.kwargs, (
+                f"{task_spec.id}: unregistered {workflow} workflow"
+            )
+            assert len(preset_names) == len(set(preset_names)), (
+                f"{task_spec.id}: duplicate {workflow} checkpoint preset"
+            )
+            assert not set(preset_names) - domain_presets, f"{task_spec.id}: unknown {workflow} checkpoint preset"
 
 
 def test_build_core_jobs_skips_unsupported_preset_without_normalizing_default(
@@ -72,16 +111,23 @@ def test_job_commands_use_uv_run_isaaclab() -> None:
 
 
 def test_build_core_jobs_includes_declared_checkpoint_presets(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Core jobs must include preset-specific checkpoints declared by the task."""
+    """Published and unpublished presets share a stable matrix without duplicate jobs or registry mutation."""
     task_spec = SimpleNamespace(
         id="Isaac-Test",
         kwargs={
             "env_cfg_entry_point": "isaaclab_tasks.core.test:TestEnvCfg",
             "rl_games_cfg_entry_point": "isaaclab_tasks.core.test:TestAgentCfg",
             "rsl_rl_cfg_entry_point": "isaaclab_tasks.core.test:TestAgentCfg",
+            "skrl_cfg_entry_point": "isaaclab_tasks.core.test:TestAgentCfg",
             "pretrained_checkpoint_preset_compatibility": {"rl_games": ("depth",)},
+            "pretrained_checkpoint_training_presets": {
+                "rl_games": ("depth", "rgb"),
+                "rsl_rl": ("hold",),
+                "skrl": ("vision",),
+            },
         },
     )
+    registry_kwargs = deepcopy(task_spec.kwargs)
     monkeypatch.setattr("scripts.tools.train_and_publish_checkpoints.gym.registry", {task_spec.id: task_spec})
     monkeypatch.setattr("scripts.tools.train_and_publish_checkpoints.parse_env_cfg", lambda _: object())
     monkeypatch.setattr("scripts.tools.train_and_publish_checkpoints.enumerate_task_presets", lambda _: {})
@@ -93,7 +139,29 @@ def test_build_core_jobs_includes_declared_checkpoint_presets(monkeypatch: pytes
 
     jobs = _build_core_jobs(args)
 
-    assert [(job.workflow, job.preset_names) for job in jobs] == [("rsl_rl", ()), ("rl_games", ("depth",))]
+    assert [(job.workflow, job.preset_names) for job in jobs] == [
+        ("rsl_rl", ()),
+        ("rsl_rl", ("hold",)),
+        ("rl_games", ("depth",)),
+        ("rl_games", ("rgb",)),
+        ("skrl", ("vision",)),
+    ]
+    assert task_spec.kwargs == registry_kwargs
+
+
+def test_build_core_jobs_includes_franka_holding_training_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unpublished Franka holding policies remain trainable under their preset-specific checkpoint names."""
+    task_spec = gym.spec("Isaac-Reach-Franka")
+    monkeypatch.setattr("scripts.tools.train_and_publish_checkpoints.gym.registry", {task_spec.id: task_spec})
+    args = Namespace(physics_backends="newtonmjwarp", render_backends="newton", max_iterations=None, num_envs=None)
+
+    jobs = _build_core_jobs(args)
+
+    assert len(jobs) == 2
+    default_job, holding_job = jobs
+    assert default_job.experiment_name == "Isaac-Reach-Franka_newtonmjwarp_none_rsl_rl"
+    assert holding_job.experiment_name == "Isaac-Reach-Franka_hold_newtonmjwarp_none_rsl_rl"
+    assert _training_command(holding_job, args, smoke=False)[-2:] == ["physics=newton_mjwarp", "presets=hold"]
 
 
 def test_select_physics_variants_uses_concrete_isaac_sim_physx() -> None:

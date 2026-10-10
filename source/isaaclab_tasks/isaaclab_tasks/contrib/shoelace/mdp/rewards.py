@@ -15,7 +15,8 @@ import torch
 
 from isaaclab.managers import ManagerTermBase
 
-from .observations import finger_tail_signed_distance, tail_tcp_relative_speed, tails_to_tcp
+from .grasp import bilateral_score, filter_grasps, hamacher_product, shoelace_grasp_quality
+from .observations import tails_to_tcp
 from .utils import tail_outward_x, tail_x_separation
 
 if TYPE_CHECKING:
@@ -64,57 +65,6 @@ def shoelace_success_reward(env: ManagerBasedRLEnv) -> torch.Tensor:
     return env.termination_manager.get_term("success").float() / env.step_dt
 
 
-def shoelace_grasp_quality(
-    env: ManagerBasedRLEnv,
-    contact_std: float,
-    relative_speed_std: float,
-    open_position: float,
-    closed_position: float,
-    cable_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
-    robot_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
-    contact_penetration_tolerance: float = 0.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute shared unfiltered grasp quality for acquisition, retention, and success.
-
-    Args:
-        env: Shoelace environment with current finger-tail contact observations.
-        contact_std: Finger-tail surface-distance width [m].
-        relative_speed_std: Tail-to-TCP relative-speed width [m/s].
-        open_position: Open finger joint position [m].
-        closed_position: Closed finger joint position [m].
-        cable_cfgs: Left and right cable scene entities.
-        robot_cfgs: Left and right robot entities with resolved finger joint and hand body indices.
-        contact_penetration_tolerance: Allowed contact-solver penetration [m].
-
-    Returns:
-        Raw grasp qualities in robot-arm order, shape [N, 2], and finite-input flags, shape [N].
-        Quality combines two-finger contact, actual closure, and low relative slip, not measured force closure.
-
-    Raises:
-        ValueError: If contact penetration tolerance is not finite and nonnegative.
-    """
-    if not math.isfinite(contact_penetration_tolerance) or contact_penetration_tolerance < 0.0:
-        raise ValueError("contact_penetration_tolerance must be finite and nonnegative")
-    signed_distance = finger_tail_signed_distance(env).reshape(env.num_envs, 2, 2)
-    relative_speed = tail_tcp_relative_speed(env, cable_cfgs, robot_cfgs)
-    positions = torch.stack(
-        [env.scene[cfg.name].data.joint_pos.torch[:, cfg.joint_ids[0]] for cfg in robot_cfgs], dim=1
-    )
-    closure = ((open_position - positions) / max(open_position - closed_position, 1.0e-6)).clamp(0.0, 1.0)
-    finite = (
-        torch.isfinite(signed_distance).all(dim=(1, 2))
-        & torch.isfinite(relative_speed).all(dim=1)
-        & torch.isfinite(closure).all(dim=1)
-    )
-    # Tolerate bounded solver penetration under load, without rewarding gaps or deeper penetration.
-    contact_error = signed_distance.clamp_min(0.0) + (-signed_distance - contact_penetration_tolerance).clamp_min(0.0)
-    finger_contact = torch.exp(-torch.square(contact_error / max(contact_std, 1.0e-6)))
-    contact = _hamacher_product(finger_contact[:, :, 0], finger_contact[:, :, 1])
-    grasp = _hamacher_product(contact, closure)
-    motion_match = 1.0 - torch.tanh(relative_speed / max(relative_speed_std, 1.0e-6))
-    return _hamacher_product(grasp, motion_match), finite
-
-
 class dense_task_reward(ManagerTermBase):
     """Stateful progress reward for acquiring and pulling the two free tails.
 
@@ -124,7 +74,7 @@ class dense_task_reward(ManagerTermBase):
         - Phase metrics under ``Metrics/shoelace/`` average only environments with finite reward inputs.
         - ``pull_left_displacement_m`` and ``pull_right_displacement_m`` report signed outward tail
           displacement [m] from the first valid sample after reset, independently of grasp quality.
-        - ``pull_left_score`` and ``pull_right_score`` retain the legacy grasp-gated diagnostic scores
+        - ``pull_left_score`` and ``pull_right_score`` report grasp-gated diagnostic scores
           in [0, 1], not distances or the new-record pull reward.
         - ``valid_fraction`` measures numerical input validity, not grasp quality or task success.
         - ``success_rate`` averages the latest completed result per environment, excluding those with
@@ -173,29 +123,21 @@ class dense_task_reward(ManagerTermBase):
         bilateral_approach_fraction: float = 0.5,
         bilateral_grasp_fraction: float = 0.7,
         contact_penetration_tolerance: float = 0.0,
-        pull_use_high_water_mark: bool = False,
         pull_grasp_threshold: float = 0.2,
     ) -> torch.Tensor:
         """Return the signed rate of acquisition-and-pull progress [1/s].
 
-        Reward composition:
-            1. Acquisition: independent approach and grasp credit plus bilateral bonuses. Each grasp
-               combines two-finger contact, actual closure, and low tail-TCP slip, independently of proximity.
-            2. Pulling: new outward-distance records with valid grasps, plus a bilateral bonus, when
-               ``pull_use_high_water_mark`` is enabled. Otherwise use the legacy grasp-gated potential.
-            3. Feedback: acquisition potential difference plus pull progress, divided by ``step_dt``.
-               The reward manager multiplies by ``step_dt`` and the term weight.
+        Combines acquisition potential differences with grasp-gated outward-distance records;
+        each includes independent-arm credit and a bilateral bonus. Acquisition penalizes moving
+        away or losing grasps; physical grasp quality is defined by :func:`shoelace_grasp_quality`.
 
         Notes:
-            - Reset: the first finite sample seeds state and returns zero; regrasping never resets references.
-            - High-water pull: starts at zero and continues beyond the per-arm separation scale. Above the
-              scale, bilateral progress follows the smaller current per-arm progress. Records advance even
-              without grasps, preventing retrospective payment on regrasp. Returning to an old position
-              cannot earn credit again. Acquisition still penalizes grasp loss and moving away from tails.
-            - Legacy pull scores start at 0.5 before grasp gating and remain available as diagnostic metrics.
-            - Invalid inputs: return zero and preserve reward history; excluded from phase metric averages.
-            - Acquisition and legacy pull cycles cancel without discounting. High-water pull pays once for
-              new records, not for repeated cycles. Neither mode claims discounted policy invariance.
+            - The first finite sample seeds history without reward; invalid samples pay zero and
+              preserve history. Regrasping never resets baselines or records.
+            - Pull records advance even without grasps, preventing passive-motion and repeated-cycle
+              credit. Progress is unbounded; beyond the separation scale, bilateral progress follows
+              the trailing arm. Diagnostic pull scores instead start at 0.5 before grasp gating.
+            - Acquisition cycles cancel without discounting; discounted policy invariance is not claimed.
 
         Args:
             env: The task environment.
@@ -215,13 +157,12 @@ class dense_task_reward(ManagerTermBase):
             bilateral_grasp_fraction: Bilateral share of grasp acquisition in [0, 1]; zero gives the per-arm mean.
             contact_penetration_tolerance: Accepted contact-solver penetration [m]. Positive gaps and
                 penetration beyond this tolerance still reduce grasp quality.
-            pull_use_high_water_mark: Reward only new physical progress records instead of changes in
-                grasp-gated potential. The default preserves legacy direct-call behavior.
             pull_grasp_threshold: Minimum current and filtered grasp quality for each arm's record credit;
-                both arms must qualify for new bilateral records. Used only in high-water mode.
+                both arms must qualify for new bilateral records.
 
         Returns:
-            Signed reward rates [1/s], shape [N]. High-water pull has no fixed total reward cap.
+            Signed reward rates [1/s], shape [N]. RewardManager cancels the timestep division
+            and applies the term weight. High-water pull has no fixed total reward cap.
 
         Raises:
             ValueError: If scene entities, reward budgets, or the separation target are invalid.
@@ -264,13 +205,17 @@ class dense_task_reward(ManagerTermBase):
         )
 
         approach = 1.0 - torch.tanh(tail_distances / max(reach_std, 1.0e-6))
-        filtered_per_gripper_grasp = _filter_grasps(
-            self._filtered_per_gripper_grasp, per_gripper_grasp, finite, env.step_dt, grasp_filter_time_constant
+        filtered_per_gripper_grasp = filter_grasps(
+            self._filtered_per_gripper_grasp,
+            per_gripper_grasp,
+            finite,
+            env.step_dt,
+            max(grasp_filter_time_constant, 1.0e-6),
         )
-        bilateral_grasp = _hamacher_product(filtered_per_gripper_grasp[:, 0], filtered_per_gripper_grasp[:, 1])
+        bilateral_grasp = hamacher_product(filtered_per_gripper_grasp[:, 0], filtered_per_gripper_grasp[:, 1])
         # Independent credit starts either arm; cooperation makes acquiring the other arm more valuable.
-        approach_score = _bilateral_score(approach, bilateral_approach_fraction)
-        grasp_score = _bilateral_score(filtered_per_gripper_grasp, bilateral_grasp_fraction)
+        approach_score = bilateral_score(approach, bilateral_approach_fraction)
+        grasp_score = bilateral_score(filtered_per_gripper_grasp, bilateral_grasp_fraction)
         acquire = approach_fraction * approach_score + (1.0 - approach_fraction) * grasp_score
 
         # Keep each reference fixed until episode reset; releasing/regrasping must not renew pull credit.
@@ -285,29 +230,22 @@ class dense_task_reward(ManagerTermBase):
         # Start at 0.5 so outward motion below the reset baseline still changes the potential smoothly.
         per_arm_progress = 0.5 * (1.0 + torch.tanh(outward_displacement / pull_scale.unsqueeze(1)))
         # Gate each tail by its own grasp; the bilateral term is a bonus, not a prerequisite for pulling.
-        per_arm_pull = _hamacher_product(filtered_per_gripper_grasp, per_arm_progress)
-        pull = _bilateral_score(per_arm_pull, bilateral_pull_fraction)
+        per_arm_pull = hamacher_product(filtered_per_gripper_grasp, per_arm_progress)
         potential = acquisition_weight * acquire
-        pull_increment = torch.zeros_like(potential)
-        if pull_use_high_water_mark:
-            physical_progress = (outward_displacement / pull_scale.unsqueeze(1)).clamp_min(0.0)
-            # Preserve shaping below the scale; extend cooperation with the trailing arm beyond it.
-            bounded_progress = physical_progress.clamp_max(1.0)
-            bilateral_progress = _hamacher_product(bounded_progress[:, 0], bounded_progress[:, 1])
-            bilateral_progress += (physical_progress.amin(dim=1) - 1.0).clamp_min(0.0)
-            progress_records = torch.cat((physical_progress, bilateral_progress.unsqueeze(1)), dim=1)
-            best_progress = torch.maximum(self._best_pull_progress, progress_records)
-            new_progress = best_progress - self._best_pull_progress
-            # Raw quality prevents the filter's release tail from paying for ungrasped motion.
-            eligible = (per_gripper_grasp >= pull_grasp_threshold) & (
-                filtered_per_gripper_grasp >= pull_grasp_threshold
-            )
-            pull_increment = (1.0 - bilateral_pull_fraction) * (new_progress[:, :2] * eligible).mean(dim=1)
-            pull_increment += bilateral_pull_fraction * new_progress[:, 2] * eligible.all(dim=1)
-            # Consume even ungrasped records so closing later cannot collect passive-motion credit.
-            self._best_pull_progress.copy_(torch.where(finite.unsqueeze(1), best_progress, self._best_pull_progress))
-        else:
-            potential = potential + (1.0 - acquisition_weight) * pull
+        physical_progress = (outward_displacement / pull_scale.unsqueeze(1)).clamp_min(0.0)
+        # Preserve shaping below the scale; extend cooperation with the trailing arm beyond it.
+        bounded_progress = physical_progress.clamp_max(1.0)
+        bilateral_progress = hamacher_product(bounded_progress[:, 0], bounded_progress[:, 1])
+        bilateral_progress += (physical_progress.amin(dim=1) - 1.0).clamp_min(0.0)
+        progress_records = torch.cat((physical_progress, bilateral_progress.unsqueeze(1)), dim=1)
+        best_progress = torch.maximum(self._best_pull_progress, progress_records)
+        new_progress = best_progress - self._best_pull_progress
+        # Raw quality prevents the filter's release tail from paying for ungrasped motion.
+        eligible = (per_gripper_grasp >= pull_grasp_threshold) & (filtered_per_gripper_grasp >= pull_grasp_threshold)
+        pull_increment = (1.0 - bilateral_pull_fraction) * (new_progress[:, :2] * eligible).mean(dim=1)
+        pull_increment += bilateral_pull_fraction * new_progress[:, 2] * eligible.all(dim=1)
+        # Consume even ungrasped records so closing later cannot collect passive-motion credit.
+        self._best_pull_progress.copy_(torch.where(finite.unsqueeze(1), best_progress, self._best_pull_progress))
 
         metric_values = {
             "approach_distance_m": tail_distances.mean(dim=1),
@@ -433,10 +371,10 @@ class grasp_hold_reward(ManagerTermBase):
             robot_cfgs,
             contact_penetration_tolerance,
         )
-        filtered = _filter_grasps(
-            self._filtered_per_gripper_grasp, grasp, finite, env.step_dt, grasp_filter_time_constant
+        filtered = filter_grasps(
+            self._filtered_per_gripper_grasp, grasp, finite, env.step_dt, max(grasp_filter_time_constant, 1.0e-6)
         )
-        score = torch.where(finite, _bilateral_score(filtered, bilateral_grasp_fraction), 0.0)
+        score = torch.where(finite, bilateral_score(filtered, bilateral_grasp_fraction), 0.0)
         if full_reward_duration is None:
             return score
         remaining = (full_reward_duration - self._full_rate_time_used).clamp_min(0.0)
@@ -540,24 +478,3 @@ def _arm_action_squared_sum(env: ManagerBasedRLEnv, actions: torch.Tensor) -> to
     return actions[:, term_slices["left_arm"]].square().sum(dim=-1) + actions[:, term_slices["right_arm"]].square().sum(
         dim=-1
     )
-
-
-def _filter_grasps(
-    previous: torch.Tensor, grasp: torch.Tensor, finite: torch.Tensor, step_dt: float, time_constant: float
-) -> torch.Tensor:
-    """Update the filter in place, seeding from finite samples and preserving invalid environments."""
-    alpha = 1.0 - math.exp(-step_dt / max(time_constant, 1.0e-6))
-    filtered = torch.where(torch.isfinite(previous), previous + alpha * (grasp - previous), grasp)
-    previous.copy_(torch.where(finite.unsqueeze(1), filtered, previous))
-    return previous
-
-
-def _bilateral_score(per_arm_score: torch.Tensor, bilateral_fraction: float) -> torch.Tensor:
-    """Combine independent credit with a symmetric cooperation bonus."""
-    bilateral = _hamacher_product(per_arm_score[:, 0], per_arm_score[:, 1])
-    return (1.0 - bilateral_fraction) * per_arm_score.mean(dim=1) + bilateral_fraction * bilateral
-
-
-def _hamacher_product(a: torch.Tensor, b: torch.Tensor | float, eps: float = 1.0e-6) -> torch.Tensor:
-    """Return the Hamacher soft-AND of two values in ``[0, 1]``."""
-    return (a * b) / (a + b - a * b + eps)

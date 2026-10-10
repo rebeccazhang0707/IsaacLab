@@ -7,51 +7,24 @@
 
 from __future__ import annotations
 
-import warnings
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
-from isaaclab.utils.configclass import configclass
-from isaaclab.visualizers.visualizer_cfg import VisualizerCfg
+from isaaclab_ov.renderers import OVRTXRendererCfg
+
+from isaaclab.utils import configclass
+from isaaclab.visualizers.visualizer_cfg import VisualizerBackendCfg, VisualizerCfg
 
 if TYPE_CHECKING:
     from .newton_visualizer import NewtonGLVisualizer, NewtonRTXVisualizer
 
 
 @configclass
-class NewtonVisualizerCfg(VisualizerCfg):
-    """Shared configuration base for Newton visualizer backends.
-
-    .. deprecated::
-        :class:`NewtonVisualizerCfg` is deprecated. Use :class:`NewtonGLVisualizerCfg` for the
-        OpenGL rasterizer or :class:`NewtonRTXVisualizerCfg` for the OVRTX path tracer.
-    """
+class NewtonGLBackendCfg(VisualizerBackendCfg):
+    """Newton OpenGL rendering and model display options."""
 
     class_type: type[NewtonGLVisualizer] | str = "{DIR}.newton_visualizer:NewtonGLVisualizer"
-    """Deprecated alias for the Newton GL visualizer implementation."""
-
-    # Deprecated alias: "newton" routes to the GL backend via simulation_context._VISUALIZER_ALIASES.
     visualizer_type: str = "newton_gl"
-
-    def __post_init__(self):
-        if type(self) is NewtonVisualizerCfg:
-            warnings.warn(
-                "NewtonVisualizerCfg is deprecated and will be removed in a future release. "
-                "Use NewtonGLVisualizerCfg (OpenGL rasterizer) or NewtonRTXVisualizerCfg (OVRTX path tracer) instead.",
-                DeprecationWarning,
-                stacklevel=3,
-            )
-
-    window_width: int = 1920
-    """Window width in pixels."""
-
-    window_height: int = 1080
-    """Window height in pixels."""
-
-    headless: bool = False
-    """Run the Newton viewer without requiring a display server."""
-
-    update_frequency: int = 1
-    """Visualizer update frequency (renders every N simulation frames)."""
+    cloning_contexts: ClassVar[tuple[type | str, ...]] = ("isaaclab_newton.cloner:NewtonReplicateContext",)
 
     world_spacing: tuple[float, float, float] = (0.0, 0.0, 0.0)
     """Visual spacing between simulation worlds along each axis [m].
@@ -77,8 +50,8 @@ class NewtonVisualizerCfg(VisualizerCfg):
     show_com: bool = False
     """Show center of mass visualization."""
 
-    show_particles: bool = False
-    """Show particle visualization."""
+    show_particles: bool = True
+    """Show simulation particles. Set to False to hide them, for example in a surface-only view."""
 
     particle_color: tuple[float, float, float] | None = None
     """Optional particle color RGB [0, 1]. Uses Newton viewer defaults when ``None``."""
@@ -95,7 +68,7 @@ class NewtonVisualizerCfg(VisualizerCfg):
     """Enable shadow rendering."""
 
     enable_sky: bool = True
-    """Enable sky rendering."""
+    """Enable procedural sky rendering when ``background_color`` is ``None``."""
 
     enable_wireframe: bool = False
     """Enable wireframe rendering."""
@@ -111,64 +84,62 @@ class NewtonVisualizerCfg(VisualizerCfg):
 
 
 @configclass
-class NewtonGLVisualizerCfg(NewtonVisualizerCfg):
-    """Configuration for the Newton OpenGL rasterizer visualizer.
+class NewtonRTXBackendCfg(VisualizerBackendCfg):
+    """Simulation-owned OVRTX rendering displayed in a Newton GL window.
 
-    Selects Newton's OpenGL backend — fast local window with the full Isaac Lab
-    feature set: streaming camera panel, particle color override, and live scalar/array plots.
-
-    The streaming camera panel is enabled by default (``streaming_view=True``) but starts
-    hidden — no camera rendering work is performed until the user opens the panel via the
-    sidebar combo, keeping per-step overhead zero when the panel is closed.
-    """
-
-    class_type: type[NewtonGLVisualizer] | str = "{DIR}.newton_visualizer:NewtonGLVisualizer"
-    """Visualizer implementation class."""
-
-    visualizer_type: str = "newton_gl"
-    """Visualizer selector identifier. Do not change."""
-
-    streaming_view: bool = True
-    """Enable the tiled streaming camera panel.
-
-    Overrides the base-class default of ``False``.  The panel starts **hidden** so there
-    is no per-step camera rendering cost; the user can open it at any time via the
-    *Streaming View* combo in the Newton sidebar.
-    """
-
-
-@configclass
-class NewtonRTXVisualizerCfg(NewtonVisualizerCfg):
-    """Configuration for the Newton OVRTX path-tracer visualizer.
-
-    Selects Newton's OVRTX backend — photorealistic rendering using the same
-    ``begin_frame / log_state / end_frame`` step interface as the GL backend.
-
-    .. note::
-        RTX render quality settings (fps, lighting environment, denoiser, etc.)
-        are not yet exposed here; ``ViewerRTX`` defaults are used. These will be
-        surfaced in a future revision in a way that is consistent across all
-        RTX-capable renderers.
-
-    ``render_rgb_array()`` captures the path-traced LDR framebuffer at
-    :attr:`window_width` by :attr:`window_height`. The tiled camera panel remains
-    unsupported because ``ViewerRTX.log_image`` has no display sink.
+    Launch preparation expands perspective sources into ordinary scene CameraCfg entries.
+    All views borrow camera output. Scripts without a SceneCfg declare cameras through ReplicateSession,
+    construct them with instantiate(camera_cfg), and select them with SceneCameraCfg.
+    Window resizing scales the displayed image without changing either source's resolution.
+    Scene USD owns lighting, materials, and environment placement. Newton-model overlays,
+    rigid-body dragging, and viewer-only lighting or world offsets are not supported.
+    Environment selection controls tiled sensor views; the perspective camera sees the full scene.
     """
 
     class_type: type[NewtonRTXVisualizer] | str = "{DIR}.newton_visualizer:NewtonRTXVisualizer"
     """Visualizer implementation class."""
 
+    launcher_type: ClassVar[str] = "isaaclab_ov.app:OvrtxLauncher"
+
     visualizer_type: str = "newton_rtx"
     """Visualizer selector identifier. Do not change."""
-
-    rtx_environment: str = "default"
-    """OVRTX lighting environment.  One of ``"default"`` (dome + distant light),
-    ``"studio"`` (three-point rig for cleaner highlights), or ``"none"``."""
 
     render_settings: dict[str, Any] = dict()
     """RTX attributes to author on the OVRTX render product, as ``{name: (usd_type_name, value)}``.
 
     ``usd_type_name`` names an ``Sdf.ValueTypeNames`` member, as a string so the config stays
     copyable. For example, ``{"omni:rtx:quality": ("Int", 100)}`` re-enables the path tracer's
-    quality convergence loop, which ``ViewerRTX`` otherwise disables to keep interactive latency
-    down."""
+    quality convergence loop, disabled by default to keep interactive latency down."""
+
+    renderer_cfg: OVRTXRendererCfg = OVRTXRendererCfg()
+    """Shared scene renderer. Use the same configuration as scene cameras to share their instance.
+
+    Used when declaring perspective CameraCfg entries. SceneCameraCfg retains its sensor's renderer.
+    """
+
+
+@configclass
+class NewtonGLVisualizerCfg(NewtonGLBackendCfg, VisualizerCfg):
+    """Deprecated combined configuration; use ``VisualizerCfg(backend=NewtonGLBackendCfg())``.
+
+    Simulation launch translates this declaration before constructing visualizers.
+    """
+
+    backend: NewtonGLBackendCfg = NewtonGLBackendCfg()
+    streaming_view: bool = True
+
+
+@configclass
+class NewtonRTXVisualizerCfg(NewtonRTXBackendCfg, VisualizerCfg):
+    """Deprecated combined configuration; use ``VisualizerCfg(backend=NewtonRTXBackendCfg())``.
+
+    Simulation launch translates this declaration before constructing visualizers.
+    """
+
+    backend: NewtonRTXBackendCfg = NewtonRTXBackendCfg()
+    streaming_view: bool = True
+
+
+@configclass
+class NewtonVisualizerCfg(NewtonGLVisualizerCfg):
+    """Deprecated Newton GL configuration; use ``VisualizerCfg(backend=NewtonGLBackendCfg())``."""

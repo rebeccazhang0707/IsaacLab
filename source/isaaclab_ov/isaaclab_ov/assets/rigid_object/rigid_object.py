@@ -27,8 +27,7 @@ from isaaclab.utils.wrench_composer import WrenchComposer
 from isaaclab_ov import tensor_types as TT
 from isaaclab_ov.assets import kernels as shared_kernels
 from isaaclab_ov.assets.kernels import _body_wrench_to_world
-from isaaclab_ov.physics import OvPhysxManager
-from isaaclab_ov.sim.views.ovphysx_view import OvPhysxView
+from isaaclab_ov.sim.views.ovphysx_view import OvPhysxView, _expand_env_pattern
 
 from .rigid_object_data import RigidObjectData
 
@@ -166,17 +165,16 @@ class RigidObject(BaseRigidObject):
         if inst.active:
             if perm.active:
                 inst.add_raw_buffers_from(perm)
-            force_b = inst.out_force_b.warp
-            torque_b = inst.out_torque_b.warp
+            composer = inst
         else:
-            force_b = perm.out_force_b.warp
-            torque_b = perm.out_torque_b.warp
+            composer = perm
+        force_in, torque_in, is_global = composer.get_forces_and_torques()
 
         poses = self._data.body_link_pose_w.warp  # (N, 1) wp.transformf
         wp.launch(
             _body_wrench_to_world,
             dim=(self._num_instances, 1),
-            inputs=[force_b, torque_b, poses],
+            inputs=[force_in, torque_in, poses, is_global],
             outputs=[self._wrench_buf],
             device=self._device,
         )
@@ -376,13 +374,10 @@ class RigidObject(BaseRigidObject):
         self._root_view.set_attribute(
             TT.RIGID_BODY_POSE, self.data._root_link_pose_w.data.view(wp.float32), indices=sim_env_ids
         )
+        self._backend_manager._scene_data_backend.transforms_timestamp += 1
 
     def write_root_link_pose_to_sim_mask(
-        self,
-        *,
-        root_pose: torch.Tensor | wp.array,
-        env_mask: wp.array | None = None,
-        skip_forward: bool = False,
+        self, *, root_pose: torch.Tensor | wp.array, env_mask: wp.array | None = None, skip_forward: bool = False
     ) -> None:
         """Set the root link pose over selected environment mask into the simulation.
 
@@ -416,6 +411,7 @@ class RigidObject(BaseRigidObject):
         self._root_view.set_attribute(
             TT.RIGID_BODY_POSE, self.data._root_link_pose_w.data.view(wp.float32), mask=env_mask_wp
         )
+        self._backend_manager._scene_data_backend.transforms_timestamp += 1
 
     def write_root_com_pose_to_sim_index(
         self,
@@ -458,13 +454,10 @@ class RigidObject(BaseRigidObject):
         self._root_view.set_attribute(
             TT.RIGID_BODY_POSE, self.data._root_link_pose_w.data.view(wp.float32), indices=sim_env_ids
         )
+        self._backend_manager._scene_data_backend.transforms_timestamp += 1
 
     def write_root_com_pose_to_sim_mask(
-        self,
-        *,
-        root_pose: torch.Tensor | wp.array,
-        env_mask: wp.array | None = None,
-        skip_forward: bool = False,
+        self, *, root_pose: torch.Tensor | wp.array, env_mask: wp.array | None = None, skip_forward: bool = False
     ) -> None:
         """Set the root center of mass pose over selected environment mask into the simulation.
 
@@ -499,6 +492,7 @@ class RigidObject(BaseRigidObject):
         self._root_view.set_attribute(
             TT.RIGID_BODY_POSE, self.data._root_link_pose_w.data.view(wp.float32), mask=env_mask_wp
         )
+        self._backend_manager._scene_data_backend.transforms_timestamp += 1
 
     def write_root_com_velocity_to_sim_index(
         self,
@@ -936,7 +930,7 @@ class RigidObject(BaseRigidObject):
 
     def _initialize_impl(self) -> None:
         # acquire ovphysx instance
-        physx_instance = OvPhysxManager.get_physx_instance()
+        physx_instance = self._backend_manager.get_physx_instance()
         if physx_instance is None:
             raise RuntimeError("OvPhysxManager has not been initialized yet.")
         self._ovphysx = physx_instance
@@ -944,7 +938,7 @@ class RigidObject(BaseRigidObject):
         # The ovphysx PhysX object does not expose a .device property; reading it would
         # raise AttributeError (masked by hasattr) and fall back to "cuda:0" even when the
         # simulation is running on CPU, causing a device mismatch in binding.read().
-        self._device = OvPhysxManager.get_device()
+        self._device = self._backend_manager.get_device()
 
         # Resolve the rigid body root expression.
         def has_rigid_body_api(prim) -> bool:
@@ -962,7 +956,8 @@ class RigidObject(BaseRigidObject):
         # Eagerly create every binding the data container reads at init, so failures
         # surface here with a helpful message rather than as a raw wheel exception
         # (or a KeyError) at first writer call.
-        self._root_view = OvPhysxView(self._ovphysx, pattern=pattern, device=self._device)
+        paths = _expand_env_pattern(pattern, self._backend_manager._sim.get_clone_plan())
+        self._root_view = OvPhysxView(self._ovphysx, prim_paths=paths, device=self._device)
         for tt in (
             TT.RIGID_BODY_POSE,
             TT.RIGID_BODY_VELOCITY,
@@ -1000,7 +995,9 @@ class RigidObject(BaseRigidObject):
             self._body_names = ["base_link"]
 
         # container for data access
-        self._data = RigidObjectData(self._root_view, self._device, check_shapes=self._check_shapes)
+        self._data = RigidObjectData(
+            self._root_view, self._device, check_shapes=self._check_shapes, backend_manager=self._backend_manager
+        )
 
         # create buffers
         self._create_buffers()
@@ -1038,8 +1035,8 @@ class RigidObject(BaseRigidObject):
             device=device,
             copy=False,
         )
-        self._instantaneous_wrench_composer = WrenchComposer(self)
-        self._permanent_wrench_composer = WrenchComposer(self)
+        self._instantaneous_wrench_composer = WrenchComposer(self, supports_world_at_com=True)
+        self._permanent_wrench_composer = WrenchComposer(self, supports_world_at_com=True)
 
         # set information about rigid body into data
         self._data.body_names = self._body_names
@@ -1081,6 +1078,8 @@ class RigidObject(BaseRigidObject):
         """
         if env_ids is None or env_ids == slice(None):
             return self._ALL_INDICES
+        if isinstance(env_ids, slice):
+            return wp.from_torch(wp.to_torch(self._ALL_INDICES)[env_ids])
         if isinstance(env_ids, list):
             return wp.array(env_ids, dtype=wp.int32, device=self._device)
         if isinstance(env_ids, torch.Tensor):

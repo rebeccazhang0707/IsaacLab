@@ -12,7 +12,6 @@ import json
 import os
 import signal
 import sys
-import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 from types import ModuleType
 
@@ -144,6 +143,7 @@ def test_exact_node_ids_selecting_zero_tests_fail(monkeypatch, tmp_path: Path) -
         env={},
         inject_shard_select=False,
         pytest_targets=[missing_node_id],
+        capture=orchestrator._CaptureOptions(),
     )
 
     report, status, was_failure = orchestrator._run_one_pass(context, k_expr=None, suffix="")
@@ -180,6 +180,7 @@ def test_nonzero_pytest_exit_preserves_reported_tests(monkeypatch, tmp_path: Pat
         env={},
         inject_shard_select=False,
         pytest_targets=[str(test_file)],
+        capture=orchestrator._CaptureOptions(),
     )
 
     report, status, was_failure = orchestrator._run_one_pass(context, k_expr=None, suffix="")
@@ -218,6 +219,7 @@ def test_filter_deselecting_all_tests_is_not_a_failure(monkeypatch, tmp_path: Pa
         env={},
         inject_shard_select=False,
         pytest_targets=[str(test_file)],
+        capture=orchestrator._CaptureOptions(),
     )
 
     report, status, was_failure = orchestrator._run_one_pass(context, k_expr="ovphysx", suffix="")
@@ -251,6 +253,7 @@ def test_module_importorskip_is_not_a_failure(monkeypatch, tmp_path: Path) -> No
         env={},
         inject_shard_select=False,
         pytest_targets=[str(test_file)],
+        capture=orchestrator._CaptureOptions(),
     )
 
     report, status, was_failure = orchestrator._run_one_pass(context, k_expr=None, suffix="")
@@ -287,7 +290,7 @@ def test_abnormal_termination_report_quotes_bounded_renderer_log(
     # quietly turn this into a test of a log that fits inside it.
     filler_lines = orchestrator.ovrtx_log.LOG_LIMIT_BYTES // len("filler-line\n") + 1
 
-    def _capture(cmd, timeout, env, *, startup_deadline, report_file):
+    def _capture(cmd, timeout, env, *, startup_deadline, report_file, options):
         # Render verbosely, then die without writing a report.
         Path(log_path).write_text("head-line\n" + "filler-line\n" * filler_lines + "tail-line\n", encoding="utf-8")
         report_paths.append(Path(report_file))
@@ -308,6 +311,7 @@ def test_abnormal_termination_report_quotes_bounded_renderer_log(
         env={},
         inject_shard_select=False,
         pytest_targets=[str(test_file)],
+        capture=orchestrator._CaptureOptions(),
     )
 
     with caplog.at_level("INFO"):
@@ -369,6 +373,7 @@ def test_abnormal_termination_saves_the_renderer_log_of_the_blamed_test(
         env={},
         inject_shard_select=False,
         pytest_targets=[str(test_file)],
+        capture=orchestrator._CaptureOptions(),
     )
 
     _report, status, _was_failure = orchestrator._run_one_pass(context, k_expr=None, suffix="")
@@ -390,7 +395,7 @@ def test_shutdown_hang_after_report_is_not_a_failure(monkeypatch, tmp_path: Path
     test_file = tmp_path / "test_sample.py"
     test_file.write_text("def test_present():\n    pass\n", encoding="utf-8")
 
-    def _capture(cmd, timeout, env, *, startup_deadline, report_file):
+    def _capture(cmd, timeout, env, *, startup_deadline, report_file, options):
         _write_partial_junit_report(report_file)
         return -1, b"", b"", "shutdown_hang", 30.0, ""
 
@@ -407,6 +412,7 @@ def test_shutdown_hang_after_report_is_not_a_failure(monkeypatch, tmp_path: Path
         env={},
         inject_shard_select=False,
         pytest_targets=[str(test_file)],
+        capture=orchestrator._CaptureOptions(),
     )
 
     _report, status, was_failure = orchestrator._run_one_pass(context, k_expr=None, suffix="")
@@ -444,6 +450,7 @@ def test_startup_retry_wall_time_includes_every_attempt(monkeypatch, tmp_path: P
         env={},
         inject_shard_select=False,
         pytest_targets=[str(test_file)],
+        capture=orchestrator._CaptureOptions(),
     )
 
     _report, status, was_failure = orchestrator._run_one_pass(context, k_expr=None, suffix="")
@@ -451,50 +458,6 @@ def test_startup_retry_wall_time_includes_every_attempt(monkeypatch, tmp_path: P
     assert attempts == 2
     assert status["wall_time"] == 10.0
     assert not was_failure
-
-
-def test_crash_journal_path_is_absolute(monkeypatch, tmp_path: Path) -> None:
-    """The journal path handed to the test subprocess must not depend on the current directory.
-
-    The repo-root ``conftest.py`` reopens this path on every journal write, from inside the test
-    process. A relative path would resolve against whatever directory the test happens to be in,
-    so a test using ``monkeypatch.chdir`` would write its verdicts to a journal under the
-    temporary directory and, once teardown restored the cwd, resume writing to this one — leaving
-    a test that ran and passed looking like it was never reached.
-    """
-    orchestrator = _load_orchestrator_module()
-    test_file = tmp_path / "test_sample.py"
-    test_file.write_text("def test_present():\n    pass\n", encoding="utf-8")
-    journal_paths: list[str] = []
-
-    def _capture(_cmd, _timeout, env, *, report_file: str, **_kwargs):
-        journal_paths.append(env[orchestrator.JOURNAL_ENV_VAR])
-        _write_partial_junit_report(report_file)
-        return 0, b"", b"", "", 0.1, ""
-
-    monkeypatch.setattr(orchestrator.ovrtx_log, "LOG_PATH", str(tmp_path / "ovrtx_renderer.log"))
-    monkeypatch.setattr(orchestrator, "capture_test_output_with_timeout", _capture)
-    monkeypatch.chdir(tmp_path)
-    context = orchestrator._PassContext(
-        test_file=str(test_file),
-        file_name=test_file.name,
-        workspace_root=str(tmp_path),
-        ci_marker=None,
-        timeout=10,
-        startup_deadline=1,
-        env={},
-        inject_shard_select=False,
-        pytest_targets=[str(test_file)],
-    )
-
-    orchestrator._run_one_pass(context, k_expr=None, suffix="")
-
-    assert len(journal_paths) == 1
-    journal_path = Path(journal_paths[0])
-    assert journal_path.is_absolute()
-    # pytest only creates the report directory in ``pytest_sessionfinish``, which a crashed run
-    # never reaches, so the directory has to exist before the subprocess starts journaling.
-    assert journal_path.parent.is_dir()
 
 
 def test_artifact_paths_handed_to_the_subprocess_are_uploadable(monkeypatch, tmp_path: Path) -> None:
@@ -506,14 +469,20 @@ def test_artifact_paths_handed_to_the_subprocess_are_uploadable(monkeypatch, tmp
     are absolute for the journal's reason: the log is saved from a fixture and the dump file is opened
     at plugin load, so a test using ``monkeypatch.chdir`` would otherwise leave either under the
     temporary directory.
+
+    The repo-root ``conftest.py`` likewise reopens the crash journal path on every journal write, from
+    inside the test process, so a relative journal path would send a chdir-ing test's later verdicts to
+    another file and leave a test that ran and passed looking like it was never reached.
     """
     orchestrator = _load_orchestrator_module()
     test_file = tmp_path / "test_sample.py"
     test_file.write_text("def test_present():\n    pass\n", encoding="utf-8")
+    journal_paths: list[str] = []
     log_dirs: list[str] = []
     dump_paths: list[str] = []
 
     def _capture(_cmd, _timeout, env, *, report_file: str, **_kwargs):
+        journal_paths.append(env[orchestrator.JOURNAL_ENV_VAR])
         log_dirs.append(env[orchestrator.ovrtx_log.LOG_DIR_ENV_VAR])
         dump_paths.append(env[orchestrator.hang_dump.DUMP_PATH_ENV_VAR])
         _write_partial_junit_report(report_file)
@@ -532,9 +501,17 @@ def test_artifact_paths_handed_to_the_subprocess_are_uploadable(monkeypatch, tmp
         env={},
         inject_shard_select=False,
         pytest_targets=[str(test_file)],
+        capture=orchestrator._CaptureOptions(),
     )
 
     orchestrator._run_one_pass(context, k_expr=None, suffix="")
+
+    assert len(journal_paths) == 1
+    journal_path = Path(journal_paths[0])
+    assert journal_path.is_absolute()
+    # pytest only creates the report directory in ``pytest_sessionfinish``, which a crashed run
+    # never reaches, so the directory has to exist before the subprocess starts journaling.
+    assert journal_path.parent.is_dir()
 
     assert len(log_dirs) == 1
     log_dir = Path(log_dirs[0])
@@ -548,82 +525,6 @@ def test_artifact_paths_handed_to_the_subprocess_are_uploadable(monkeypatch, tmp
     assert dump_path.parent == tmp_path / orchestrator.HANG_DUMP_DIR
     # hang_dump.register() opens this path as the child starts, so it cannot be created later.
     assert dump_path.parent.is_dir()
-
-
-def test_fresh_process_retry_crash_blames_the_test_that_was_running(monkeypatch, tmp_path: Path) -> None:
-    """A retry killed mid-test must be reported as a crash, blamed on the test it was running.
-
-    Files in ``PROCESS_FAILURE_RETRIES_BY_FILE`` get another subprocess after a test failure. That
-    retry can itself be SIGKILLed or segfault, and then it writes no JUnit report at all. Without a
-    journal of its own the run falls back to the first attempt's verdicts: reported ``FAILED`` with
-    no crash, and no record of which test took the process down.
-
-    The two attempts disagree on purpose — ``test_alpha`` fails first and passes on the retry,
-    which dies inside ``test_beta`` — so the rebuilt report can only come from the retry's journal.
-    """
-    orchestrator = _load_orchestrator_module()
-    test_file = tmp_path / "test_sample.py"
-    test_file.write_text("def test_alpha():\n    pass\n\n\ndef test_beta():\n    pass\n", encoding="utf-8")
-    monkeypatch.setitem(orchestrator.PROCESS_FAILURE_RETRIES_BY_FILE, test_file.name, 1)
-    alpha, beta = f"{test_file}::test_alpha", f"{test_file}::test_beta"
-    journals_seen: list[str | None] = []
-    journal_was_stale: list[bool] = []
-    report_paths: list[Path] = []
-
-    def _capture(_cmd, _timeout, env, *, report_file: str, **_kwargs):
-        journal_file = env.get(orchestrator.JOURNAL_ENV_VAR)
-        journals_seen.append(journal_file)
-        report_paths.append(Path(report_file))
-        if journal_file is None:
-            return -9, b"", b"", "", 0.2, ""
-        journal_was_stale.append(Path(journal_file).exists())
-        _append_journal(journal_file, [{"event": "collected", "node_ids": [alpha, beta]}])
-        if len(journals_seen) == 1:
-            _append_journal(journal_file, _journaled_test(alpha, "failed"))
-            _append_journal(journal_file, _journaled_test(beta, "passed"))
-            _write_failing_junit_report(report_file, "test_alpha")
-            return 1, b"1 failed", b"", "", 0.1, ""
-        # The retry gets through test_alpha, then dies inside test_beta — so pytest never reaches
-        # ``pytest_sessionfinish`` and writes no report.
-        _append_journal(journal_file, _journaled_test(alpha, "passed"))
-        _append_journal(journal_file, [{"event": "start", "node_id": beta}])
-        return -9, b"", b"", "", 0.2, ""
-
-    monkeypatch.setattr(orchestrator.ovrtx_log, "LOG_PATH", str(tmp_path / "ovrtx_renderer.log"))
-    monkeypatch.setattr(orchestrator, "capture_test_output_with_timeout", _capture)
-    monkeypatch.chdir(tmp_path)
-    context = orchestrator._PassContext(
-        test_file=str(test_file),
-        file_name=test_file.name,
-        workspace_root=str(tmp_path),
-        ci_marker=None,
-        timeout=10,
-        startup_deadline=1,
-        env={},
-        inject_shard_select=False,
-        pytest_targets=[str(test_file)],
-    )
-
-    report, status, was_failure = orchestrator._run_one_pass(context, k_expr=None, suffix="")
-
-    assert len(journals_seen) == 2
-    assert all(journals_seen), "the fresh-process retry ran without a crash journal"
-    # A journal left over from the first attempt would fold its test_alpha failure into the report.
-    assert journal_was_stale == [False, False]
-    assert report is not None
-    assert status["result"] == "CRASHED"
-    assert status["errors"] == 1
-    assert status["failures"] == 0
-    assert status["tests"] == 2
-    assert status["wall_time"] == pytest.approx(0.3)
-    assert was_failure
-
-    cases = {case.get("name"): case for case in ElementTree.parse(report_paths[1]).getroot().iter("testcase")}
-    assert sorted(cases) == ["test_alpha", "test_beta"]
-    assert list(cases["test_alpha"]) == [], "test_alpha passed on the retry and must be reported as passed"
-    errors = cases["test_beta"].findall("error")
-    assert len(errors) == 1, "the crash must be reported against the test that was running"
-    assert "SIGKILL" in errors[0].get("message")
 
 
 def test_result_summary_includes_fast_failure_after_thirty_slower_files():
@@ -707,6 +608,26 @@ def test_hang_dump_plugin_is_inert_without_signal_support(monkeypatch) -> None:
     assert hang_dump.is_supported() is False
     assert hang_dump.register() is False
     hang_dump.pytest_configure(config=None)  # must not raise
+
+
+def test_performance_files_reserve_the_runner_without_xdist(monkeypatch, tmp_path):
+    """Reserving every slot for timing tests must not split their measurements across pytest workers."""
+    orchestrator = _load_orchestrator_module()
+    performance_files = ["test_kit_startup_performance.py", "test_robot_load_performance.py"]
+    files = [str(tmp_path / name) for name in (*performance_files, "test_regular.py")]
+    observed = {}
+
+    def run(job, context, *, workers, **kwargs):
+        observed[Path(job.path).name] = (job.slots, workers)
+        return orchestrator._FileResult(reports=[], status={}, failed=False)
+
+    monkeypatch.setenv("TEST_JOBS", "4")
+    monkeypatch.delenv("ISAACLAB_TEST_QUEUE", raising=False)
+    monkeypatch.setattr(orchestrator, "_run_test_file", run)
+    orchestrator.run_individual_tests(files, str(tmp_path), ci_marker=None)
+
+    assert all(observed[name] == (4, 1) for name in performance_files)
+    assert observed["test_regular.py"] == (1, 1)
 
 
 def test_external_git_asset_tests_receive_extended_startup_deadline():

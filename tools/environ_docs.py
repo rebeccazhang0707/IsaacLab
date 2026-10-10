@@ -15,16 +15,25 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import itertools
 import json
+import multiprocessing
+import os
 import re
 from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING
 
 import gymnasium as gym
 
-from isaaclab_tasks.utils.preset_cli import enumerate_task_presets
-from isaaclab_tasks.utils.preset_target import PresetTarget
+from isaaclab_tasks.utils.hydra import (
+    _LEGACY_PRESET_ALIASES,
+    PresetTarget,
+    enumerate_task_presets,
+    is_task_run_launchable,
+)
 
 if TYPE_CHECKING:
     from gymnasium.envs.registration import EnvSpec
@@ -43,13 +52,14 @@ _BACKEND_MIRROR_NAMES = frozenset(
         "ovrtx",
         "physx",
         "rtx",
-        *PresetTarget.all_legacy_aliases().keys(),
-        *PresetTarget.all_legacy_aliases().values(),
+        *_LEGACY_PRESET_ALIASES,
+        *_LEGACY_PRESET_ALIASES.values(),
     }
 )
 
 # RL libraries listed in a stable order across generated docs.
-_RL_LIBRARY_ORDER = ("rl_games", "rsl_rl", "skrl", "sb3", "rlinf")
+_RL_LIBRARY_ORDER = ("rl_games", "rsl_rl", "skrl", "sb3", "rlinf", "torchrl")
+_ALGORITHM_LABELS = {"": "PPO", "ppo": "PPO", "amp": "AMP", "ippo": "IPPO", "mappo": "MAPPO"}
 
 # Gym IDs excluded from the training list. The ``-Eval`` suffix marks dedicated
 # evaluation variants (e.g. ``IsaacContrib-Assemble-Trocar-G129-Dex3-Eval``, an alias
@@ -59,6 +69,12 @@ _EVAL_TASK_SUFFIXES = ("-Eval",)
 # RL libraries not discoverable from Gym ``kwargs`` (e.g. RLinf YAML-based workflows).
 RL_LIBRARY_OVERRIDES: dict[str, dict[str, list[str]]] = {
     "IsaacContrib-Assemble-Trocar-G129-Dex3": {"rlinf": ["PPO"]},
+}
+
+# Optional dependency groups required to launch specific tasks from a source checkout.
+TASK_REQUIRED_EXTRAS: dict[str, tuple[str, ...]] = {
+    "Isaac-Lift-Soft-Franka": ("tetrahedralization",),
+    "Isaac-Lift-Soft-Franka-Camera": ("tetrahedralization",),
 }
 
 # Legacy markers retained for the table-formatting helpers. The public
@@ -98,7 +114,10 @@ _NEWTON_MJWARP_EXCLUSIONS = frozenset(
         "IsaacContrib-Stack-Cube-Franka",
         "IsaacContrib-Stack-Cube-Franka-IK-Abs",
         "IsaacContrib-Stack-Cube-Franka-IK-Rel",
+        "IsaacContrib-Stack-Cube-Franka-IK-Rel-Blueprint",
         "IsaacContrib-Stack-Cube-Franka-IK-Rel-Skillgen",
+        "IsaacContrib-Stack-Cube-Franka-IK-Rel-Visuomotor",
+        "IsaacContrib-Stack-Cube-Franka-IK-Rel-Visuomotor-Cosmos",
         "IsaacContrib-Stack-Cube-Galbot-Left-Arm-Gripper-RmpFlow",
         "IsaacContrib-Stack-Cube-Galbot-Left-Arm-Gripper-Visuomotor",
         "IsaacContrib-Stack-Cube-Galbot-Left-Arm-Gripper-Visuomotor-Joint-Position",
@@ -123,13 +142,23 @@ class EnvironmentDocRow:
     workflow: str
     rl_libraries: dict[str, list[str]]
     presets: dict[PresetTarget, list[str]] | None
-    agent_preset_compatibility: dict[str, tuple[str, ...]] = field(default_factory=dict)
     supports_warp_frontend: bool = False
     pretrained_checkpoint_preset_compatibility: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    required_extras: tuple[str, ...] = ()
+    # None reuses all domain presets; an empty tuple allows only the default.
+    warp_presets: tuple[str, ...] | None = None
+    # Launchable (physics, renderer, presets) combinations of the displayed names, ``None`` leaving an
+    # axis to the config. Empty for tasks with nothing to select.
+    launchable_runs: tuple[tuple[str | None, str | None, str | None], ...] = ()
 
 
-def _supports_warp_frontend(task_name: str, workflow: str, presets: dict[PresetTarget, list[str]] | None) -> bool:
-    """Return whether a task can run through ``--frontend warp``."""
+def _supports_warp_frontend(
+    task_name: str,
+    workflow: str,
+    presets: dict[PresetTarget, list[str]] | None,
+    domain_preset: str | None = None,
+) -> bool:
+    """Return whether a task configuration can run through ``--frontend warp``."""
     if presets is None or "newton_mjwarp" not in presets.get(PresetTarget.PHYSICS, []):
         return False
 
@@ -138,7 +167,10 @@ def _supports_warp_frontend(task_name: str, workflow: str, presets: dict[PresetT
 
         from isaaclab_tasks.utils import resolve_task_config
 
-        cfg, _ = resolve_task_config(task_name, "", overrides=("physics=newton_mjwarp",))
+        overrides = ("physics=newton_mjwarp",)
+        if domain_preset is not None:
+            overrides += (f"presets={domain_preset}",)
+        cfg, _ = resolve_task_config(task_name, "", overrides=overrides)
         if workflow == "Direct":
             try:
                 return WarpFrontend._resolve_direct_warp_class(task_name, cfg) is not None
@@ -155,7 +187,7 @@ def is_training_task(task_id: str) -> bool:
         return False
     if any(task_id.endswith(suffix) for suffix in _EVAL_TASK_SUFFIXES):
         return False
-    if "-Benchmark-" in task_id:
+    if "Benchmark" in task_id:
         return False
     return True
 
@@ -169,11 +201,10 @@ def parse_rl_libraries_from_kwargs(kwargs: dict) -> dict[str, list[str]]:
     Returns:
         Mapping of RL-library name to sorted algorithm labels (e.g. ``{"skrl": ["IPPO", "PPO"]}``).
     """
-    agents: dict[str, set[str]] = collections.defaultdict(set)
+    entries: list[tuple[object, str, str]] = []
     for key, value in kwargs.items():
         if not key.endswith("_cfg_entry_point") or key == "env_cfg_entry_point":
             continue
-
         stem = key[: -len("_cfg_entry_point")]
         library = None
         algo_suffix = ""
@@ -188,9 +219,25 @@ def parse_rl_libraries_from_kwargs(kwargs: dict) -> dict[str, list[str]]:
                 break
         if library is None:
             continue
-        if algo_suffix == "with_symmetry":
+        entries.append((value, library, algo_suffix))
+
+    agents: dict[str, set[str]] = collections.defaultdict(set)
+    for value, library, algo_suffix in entries:
+        algorithm = _ALGORITHM_LABELS.get(algo_suffix.lower())
+        if algorithm is None:
+            # Registry suffixes can name recipes or preset variants, not algorithms.
             continue
-        agents[library].add(_infer_algorithm(algo_suffix, value, library))
+        if not algo_suffix and any(
+            other_library == library
+            and other_value == value
+            and other_suffix
+            and other_suffix.lower() in _ALGORITHM_LABELS
+            for other_value, other_library, other_suffix in entries
+        ):
+            # An explicit algorithm alias for the same concrete config owns the
+            # label (for example the canonical and explicit SKRL AMP entries).
+            continue
+        agents[library].add(algorithm)
 
     return {library: sorted(algorithms, key=_algo_sort_key) for library, algorithms in agents.items()}
 
@@ -322,6 +369,14 @@ def _selector_names_for_docs(
         PresetTarget.RENDERER: _filter_selector_names(PresetTarget.RENDERER, preset_map.get(PresetTarget.RENDERER, [])),
         PresetTarget.DOMAIN: _filter_selector_names(PresetTarget.DOMAIN, _domain_presets_for_docs(preset_map)),
     }
+
+
+def _import_task_packages() -> None:
+    """Register the Isaac Lab tasks in a launch-check worker process."""
+    import isaaclab_tasks  # noqa: F401
+
+    with contextlib.suppress(ImportError):
+        import isaaclab_tasks_experimental  # noqa: F401
 
 
 def format_presets_rst(preset_map: dict[PresetTarget, list[str]] | None) -> str:
@@ -592,16 +647,37 @@ def collect_environment_doc_rows(
         specs = list(gym.registry.values())
 
     rows: list[EnvironmentDocRow] = []
+    # Each launch check resolves a full env config; workers spread them out. Each worker imports Isaac Lab,
+    # so their number is capped, and they are spawned because forking this multi-threaded process can deadlock.
+    pool = ProcessPoolExecutor(
+        max_workers=min(os.cpu_count() or 1, 8),
+        mp_context=multiprocessing.get_context("spawn"),
+        initializer=_import_task_packages,
+    )
 
     for spec in specs:
         if not is_training_task(spec.id) or spec.kwargs.get("deprecated"):
             continue
 
         preset_map = enumerate_task_presets(spec.id)
+        launchable_runs = ()
         if preset_map is not None:
             preset_map = dict(preset_map)
             preset_map[PresetTarget.PHYSICS] = _physics_names_for_docs(spec.id, preset_map)
             preset_map = _apply_preset_exclusions(spec.id, preset_map)
+            targets = (PresetTarget.PHYSICS, PresetTarget.RENDERER, PresetTarget.DOMAIN)
+            selectors = _selector_names_for_docs(preset_map)
+            options = [sorted(selectors[target]) for target in targets]
+            if any(options):
+                combinations = list(itertools.product(*([None, *names] for names in options)))
+                launchable = pool.map(partial(is_task_run_launchable, spec.id), combinations)
+                launchable_runs = tuple(run for run, ok in zip(combinations, launchable) if ok)
+                if not launchable_runs:
+                    raise ValueError(f"{spec.id}: no displayed preset combination can launch.")
+                # A displayed name no launchable combination uses can never produce a working command.
+                for axis, (target, names) in enumerate(zip(targets, options)):
+                    unreachable = {name for name in names if all(run[axis] != name for run in launchable_runs)}
+                    preset_map[target] = [name for name in preset_map[target] if name not in unreachable]
         agents = apply_rl_library_overrides(spec.id, parse_rl_libraries_from_kwargs(spec.kwargs))
         visible_domain_presets = set(_selector_names_for_docs(preset_map)[PresetTarget.DOMAIN])
         default_checkpoint_presets = ()
@@ -619,22 +695,30 @@ def collect_environment_doc_rows(
             checkpoint_preset_compatibility["*"] = default_checkpoint_presets
 
         workflow = get_workflow(spec.entry_point)
+        supports_warp_frontend = _supports_warp_frontend(spec.id, workflow, preset_map)
+        warp_presets = None
+        if supports_warp_frontend and visible_domain_presets:
+            domain_presets = tuple(sorted(visible_domain_presets))
+            compatible_presets = tuple(
+                name for name in domain_presets if _supports_warp_frontend(spec.id, workflow, preset_map, name)
+            )
+            if compatible_presets != domain_presets:
+                warp_presets = compatible_presets
         rows.append(
             EnvironmentDocRow(
                 task_name=spec.id,
                 workflow=workflow,
                 rl_libraries=agents,
                 presets=preset_map,
-                agent_preset_compatibility={
-                    agent: tuple(presets)
-                    for agent, presets in spec.kwargs.get("agent_preset_compatibility", {}).items()
-                    if agent in spec.kwargs
-                },
-                supports_warp_frontend=_supports_warp_frontend(spec.id, workflow, preset_map),
+                supports_warp_frontend=supports_warp_frontend,
                 pretrained_checkpoint_preset_compatibility=checkpoint_preset_compatibility,
+                required_extras=TASK_REQUIRED_EXTRAS.get(spec.id, ()),
+                warp_presets=warp_presets,
+                launchable_runs=launchable_runs,
             )
         )
 
+    pool.shutdown()
     rows.sort(key=_task_sort_key)
     return rows
 
@@ -684,8 +768,8 @@ def collect_environment_browser_preview_images(content: str) -> dict[str, str]:
         if not row.startswith("["):
             continue
         values = json.loads(row)
-        if len(values) >= 7 and values[6]:
-            preview_images[values[0]] = values[6]
+        if len(values) >= 6 and values[5]:
+            preview_images[values[0]] = values[5]
     return preview_images
 
 
@@ -718,13 +802,15 @@ def render_environment_browser_task_rows(
                 preview_image = max(aliases, key=lambda item: len(item[0]))[1]
         default_algorithms = {"skrl": "MAPPO"} if "MAPPO" in row.rl_libraries.get("skrl", []) else {}
         optional_values = [
-            row.agent_preset_compatibility,
             preview_image,
             row.supports_warp_frontend,
             row.pretrained_checkpoint_preset_compatibility,
             default_algorithms,
+            ",".join(row.required_extras),
+            row.warp_presets,
+            ["|".join(name or "" for name in run) for run in row.launchable_runs],
         ]
-        optional_defaults = [{}, "", False, {}, {}]
+        optional_defaults = ["", False, {}, {}, "", None, []]
         last_value = next(
             (
                 index
@@ -778,22 +864,6 @@ def patch_environments_rst(content: str, generated_table: str) -> str:
     end += len(COMPREHENSIVE_LIST_END_MARKER)
     replacement = f"{COMPREHENSIVE_LIST_START_MARKER}\n\n{generated_table}\n\n{COMPREHENSIVE_LIST_END_MARKER}"
     return content[:start] + replacement + content[end:]
-
-
-def _infer_algorithm(algo_suffix: str, entry_value: object, library: str) -> str:
-    """Map a cfg-entry suffix and value to a display algorithm label."""
-    if not algo_suffix:
-        if library == "rl_games" and isinstance(entry_value, str) and "vision" in entry_value.lower():
-            return "VISION"
-        return "PPO"
-
-    normalized = {
-        "ppo": "PPO",
-        "amp": "AMP",
-        "ippo": "IPPO",
-        "mappo": "MAPPO",
-    }
-    return normalized.get(algo_suffix.lower(), algo_suffix.upper())
 
 
 def _algo_sort_key(algo: str) -> tuple[int, str]:

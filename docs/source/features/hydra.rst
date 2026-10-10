@@ -3,19 +3,17 @@ Hydra Configuration System
 
 .. currentmodule:: isaaclab
 
-Isaac Lab supports the `Hydra <https://hydra.cc/docs/intro/>`_ configuration system to modify the task's
-configuration using command line arguments, which can be useful to automate experiments and perform hyperparameter tuning.
+Use `Hydra <https://hydra.cc/docs/intro/>`_ overrides to change task and agent
+settings from the command line, without editing Python.
 
-Any parameter of the environment can be modified by adding one or multiple elements of the form ``env.a.b.param1=value``
-to the command line input, where ``a.b.param1`` reflects the parameter's hierarchy, for example ``env.actions.joint_effort.scale=10.0``.
-Similarly, the agent's parameters can be modified by using the ``agent`` prefix, for example ``agent.seed=2024``.
+Append ``env.<path>=<value>`` for environment settings, such as
+``env.actions.joint_effort.scale=10.0``. Use the ``agent`` prefix for training
+settings, such as ``agent.seed=2024``.
 
-The way these command line arguments are set follow the exact structure of the configuration files. Since the different
-RL frameworks use different conventions, there might be differences in the way the parameters are set. For example,
-with *rl_games* the seed will be set with ``agent.params.seed``, while with *rsl_rl*, *skrl* and *sb3* it will be set with
-``agent.seed``.
+Paths follow the configuration structure of each RL library. For example, RL-Games
+uses ``agent.params.seed``; RSL-RL, skrl, and SB3 use ``agent.seed``.
 
-As a result, training with hydra arguments can be run with the following syntax:
+For example:
 
 .. tab-set::
     :sync-group: rl-train
@@ -31,12 +29,6 @@ As a result, training with hydra arguments can be run with the following syntax:
 
                   uv run isaaclab train --rl_library rsl_rl --task=Isaac-Cartpole env.actions.joint_effort.scale=10.0 agent.seed=2024
 
-           .. tab-item:: isaaclab.sh / isaaclab.bat
-
-              .. code-block:: shell
-
-                  ./isaaclab.sh train --rl_library rsl_rl --task=Isaac-Cartpole env.actions.joint_effort.scale=10.0 agent.seed=2024
-
     .. tab-item:: rl_games
         :sync: rl_games
 
@@ -47,12 +39,6 @@ As a result, training with hydra arguments can be run with the following syntax:
               .. code-block:: shell
 
                   uv run --extra rl-games isaaclab train --rl_library rl_games --task=Isaac-Cartpole env.actions.joint_effort.scale=10.0 agent.params.seed=2024
-
-           .. tab-item:: isaaclab.sh / isaaclab.bat
-
-              .. code-block:: shell
-
-                  ./isaaclab.sh train --rl_library rl_games --task=Isaac-Cartpole env.actions.joint_effort.scale=10.0 agent.params.seed=2024
 
     .. tab-item:: skrl
         :sync: skrl
@@ -65,12 +51,6 @@ As a result, training with hydra arguments can be run with the following syntax:
 
                   uv run --extra skrl isaaclab train --rl_library skrl --task=Isaac-Cartpole env.actions.joint_effort.scale=10.0 agent.seed=2024
 
-           .. tab-item:: isaaclab.sh / isaaclab.bat
-
-              .. code-block:: shell
-
-                  ./isaaclab.sh train --rl_library skrl --task=Isaac-Cartpole env.actions.joint_effort.scale=10.0 agent.seed=2024
-
     .. tab-item:: sb3
         :sync: sb3
 
@@ -81,12 +61,6 @@ As a result, training with hydra arguments can be run with the following syntax:
               .. code-block:: shell
 
                   uv run --extra sb3 isaaclab train --rl_library sb3 --task=Isaac-Cartpole env.actions.joint_effort.scale=10.0 agent.seed=2024
-
-           .. tab-item:: isaaclab.sh / isaaclab.bat
-
-              .. code-block:: shell
-
-                  ./isaaclab.sh train --rl_library sb3 --task=Isaac-Cartpole env.actions.joint_effort.scale=10.0 agent.seed=2024
 
 The above command will run training with the task ``Isaac-Cartpole`` without selecting a visualizer,
 and set the ``env.actions.joint_effort.scale`` parameter to 10.0 and the ``agent.seed`` parameter to 2024.
@@ -104,8 +78,7 @@ Modifying advanced parameters
 Callables
 ^^^^^^^^^
 
-It is possible to modify functions and classes in the configuration files by using the syntax ``module:attribute_name``.
-For example, in the Cartpole environment:
+Use ``module:attribute_name`` to select a function or class. For example, in Cartpole:
 
 .. literalinclude:: ../../../source/isaaclab_tasks/isaaclab_tasks/core/cartpole/cartpole_manager_env_cfg.py
     :language: python
@@ -142,21 +115,21 @@ This example shows two noteworthy points:
 Modifying inter-dependent parameters
 ------------------------------------
 
-Particular care should be taken when modifying the parameters using command line arguments. Some of the configurations
-perform intermediate computations based on other parameters. These computations will not be updated when the parameters
-are modified.
+Overrides do not recompute values derived earlier from other settings. Update
+those dependent values too, unless the environment recomputes them at runtime.
 
 For example, for the configuration of the Cartpole camera environment:
 
 .. literalinclude:: ../../../source/isaaclab_tasks/isaaclab_tasks/core/cartpole/cartpole_direct_camera_env_cfg.py
     :language: python
-    :start-at: class CartpoleTiledCameraCfg
+    :start-at: class CartpoleCameraEnvCfg(PresetCfg):
     :end-at: observation_space = [3, 96, 96]
 
 The configuration declares the single-frame channel count and a default spatial size.
 At environment initialization, ``CartpoleCameraEnv`` rebuilds ``observation_space`` from
 the resolved camera: the default ``frame_stack=2`` expands channels, and height/width are
-taken from ``tiled_camera``. So ``env.tiled_camera.width=128 env.tiled_camera.height=128``
+taken from ``scene.tiled_camera``. So
+``env.scene.tiled_camera.width=128 env.scene.tiled_camera.height=128``
 alone yields an effective stacked shape of ``[6,128,128]`` without also overriding
 ``env.observation_space``. The channel entry in ``observation_space`` must still match the
 camera data type (for example ``[1, ...]`` with ``presets=depth``); presets already set this.
@@ -251,7 +224,7 @@ override is given:
 .. code-block:: python
 
     from isaaclab.sim import SimulationCfg
-    from isaaclab.utils.configclass import configclass
+    from isaaclab.utils import configclass
     from isaaclab_newton.physics import NewtonCfg
     from isaaclab_physx.physics import PhysxCfg
     from isaaclab_tasks.utils import PresetCfg
@@ -312,10 +285,10 @@ Physics backend selection uses the same preset system. A task can define a
 
 The Cartpole task's definition is a maintained example:
 
-.. literalinclude:: ../../../source/isaaclab_tasks/isaaclab_tasks/core/cartpole/cartpole_manager_env_cfg.py
+.. literalinclude:: ../../../source/isaaclab_tasks/isaaclab_tasks/core/cartpole/cartpole_common.py
     :language: python
     :start-at: class CartpolePhysicsCfg(PresetCfg):
-    :end-before: ##
+    :end-before: @configclass
 
 The ``newton_mjwarp`` and ``newton_kamino`` entries both select the Newton physics backend because
 both entries are :class:`~isaaclab_newton.physics.NewtonCfg` objects. The difference
@@ -326,13 +299,11 @@ is the solver configuration: ``newton_mjwarp`` uses
 Kamino is therefore a solver preset, not a separate Isaac Lab backend. The same
 Newton assets, sensors, renderers, and visualizers are used after the preset is
 resolved. It is a Proximal Alternating Direction Method of Multipliers (P-ADMM)
-based solver for constrained rigid multi-body dynamics, and its Isaac Lab support
-is currently beta.
+based solver for constrained rigid multi-body dynamics.
 
 .. note::
 
-    Kamino support is experimental and currently depends on the asset being
-    structured in a way that Kamino can consume. Assets that work with the
+    Kamino requires assets with a compatible model structure. Assets that work with the
     MuJoCo-Warp or PhysX presets may still require model-structure updates before
     they work with ``physics=newton_kamino``.
 
@@ -368,8 +339,8 @@ For simple values (scalars, lists) that don't warrant a full subclass, use the
         default=0.0, isaacsim_physx=0.0, newton_mjwarp=0.01, physx=0.0
     )
 
-This is equivalent to defining a ``PresetCfg`` subclass with the same ``float``
-fields, but without the ceremony. The ``default`` keyword is required.
+This creates the same fields as a ``PresetCfg`` subclass. The ``default`` argument
+is required.
 
 ``preset()`` works for any value type -- scalars, lists, or even config
 instances:
@@ -386,7 +357,7 @@ instances:
         depth: list = ["depth"]
         albedo: list = ["albedo"]
 
-Use ``preset()`` when the definition fits on a single line.  Use a
+Use ``preset()`` when the definition fits on a single line. Use a
 ``PresetCfg`` subclass when the options are verbose enough to benefit from
 type annotations and multiline formatting.
 
@@ -446,7 +417,7 @@ task-specific modes.
    * - ``newton_mjwarp``
      - Newton physics with the MuJoCo-Warp solver
    * - ``newton_kamino``
-     - Newton physics with the Kamino solver (beta; limited tasks — see :ref:`hydra-backend-solver-presets`)
+     - Newton physics with the Kamino solver (selected tasks — see :ref:`hydra-backend-solver-presets`)
    * - ``ovphysx``
      - Concrete OvPhysX configuration for supported kit-less tasks
 
@@ -475,9 +446,13 @@ and ``renderer=rtx`` are opt-in, not universal defaults.
 
 Domain presets (observation modes, camera configurations, etc.) are task-specific.
 Pass ``--task=<task-name> --help`` to a training command to see all presets available
-for that task, grouped by selector type. Reinforcement-learning commands also list
-the registered ``--agent`` values for the selected library. When a task declares
-preset-to-agent compatibility, the compatible presets appear beneath each agent:
+for that task, grouped by selector type.
+
+For reinforcement-learning tasks, preset resolution composes the registered
+environment and agent configurations as sibling roots. A library's canonical
+``<library>_cfg_entry_point`` may therefore return a root-level ``PresetCfg`` with
+the same alternative names as the environment. A broadcast such as
+``presets=resnet18`` selects ``resnet18`` in both roots in one resolution pass:
 
 .. tab-set::
 
@@ -486,18 +461,22 @@ preset-to-agent compatibility, the compatible presets appear beneath each agent:
       .. code-block:: bash
 
           uv run isaaclab train --rl_library rsl_rl \
-               --task Isaac-Cartpole-Camera --help
+               --task Isaac-Cartpole-Camera presets=resnet18
 
-   .. tab-item:: isaaclab.sh / isaaclab.bat
+This is the preferred way to keep an environment-coupled policy shape, such as a
+feature extractor or action-space head, aligned with the selected environment. It
+does not require a preset-specific registry entry or rewrite ``--agent``.
 
-      .. code-block:: bash
+Independent training recipes remain explicit agent choices. A task may select an
+alternate agent for symmetry, recurrence, distillation, or another algorithm
+without changing its environment preset.
 
-          ./isaaclab.sh train --rl_library rsl_rl \
-               --task Isaac-Cartpole-Camera --help
-
-Preset and agent selection are otherwise independent. A task may use an alternate
-agent for symmetry, recurrence, or another algorithm without changing its environment
-preset.
+Preset-specific agent entry points and registry-side preset-to-agent maps are not
+part of this model. Use the canonical entry point and select its variant with
+``presets=``. For older SKRL runs whose manifest or directory encoded a
+configuration-key suffix instead of ``agent.class`` as the algorithm, pass the
+checkpoint path explicitly instead of using automatic ``latest`` or ``best``
+discovery.
 
 .. note::
 
@@ -549,6 +528,10 @@ Using Presets
 
     uv run isaaclab train --rl_library rsl_rl \
         --task Isaac-Lift-KukaAllegro-Camera presets=duo_camera,rgb128
+
+The KukaAllegro ``-Camera`` tasks default to a single camera and the matching
+RSL-RL CNN actor. ``presets=duo_camera`` switches both the camera rig and actor
+inputs; the critic continues to use state observations.
 
 **Combined** -- typed selectors, a domain preset, and a scalar override:
 
