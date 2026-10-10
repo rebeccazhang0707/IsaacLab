@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+from types import SimpleNamespace
 
 import pytest
 from isaaclab_newton.physics import NewtonCfg
@@ -33,6 +34,37 @@ from isaaclab_rl.entrypoints.common import (
 from isaaclab_tasks.utils import setup_preset_cli
 
 _KIT_LAUNCHER = "isaaclab_physx.app:KitLauncher"
+
+
+@pytest.mark.parametrize("closeup_env", [None, 0])
+def test_gl_video_grid_places_closeup_in_bottom_right(monkeypatch, closeup_env):
+    """The closeup replaces exactly four cells; the other environment views keep their positions."""
+    import numpy as np
+    import torch
+
+    from isaaclab_rl.entrypoints._newton_gl_video import _NewtonGLVideoGrid, _NewtonGLVideoGridCfg
+
+    grid = object.__new__(_NewtonGLVideoGrid)
+    grid.cfg = _NewtonGLVideoGridCfg(closeup_env=closeup_env, closeup_offset=(0.0, 0.0, 1.0))
+    origins = torch.zeros((16, 3))
+    origins[:, 0] = torch.arange(16)
+    grid._scene_data_provider = SimpleNamespace(get_interactive_scene=lambda: SimpleNamespace(env_origins=origins))
+    grid._viewer = SimpleNamespace(camera=SimpleNamespace(far=1000.0))
+    grid._last_camera_pose = None
+
+    def render_view(eye, lookat, *, update_state):
+        color = (250, 200, 0) if lookat[2] == 1.0 else (int(lookat[0]) + 1, 20, 40)
+        return np.full((30, 40, 3), color, dtype=np.uint8)
+
+    monkeypatch.setattr(grid, "_render_view", render_view)
+    frame = grid.render_rgb_array()
+    assert frame.shape == (1080, 1920, 3)
+    for env_id in range(16):
+        row, column = divmod(env_id, 4)
+        expected = (env_id + 1, 20, 40)
+        if closeup_env is not None and env_id in (10, 11, 14, 15):
+            expected = (250, 200, 0)
+        np.testing.assert_array_equal(frame[row * 270 + 135, column * 480 + 240], expected)
 
 
 def _args(**kwargs: object) -> argparse.Namespace:

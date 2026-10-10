@@ -26,12 +26,44 @@ from isaaclab.sim import SimulationCfg
 from isaaclab_rl.entrypoints import common as rl_common
 from isaaclab_rl.entrypoints.common import (
     CaptureEnvSensors,
+    EpisodeSuccessEvaluator,
     add_common_train_args,
     create_isaaclab_env,
     enable_cameras_for_video,
     normalize_task_name,
     wrap_sensor_capture,
 )
+
+
+def test_episode_success_evaluator_uses_fixed_quotas() -> None:
+    """Fast episodes cannot displace slower failures or exceed the requested count."""
+    evaluator = EpisodeSuccessEvaluator(num_envs=3, num_episodes=5, device="cpu")
+    evaluator.update(torch.tensor([1, 0, 0]), torch.tensor([1, 0, 0]))
+    evaluator.update(torch.tensor([1, 0, 0]), torch.tensor([1, 0, 0]))
+    evaluator.update(torch.tensor([1, 1, 1]), torch.tensor([1, 0, 1]))
+    assert not evaluator.complete
+    evaluator.update(torch.tensor([1, 1, 1]), torch.tensor([1, 0, 1]))
+    assert evaluator.complete
+    assert evaluator.successes == 3
+    assert evaluator.episodes == [
+        {"env_id": 0, "success": True, "length_steps": 1},
+        {"env_id": 0, "success": True, "length_steps": 1},
+        {"env_id": 1, "success": False, "length_steps": 3},
+        {"env_id": 2, "success": True, "length_steps": 3},
+        {"env_id": 1, "success": False, "length_steps": 1},
+    ]
+    assert evaluator.update(torch.ones(3), torch.ones(3)) == 0
+
+
+def test_episode_success_evaluator_with_fewer_episodes_than_envs() -> None:
+    """Zero-quota environments and success flags without a done are ignored."""
+    evaluator = EpisodeSuccessEvaluator(num_envs=4, num_episodes=1, device="cpu")
+    evaluator.update(torch.tensor([0, 1, 1, 1]), torch.ones(4))
+    assert not evaluator.episodes
+    evaluator.update(torch.tensor([1, 1, 1, 1]), torch.ones(4))
+    assert evaluator.complete
+    assert evaluator.successes == 1
+    assert evaluator.episodes == [{"env_id": 0, "success": True, "length_steps": 2}]
 
 
 class _FakeEnv(gym.Env):

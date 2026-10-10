@@ -53,6 +53,58 @@ Scoped global state.
 """
 
 
+class EpisodeSuccessEvaluator:
+    """Count completed episodes using fixed per-environment evaluation quotas.
+
+    Quotas differ by at most one episode and sum to ``num_episodes``. This avoids
+    over-representing environments with shorter episodes when stopping evaluation.
+
+    Args:
+        num_envs: Number of parallel environments.
+        num_episodes: Total number of episodes to evaluate.
+        device: Device holding the environment's termination tensors.
+    """
+
+    def __init__(self, num_envs: int, num_episodes: int, device: str):
+        if num_envs <= 0 or num_episodes <= 0:
+            raise ValueError("num_envs and num_episodes must be positive.")
+        self.num_episodes = num_episodes
+        self.quotas = torch.full((num_envs,), num_episodes // num_envs, device=device, dtype=torch.long)
+        self.quotas[: num_episodes % num_envs] += 1
+        self.counts = torch.zeros_like(self.quotas)
+        self.lengths = torch.zeros_like(self.quotas)
+        self.episodes: list[dict[str, int | bool]] = []
+        self.successes = 0
+
+    @property
+    def complete(self) -> bool:
+        """Whether all requested episodes have finished."""
+        return len(self.episodes) == self.num_episodes
+
+    def update(self, dones: torch.Tensor, successes: torch.Tensor) -> int:
+        """Record terminal outcomes before the next environment step.
+
+        Args:
+            dones: Episode termination or timeout flags, shape [num_envs].
+            successes: Success termination flags from the same step, shape [num_envs].
+
+        Returns:
+            Number of newly recorded episodes. Episodes beyond an environment's
+            quota are ignored. A success on the timeout step counts as a success.
+        """
+        self.lengths += 1
+        finished = dones.bool() & (self.counts < self.quotas)
+        env_ids = finished.nonzero(as_tuple=True)[0]
+        outcomes = successes[env_ids].bool().tolist()
+        lengths = self.lengths[env_ids].tolist()
+        for env_id, success, length in zip(env_ids.tolist(), outcomes, lengths, strict=True):
+            self.episodes.append({"env_id": env_id, "success": success, "length_steps": length})
+            self.successes += int(success)
+        self.counts[env_ids] += 1
+        self.lengths[dones.bool()] = 0
+        return len(outcomes)
+
+
 @contextmanager
 def preserve_attribute(target: object, name: str) -> Iterator[None]:
     """Restore an attribute after a scoped operation.
