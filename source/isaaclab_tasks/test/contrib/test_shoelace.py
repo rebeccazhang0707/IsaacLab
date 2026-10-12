@@ -14,27 +14,39 @@ import torch
 
 from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
-from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import RewardTermCfg, SceneEntityCfg, TerminationTermCfg
 
 from isaaclab_tasks.contrib.shoelace.mdp.events import reset_shoe_position
 from isaaclab_tasks.contrib.shoelace.mdp.grasp import shoelace_grasp_quality
-from isaaclab_tasks.contrib.shoelace.mdp.observations import gripper_close_error, tail_tcp_relative_speed, tails_to_tcp
+from isaaclab_tasks.contrib.shoelace.mdp.observations import (
+    finger_tail_relative_velocity,
+    gripper_close_error,
+    tail_tcp_relative_speed,
+    tails_to_tcp,
+)
+from isaaclab_tasks.contrib.shoelace.mdp.rewards import dense_task_reward, pregrasp_progress_reward
+from isaaclab_tasks.contrib.shoelace.mdp.terminations import shoelace_bilateral_pull_success
 from isaaclab_tasks.contrib.shoelace.shoelace_env_cfg import ShoelaceEnvCfg
 from isaaclab_tasks.contrib.shoelace.shoelace_physics import configure_shoelace_builder
 
 
-@pytest.mark.parametrize(("open_position", "closed_position", "direction"), [(0.04, 0.0, -1.0), (0.0, 1.2, 1.0)])
-def test_finger_closure_quality_and_residual_support_both_joint_directions(
-    open_position: float, closed_position: float, direction: float
+@pytest.mark.parametrize(
+    ("open_position", "closed_position", "direction"),
+    [(0.04, 0.0, -1.0), (0.0, 1.2, 1.0), ((0.6, 0.65), (0.8, 0.85), 1.0)],
+)
+def test_finger_tracking_residual_supports_both_joint_directions(
+    open_position: float | tuple[float, float], closed_position: float | tuple[float, float], direction: float
 ) -> None:
-    """Closing prismatic and revolute fingers must gain grasp quality and reduce obstruction residuals."""
-    positions = torch.tensor([[open_position], [(open_position + closed_position) / 2], [closed_position]])
+    """Tracking residuals must handle both joint directions and different left/right strokes."""
+    opened = torch.tensor(open_position).expand(2)
+    closed = torch.tensor(closed_position).expand(2)
+    positions = torch.stack([opened, (opened + closed) / 2, closed])
     robot = SimpleNamespace(
         data=SimpleNamespace(
             joint_pos=SimpleNamespace(torch=positions),
-            joint_pos_target=SimpleNamespace(torch=torch.full_like(positions, closed_position)),
-            body_quat_w=SimpleNamespace(torch=torch.tensor([0.0, 0.0, 0.0, 1.0]).expand(3, 1, 4)),
-            body_link_vel_w=SimpleNamespace(torch=torch.zeros(3, 1, 6)),
+            joint_pos_target=SimpleNamespace(torch=closed.expand_as(positions)),
+            body_quat_w=SimpleNamespace(torch=torch.tensor([0.0, 0.0, 0.0, 1.0]).expand(3, 2, 4)),
+            body_link_vel_w=SimpleNamespace(torch=torch.zeros(3, 2, 6)),
         )
     )
     cable = SimpleNamespace(
@@ -45,7 +57,7 @@ def test_finger_closure_quality_and_residual_support_both_joint_directions(
     )
     env = SimpleNamespace(
         num_envs=3,
-        cfg=SimpleNamespace(),
+        cfg=SimpleNamespace(tcp_body_offsets=((constants.TCP_OFFSET,),) * 2),
         scene={
             "robot": robot,
             "left": cable,
@@ -53,13 +65,8 @@ def test_finger_closure_quality_and_residual_support_both_joint_directions(
             "finger_tail_contacts": SimpleNamespace(data=torch.zeros(3, 4)),
         },
     )
-    robot_cfgs = (SceneEntityCfg("robot", joint_ids=[0], body_ids=[0]),) * 2
-    quality, finite = shoelace_grasp_quality(
-        env, 0.001, 0.08, open_position, closed_position, (SceneEntityCfg("left"), SceneEntityCfg("right")), robot_cfgs
-    )
-    torch.testing.assert_close(quality, torch.tensor([[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]]), atol=1.0e-5, rtol=0.0)
-    assert finite.all()
-    residual = gripper_close_error(env, robot_cfgs, closing_direction=direction) / abs(closed_position - open_position)
+    robot_cfgs = tuple(SceneEntityCfg("robot", joint_ids=[index], body_ids=[index]) for index in range(2))
+    residual = gripper_close_error(env, robot_cfgs, closing_direction=direction) / (closed - opened).abs()
     torch.testing.assert_close(residual, torch.tensor([[1.0, 1.0], [0.5, 0.5], [0.0, 0.0]]))
 
 
@@ -80,7 +87,7 @@ def test_tcp_observations_use_each_hand_offset_for_position_and_angular_velocity
         )
     )
     env = SimpleNamespace(
-        cfg=SimpleNamespace(tcp_offsets=((0.1, 0.0, 0.0), (0.0, 0.2, 0.0))),
+        cfg=SimpleNamespace(tcp_body_offsets=(((0.1, 0.0, 0.0),), ((0.0, 0.2, 0.0),))),
         scene={"robot": robot, "left": cable, "right": cable},
     )
     robot_cfgs = (SceneEntityCfg("robot", body_ids=[0]),) * 2
@@ -89,6 +96,167 @@ def test_tcp_observations_use_each_hand_offset_for_position_and_angular_velocity
         tails_to_tcp(env, cable_cfgs, robot_cfgs), torch.tensor([[0.0, -0.1, 0.0, 0.2, 0.0, 0.0]])
     )
     torch.testing.assert_close(tail_tcp_relative_speed(env, cable_cfgs, robot_cfgs), torch.tensor([[0.2, 0.4]]))
+
+
+def _geometry_env(num_envs: int):
+    cfg = ShoelaceEnvCfg()
+    cfg.finger_body_offsets = ((0.0, 0.0, 0.0),) * 4
+    cfg.grasp_open_apertures = (0.03, 0.03)
+    points = torch.zeros(num_envs, 4, 3)
+    points[:, [0, 2], 0] = -0.0015
+    points[:, [1, 3], 0] = 0.0015
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            body_pos_w=SimpleNamespace(torch=points),
+            body_quat_w=SimpleNamespace(torch=torch.tensor([0.0, 0.0, 0.0, 1.0]).expand(num_envs, 4, 4)),
+            body_link_vel_w=SimpleNamespace(torch=torch.zeros(num_envs, 4, 6)),
+            root_quat_w=SimpleNamespace(torch=torch.tensor([0.0, 0.0, 0.0, 1.0]).expand(num_envs, 4)),
+        )
+    )
+    pose = torch.zeros(num_envs, 3, 7)
+    pose[:, :, 1] = torch.tensor([-0.003, 0.0, 0.003])
+    cables = [
+        SimpleNamespace(
+            data=SimpleNamespace(
+                segment_pose_w=SimpleNamespace(torch=pose.clone()),
+                segment_velocity_w=SimpleNamespace(torch=torch.zeros(num_envs, 3, 6)),
+            )
+        )
+        for _ in range(2)
+    ]
+    env = SimpleNamespace(
+        num_envs=num_envs,
+        device="cpu",
+        step_dt=0.1,
+        cfg=cfg,
+        extras={"log": {}},
+        scene={
+            "robot": robot,
+            "left": cables[0],
+            "right": cables[1],
+            "finger_tail_contacts": SimpleNamespace(data=torch.zeros(num_envs, 4)),
+        },
+        termination_manager=SimpleNamespace(
+            dones=torch.zeros(num_envs, dtype=torch.bool), get_term=lambda name: torch.zeros(num_envs, dtype=torch.bool)
+        ),
+    )
+    fingers = tuple(SceneEntityCfg("robot", body_ids=[i]) for i in range(4))
+    cable_cfgs = (SceneEntityCfg("left"), SceneEntityCfg("right"))
+    return env, fingers, cable_cfgs
+
+
+def test_grasp_requires_local_two_surface_capture_and_uncancelled_slip() -> None:
+    """Grasp scoring must use geometry without joint data, and opposed sliding must fail the pull gate."""
+    env, fingers, cables = _geometry_env(4)
+    points = env.scene["robot"].data.body_pos_w.torch
+    points[0, [0, 2], 0] = -0.015
+    points[0, [1, 3], 0] = 0.015
+    env.scene["finger_tail_contacts"].data[1, [1, 3]] = 0.002
+    velocity = env.scene["robot"].data.body_link_vel_w.torch
+    # Motion across the tail must also fail, without a tail-direction-dependent projection.
+    velocity[3, [0, 2], 0] = 0.1
+    velocity[3, [1, 3], 0] = -0.1
+    quality, finite = shoelace_grasp_quality(env, 0.0005, 0.08, cables, fingers, 0.001)
+    assert finite.all()
+    assert (quality[:2] < 1e-5).all()
+    assert (quality[2] > 0.99).all()
+    assert (quality[3] < 0.2).all()
+    # Direction remains available to the actor, rather than cancelling at the midpoint.
+    relative = finger_tail_relative_velocity(env, fingers, cables).reshape(4, 4, 3)
+    torch.testing.assert_close(relative[3, :, 0], torch.tensor([-0.1, 0.1, -0.1, 0.1]))
+
+
+def test_capture_preserving_asymmetric_closure_and_first_contact_earn_progress() -> None:
+    """A moving midpoint must not lose approach credit while the tail stays bracketed by the surfaces."""
+    env, fingers, cables = _geometry_env(1)
+    cfg = RewardTermCfg(func=pregrasp_progress_reward)
+    pregrasp = pregrasp_progress_reward(cfg, env)
+    dense_cfg = RewardTermCfg(func=dense_task_reward, params=env.cfg.rewards.dense_task.params.copy())
+    dense = dense_task_reward(dense_cfg, env)
+    dense_params = dense_cfg.params | {"cable_cfgs": cables, "finger_cfgs": fingers}
+    points = env.scene["robot"].data.body_pos_w.torch
+    points[:, [0, 2], 0] = -0.015
+    points[:, [1, 3], 0] = 0.015
+    assert pregrasp(env, 0.015, 0.01, cables, fingers).item() == 0
+    assert dense(env, **dense_params).item() == 0
+    points[:, [1, 3], 0] = 0.003
+    assert pregrasp(env, 0.015, 0.01, cables, fingers).item() > 0
+    assert abs(dense(env, **dense_params).item()) < 1e-4
+    # Restore a small captured aperture, then acquire just the first finger contact.
+    points[:, [0, 2], 0] = -0.0015
+    points[:, [1, 3], 0] = 0.0015
+    env.scene["finger_tail_contacts"].data.fill_(0.002)
+    pregrasp(env, 0.015, 0.01, cables, fingers)
+    assert pregrasp(env, 0.015, 0.01, cables, fingers).item() == 0
+    env.scene["finger_tail_contacts"].data[0, 0] = 0
+    assert pregrasp(env, 0.015, 0.01, cables, fingers).item() > 0
+    env.scene["finger_tail_contacts"].data.fill_(0.002)
+    assert pregrasp(env, 0.015, 0.01, cables, fingers).item() < 0
+    # Moving the closed pair away removes capture credit; reset never pays for it.
+    points[:, :, 2] += 0.02
+    assert pregrasp(env, 0.015, 0.01, cables, fingers).item() < 0
+    pregrasp.reset([0])
+    assert pregrasp(env, 0.015, 0.01, cables, fingers).item() == 0
+
+
+def test_loaded_pull_success_survives_only_unselected_resets() -> None:
+    """Success must require loaded pull history and clear it only for selected environments."""
+    env, fingers, cables = _geometry_env(2)
+    term = shoelace_bilateral_pull_success(TerminationTermCfg(func=shoelace_bilateral_pull_success), env)
+    params = dict(
+        throat_radius=0.025,
+        minimum_pull_distance=0.004,
+        minimum_tail_outward_distance=0.004,
+        grasp_threshold=0.2,
+        contact_std=0.0005,
+        relative_speed_std=0.08,
+        grasp_filter_time_constant=0.1,
+        cable_cfgs=cables,
+        finger_cfgs=fingers,
+        contact_penetration_tolerance=0.001,
+    )
+    assert not term(env, **params).any()
+    env.scene["right"].data.segment_pose_w.torch[:, :, 0] -= 0.005
+    env.scene["left"].data.segment_pose_w.torch[:, :, 0] += 0.005
+    env.scene["robot"].data.body_pos_w.torch[:, :2, 0] -= 0.005
+    env.scene["robot"].data.body_pos_w.torch[:, 2:, 0] += 0.005
+    assert term(env, **params).all()
+    term.reset(torch.tensor([1]))
+    torch.testing.assert_close(term(env, **params), torch.tensor([True, False]))
+
+
+def test_tcp_tracks_both_surface_points_and_their_linear_and_angular_velocities() -> None:
+    """Finger motion must move the TCP and contribute to slip even when the wrist frame stays fixed."""
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            root_quat_w=SimpleNamespace(torch=torch.tensor([[0.0, 0.0, 2**-0.5, 2**-0.5]])),
+            body_pos_w=SimpleNamespace(torch=torch.tensor([[[1.0, 0.0, 0.0], [3.0, 0.0, 0.0]]])),
+            body_quat_w=SimpleNamespace(torch=torch.tensor([[[0.0, 0.0, 2**-0.5, 2**-0.5], [0.0, 0.0, 0.0, 1.0]]])),
+            body_link_vel_w=SimpleNamespace(
+                torch=torch.tensor([[[0.0, 1.0, 0.0, 0.0, 0.0, 2.0], [0.0, 3.0, 0.0, 0.0, 0.0, -2.0]]])
+            ),
+        )
+    )
+    cable = SimpleNamespace(
+        data=SimpleNamespace(
+            segment_pose_w=SimpleNamespace(torch=torch.zeros(1, 3, 7)),
+            segment_velocity_w=SimpleNamespace(torch=torch.zeros(1, 3, 6)),
+        )
+    )
+    env = SimpleNamespace(
+        cfg=SimpleNamespace(tcp_body_offsets=(((0.2, 0.0, 0.0), (0.0, 0.4, 0.0)), ((0.0, 0.0, 0.0),) * 2)),
+        scene={"robot": robot, "left": cable, "right": cable},
+    )
+    robot_cfgs = (SceneEntityCfg("robot", body_ids=[0, 1]),) * 2
+    cable_cfgs = (SceneEntityCfg("left"), SceneEntityCfg("right"))
+    torch.testing.assert_close(
+        tails_to_tcp(env, cable_cfgs, robot_cfgs), torch.tensor([[-0.3, 2.0, 0.0, 0.0, 2.0, 0.0]]), atol=1e-6, rtol=1e-6
+    )
+    torch.testing.assert_close(tail_tcp_relative_speed(env, cable_cfgs, robot_cfgs), torch.tensor([[4.04**0.5, 2.0]]))
+    robot.data.body_pos_w.torch[0, 1, 0] = 5.0
+    torch.testing.assert_close(
+        tails_to_tcp(env, cable_cfgs, robot_cfgs), torch.tensor([[-0.3, 3.0, 0.0, 0.0, 3.0, 0.0]]), atol=1e-6, rtol=1e-6
+    )
 
 
 @pytest.mark.parametrize("env_ids", [slice(1, 4, 2), torch.tensor([3, 1])])
