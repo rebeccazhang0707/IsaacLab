@@ -12,14 +12,15 @@ import isaaclab.envs.mdp as env_mdp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from isaaclab.controllers import DifferentialIKControllerCfg
-from isaaclab.managers import ObservationTermCfg, SceneEntityCfg
+from isaaclab.managers import ObservationTermCfg, RewardTermCfg, SceneEntityCfg
 from isaaclab.utils import clone, configclass
 
 from isaaclab_assets.robots.unitree import G1_INSPIRE_FTP_CFG
 
 from .mdp.inspire_hand_cfg import InspireFingerActionCfg, InspirePinchIKActionCfg
+from .mdp.rewards import binary_gripper_switch_rate
 from .shoelace_assets import ShoelaceUsdCfg
-from .shoelace_env_cfg import ObservationsCfg, ShoelaceEnvCfg, ShoelaceSceneCfg
+from .shoelace_env_cfg import ObservationsCfg, RewardsCfg, ShoelaceEnvCfg, ShoelaceSceneCfg
 
 _ARM_JOINTS = r"{side}_(shoulder_.*|elbow|wrist_.*)_joint"
 # Finger targets and near-tip surface landmarks from a constrained fit around a 2.8 mm target.
@@ -210,6 +211,13 @@ class G1ShoelaceObservationsCfg(ObservationsCfg):
 
 
 @configclass
+class G1ShoelaceRewardsCfg(RewardsCfg):
+    """Shared grasp rewards with a cost per binary hand command reversal."""
+
+    finger_action_switch = RewardTermCfg(func=binary_gripper_switch_rate, weight=-0.002)
+
+
+@configclass
 class G1ShoelaceEnvCfg(ShoelaceEnvCfg):
     """G1 Inspire variant sharing the cable, reset, reward and bilateral success definitions.
 
@@ -221,6 +229,7 @@ class G1ShoelaceEnvCfg(ShoelaceEnvCfg):
     scene: G1ShoelaceSceneCfg = G1ShoelaceSceneCfg(num_envs=4, env_spacing=2.5, replicate_physics=True)
     actions: G1ShoelaceActionsCfg = G1ShoelaceActionsCfg()
     observations: G1ShoelaceObservationsCfg = G1ShoelaceObservationsCfg()
+    rewards: G1ShoelaceRewardsCfg = G1ShoelaceRewardsCfg()
     tcp_body_offsets = _TCP_BODY_OFFSETS
     """Thumb/index surface offsets in their own body frames; the live mean defines each TCP [m]."""
     finger_body_offsets = _PAD_OFFSETS

@@ -71,6 +71,31 @@ def shoelace_success_reward(env: ManagerBasedRLEnv) -> torch.Tensor:
     return env.termination_manager.get_term("success").float() / env.step_dt
 
 
+def binary_gripper_switch_rate(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Count open/close command changes per second across the two binary grippers.
+
+    Negative actions close and nonnegative actions open. Changes in action magnitude within one
+    state are free. The first command after reset establishes the state without a switching cost.
+    RewardManager cancels the timestep division, so the weight is the cost per hand per switch.
+
+    Args:
+        env: Task environment with scalar ``left_gripper`` and ``right_gripper`` action terms.
+
+    Returns:
+        Binary command switching rates [1/s], shape [N].
+    """
+    indices = {}
+    start = 0
+    for name, dim in zip(env.action_manager.active_terms, env.action_manager.action_term_dim, strict=True):
+        indices[name] = start
+        start += dim
+    grippers = [indices["left_gripper"], indices["right_gripper"]]
+    closed = env.action_manager.action[:, grippers] < 0
+    was_closed = env.action_manager.prev_action[:, grippers] < 0
+    switches = (closed != was_closed).float().sum(dim=1)
+    return switches * (env.episode_length_buf > 1) / env.step_dt
+
+
 class dense_task_reward(ManagerTermBase):
     """Stateful progress reward for acquiring and pulling the two free tails.
 

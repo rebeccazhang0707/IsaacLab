@@ -14,7 +14,7 @@ import torch
 
 from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
-from isaaclab.managers import RewardTermCfg, SceneEntityCfg, TerminationTermCfg
+from isaaclab.managers import RewardManager, RewardTermCfg, SceneEntityCfg, TerminationTermCfg
 
 from isaaclab_tasks.contrib.shoelace.mdp.events import reset_shoe_position
 from isaaclab_tasks.contrib.shoelace.mdp.grasp import shoelace_grasp_quality
@@ -24,10 +24,48 @@ from isaaclab_tasks.contrib.shoelace.mdp.observations import (
     tail_tcp_relative_speed,
     tails_to_tcp,
 )
-from isaaclab_tasks.contrib.shoelace.mdp.rewards import dense_task_reward, pregrasp_progress_reward
+from isaaclab_tasks.contrib.shoelace.mdp.rewards import (
+    binary_gripper_switch_rate,
+    dense_task_reward,
+    pregrasp_progress_reward,
+)
 from isaaclab_tasks.contrib.shoelace.mdp.terminations import shoelace_bilateral_pull_success
 from isaaclab_tasks.contrib.shoelace.shoelace_env_cfg import ShoelaceEnvCfg
 from isaaclab_tasks.contrib.shoelace.shoelace_physics import configure_shoelace_builder
+
+
+def test_binary_gripper_switch_cost_counts_commands_and_ignores_resets() -> None:
+    """Tiny sign changes cost one switch, while arm motion and same-state changes remain free."""
+    # Deliberately order the terms differently from the task's default action layout.
+    previous = torch.tensor([[0.0, 1.0, -1.0, -0.8]]).repeat(5, 1)
+    current = torch.tensor(
+        [
+            [0.8, -1.0, 1.0, -0.01],
+            [-0.0001, 1.0, -1.0, -0.8],
+            [-0.0001, 1.0, -1.0, 0.0],
+            [-0.0001, 1.0, -1.0, 0.0],
+            [0.0, 1.0, -1.0, -0.8],
+        ]
+    )
+    env = SimpleNamespace(
+        num_envs=5,
+        device="cpu",
+        step_dt=1.0 / 30.0,
+        sim=SimpleNamespace(is_playing=lambda: True),
+        episode_length_buf=torch.tensor([10, 10, 10, 1, 1]),
+        action_manager=SimpleNamespace(
+            active_terms=["right_gripper", "left_arm", "left_gripper"],
+            action_term_dim=[1, 2, 1],
+            action=current,
+            prev_action=previous,
+        ),
+    )
+    manager = RewardManager({"switch": RewardTermCfg(func=binary_gripper_switch_rate, weight=-0.002)}, env)
+    expected = torch.tensor([0.0, -0.002, -0.004, 0.0, 0.0])
+    torch.testing.assert_close(manager.compute(env.step_dt), expected)
+    # Changing the control rate must not change the cost of the same command transitions.
+    env.step_dt = 1.0 / 60.0
+    torch.testing.assert_close(manager.compute(env.step_dt), expected)
 
 
 @pytest.mark.parametrize(
