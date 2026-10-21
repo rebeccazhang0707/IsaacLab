@@ -23,6 +23,7 @@ from .grasp import (
     hamacher_product,
     shoelace_grasp_quality,
 )
+from .observations import tails_to_tcp
 from .utils import tail_outward_x, tail_x_separation
 
 if TYPE_CHECKING:
@@ -148,6 +149,8 @@ class dense_task_reward(ManagerTermBase):
         *,
         acquisition_weight: float = 0.6,
         approach_fraction: float = 0.5,
+        approach_robot_cfgs: tuple[SceneEntityCfg, SceneEntityCfg] | None = None,
+        approach_saturation_radius: float = 0.0,
         bilateral_pull_fraction: float = 0.8,
         bilateral_approach_fraction: float = 0.5,
         bilateral_grasp_fraction: float = 0.7,
@@ -170,7 +173,7 @@ class dense_task_reward(ManagerTermBase):
 
         Args:
             env: The task environment.
-            reach_std: Tail-to-capture-region approach-distance width [m].
+            reach_std: Coarse approach-distance width [m].
             contact_std: Contact-distance width [m]; gaps and deep penetration reduce grasp quality.
             relative_speed_std: Worst-finger relative-speed width [m/s].
             grasp_filter_time_constant: Grasp-quality low-pass time constant [s].
@@ -179,6 +182,13 @@ class dense_task_reward(ManagerTermBase):
             finger_cfgs: Required opposing surface-reference bodies for each hand.
             acquisition_weight: Acquisition fraction in [0, 1]; pulling receives the remainder.
             approach_fraction: Approach share of acquisition in [0, 1]; grasps receive the remainder.
+            approach_robot_cfgs: Optional TCP bodies in left/right arm order, using
+                ``env.cfg.tcp_body_offsets`` like the TCP observations. When supplied, coarse
+                approach uses tail-to-TCP distance; otherwise it uses the live capture segment.
+                Physical grasp scoring always uses the actual finger surfaces and contacts.
+            approach_saturation_radius: Approach-distance radius [m] inside which coarse approach
+                potential stays at its boundary value. Fine alignment and closure use pregrasp shaping.
+                Zero preserves the original curve; distances outside the radius are unchanged.
             bilateral_pull_fraction: Bilateral share of pulling in [0, 1]; zero disables the bonus.
             bilateral_approach_fraction: Bilateral share of approach in [0, 1]; zero gives the per-arm mean.
             bilateral_grasp_fraction: Bilateral share of grasp acquisition in [0, 1]; zero gives the per-arm mean.
@@ -205,12 +215,19 @@ class dense_task_reward(ManagerTermBase):
             raise ValueError("Bilateral approach, grasp, and pull fractions must be in [0, 1]")
         if not math.isfinite(success_x_separation) or success_x_separation <= 0.0:
             raise ValueError("success_x_separation must be finite and positive")
+        if not math.isfinite(approach_saturation_radius) or approach_saturation_radius < 0.0:
+            raise ValueError("approach_saturation_radius must be finite and nonnegative")
         if not 0.0 < pull_grasp_threshold <= 1.0:
             raise ValueError("pull_grasp_threshold must be in (0, 1]")
 
         # Per-arm tensors follow robot order (left, right), which is opposite to the cable naming.
         geometry = grasp_geometry(env, cable_cfgs, finger_cfgs)
         tail_distances = geometry["capture_distance"]
+        approach_distance = tail_distances
+        if approach_robot_cfgs is not None:
+            approach_distance = (
+                tails_to_tcp(env, cable_cfgs, approach_robot_cfgs).reshape(env.num_envs, 2, 3).norm(dim=-1)
+            )
         per_gripper_grasp, grasp_finite = shoelace_grasp_quality(
             env,
             contact_std,
@@ -224,12 +241,13 @@ class dense_task_reward(ManagerTermBase):
         # Per-environment numerical mask for reward inputs; this does not assess grasp or task success.
         finite = (
             torch.isfinite(tail_distances).all(dim=1)
+            & torch.isfinite(approach_distance).all(dim=1)
             & grasp_finite
             & torch.isfinite(x_separation)
             & torch.isfinite(outward_x).all(dim=1)
         )
 
-        approach = 1.0 - torch.tanh(tail_distances / max(reach_std, 1.0e-6))
+        approach = 1.0 - torch.tanh(approach_distance.clamp_min(approach_saturation_radius) / max(reach_std, 1.0e-6))
         filtered_per_gripper_grasp = filter_grasps(
             self._filtered_per_gripper_grasp,
             per_gripper_grasp,
@@ -273,6 +291,7 @@ class dense_task_reward(ManagerTermBase):
         self._best_pull_progress.copy_(torch.where(finite.unsqueeze(1), best_progress, self._best_pull_progress))
 
         metric_values = {
+            "approach_distance_m": approach_distance.mean(dim=1),
             "capture_distance_m": tail_distances.mean(dim=1),
             "surface_midpoint_distance_m": geometry["surface_midpoint_distance"].mean(dim=1),
             "grasp_left": filtered_per_gripper_grasp[:, 0],

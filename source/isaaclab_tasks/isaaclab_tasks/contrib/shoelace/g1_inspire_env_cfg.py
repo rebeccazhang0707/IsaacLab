@@ -17,19 +17,21 @@ from isaaclab.utils import clone, configclass
 
 from isaaclab_assets.robots.unitree import G1_INSPIRE_FTP_CFG
 
-from .mdp.inspire_hand_cfg import InspireFingerActionCfg, InspirePinchIKActionCfg
+from . import shoelace_constants as physics
+from .g1_inspire_hand import INDEX_CLOSED, PAD_OFFSETS, TCP_BODY_OFFSETS, THUMB_PITCH, THUMB_YAW, spawn_g1_shoelace
+from .mdp.inspire_hand_cfg import InspireFingerActionCfg
 from .mdp.rewards import binary_gripper_switch_rate
 from .shoelace_assets import ShoelaceUsdCfg
 from .shoelace_env_cfg import ObservationsCfg, RewardsCfg, ShoelaceEnvCfg, ShoelaceSceneCfg
 
 _ARM_JOINTS = r"{side}_(shoulder_.*|elbow|wrist_.*)_joint"
 # Finger targets and near-tip surface landmarks from a constrained fit around a 2.8 mm target.
-# TCP is the live surface-point midpoint; dynamic grasp/hold validation remains necessary.
-_INDEX_CLOSED = (0.802548, 0.853050)
-_THUMB_YAW = (1.191681, 1.246639)
-_THUMB_CLOSED = (0.265063, 0.262787)
-_INDEX_OPEN = tuple(value - 0.2 for value in _INDEX_CLOSED)
-_THUMB_OPEN = tuple(value - 0.05 for value in _THUMB_CLOSED)
+# The nominal closed surface midpoint defines a fixed wrist TCP; actual grasp scoring stays live.
+_INDEX_CLOSED = INDEX_CLOSED
+_INDEX_OPEN = tuple(value - 0.25 for value in _INDEX_CLOSED)
+_INDEX_STROKES = tuple(closed - opened for closed, opened in zip(_INDEX_CLOSED, _INDEX_OPEN, strict=True))
+_THUMB_YAW = THUMB_YAW
+_THUMB_FIXED = THUMB_PITCH
 _FINGER_CFGS = tuple(
     SceneEntityCfg("robot", joint_names=[joint], body_names=[body])
     for joint, body in (
@@ -39,30 +41,28 @@ _FINGER_CFGS = tuple(
         ("R_index_proximal_joint", "R_index_intermediate"),
     )
 )
-_PAD_OFFSETS = (
-    (0.019816, -0.013389, -0.004498),
-    (-0.005060, -0.037262, -0.003575),
-    (0.014990, 0.014964, -0.007629),
-    (-0.005540, 0.035395, -0.006249),
-)
-_PAD_BODY_NAMES = (("L_thumb_distal", "L_index_intermediate"), ("R_thumb_distal", "R_index_intermediate"))
-_TCP_BODY_OFFSETS = (_PAD_OFFSETS[:2], _PAD_OFFSETS[2:])
-_ROBOT_CFGS = tuple(
-    SceneEntityCfg(
-        "robot", joint_names=[f"{prefix}_index_proximal_joint"], body_names=list(bodies), preserve_order=True
-    )
-    for prefix, bodies in zip(("L", "R"), _PAD_BODY_NAMES, strict=True)
-)
+_PAD_OFFSETS = PAD_OFFSETS
+# Closed-pad midpoint measured with the robot USD's forward kinematics, in each wrist frame.
+_TCP_BODY_OFFSETS = TCP_BODY_OFFSETS
+_ROBOT_CFGS = tuple(SceneEntityCfg("robot", body_names=[f"{side}_wrist_yaw_link"]) for side in ("left", "right"))
 
 
 def _robot_cfg() -> ArticulationCfg:
     """Configure fixed-base G1 with explicit MJWarp gravity compensation."""
     robot = clone(G1_INSPIRE_FTP_CFG)
+    robot.actuators["hands"].stiffness = 50.0
     robot.spawn = ShoelaceUsdCfg(
+        func=spawn_g1_shoelace,
         usd_path=robot.spawn.usd_path,
         rigid_props={"/.*": [robot.spawn.rigid_props, MujocoRigidBodyCfg(gravcomp=1.0)]},
         articulation_props=robot.spawn.articulation_props,
         fix_root_link=True,
+        make_uninstanceable=True,
+        friction_overrides={"/[LR]_(thumb|index)_[^/]+/.*": physics.FINGER_MU},
+        collision_props={
+            "/.*": [sim_utils.UsdPhysicsCollisionCfg(collision_enabled=False)],
+            "/[LR]_(thumb|index)_[^/]+/.*": [sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)],
+        },
     )
     robot.init_state.pos = (0.0, -0.38, 0.795)
     robot.init_state.rot = (0.0, 0.0, 0.7071067811865476, 0.7071067811865476)
@@ -86,15 +86,15 @@ def _robot_cfg() -> ArticulationCfg:
         "right_wrist_yaw_joint": 0.140190,
     }
     for arm, prefix in enumerate(("L", "R")):
-        robot.init_state.joint_pos.update(_thumb_targets(prefix, _THUMB_OPEN[arm], _THUMB_YAW[arm]))
+        robot.init_state.joint_pos.update(_thumb_targets(prefix, _THUMB_FIXED[arm], _THUMB_YAW[arm]))
         robot.init_state.joint_pos[f"{prefix}_index_proximal_joint"] = _INDEX_OPEN[arm]
-        robot.init_state.joint_pos[f"{prefix}_index_intermediate_joint"] = _INDEX_OPEN[arm]
+        robot.init_state.joint_pos[f"{prefix}_index_intermediate_joint"] = 0.0
     return robot
 
 
-def _arm_action(side: str, arm: int) -> InspirePinchIKActionCfg:
-    """Control the live two-finger midpoint with relative translation and wrist rotation."""
-    return InspirePinchIKActionCfg(
+def _arm_action(side: str, arm: int) -> env_mdp.DifferentialInverseKinematicsActionCfg:
+    """Control the nominal closed pinch point rigidly attached to the wrist."""
+    return env_mdp.DifferentialInverseKinematicsActionCfg(
         asset_name="robot",
         joint_names=[_ARM_JOINTS.format(side=side)],
         body_name=f"{side}_wrist_yaw_link",
@@ -102,28 +102,26 @@ def _arm_action(side: str, arm: int) -> InspirePinchIKActionCfg:
             command_type="pose", use_relative_mode=True, ik_method="dls", ik_params={"lambda_val": 0.05}
         ),
         scale=(0.003, 0.003, 0.003, 0.01, 0.01, 0.01),
-        body_offset=env_mdp.DifferentialInverseKinematicsActionCfg.OffsetCfg(),
-        pad_body_names=_PAD_BODY_NAMES[arm],
-        pad_offsets=_TCP_BODY_OFFSETS[arm],
+        body_offset=env_mdp.DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=_TCP_BODY_OFFSETS[arm][0]),
     )
 
 
 def _thumb_targets(prefix: str, pitch: float, yaw: float) -> dict[str, float]:
-    """Respect the USD thumb mimic ratios, 1.6 and 2.4 times the primary flexion angle."""
+    """Hold the thumb at its pinch pose with straight intermediate and distal joints."""
     return {
         f"{prefix}_thumb_proximal_yaw_joint": yaw,
         f"{prefix}_thumb_proximal_pitch_joint": pitch,
-        f"{prefix}_thumb_intermediate_joint": 1.6 * pitch,
-        f"{prefix}_thumb_distal_joint": 2.4 * pitch,
+        f"{prefix}_thumb_intermediate_joint": 0.0,
+        f"{prefix}_thumb_distal_joint": 0.0,
     }
 
 
 def _pinch_action(prefix: str, arm: int) -> InspireFingerActionCfg:
-    """Synchronously open/close the thumb and index chains with one binary command."""
-    opened = _thumb_targets(prefix, _THUMB_OPEN[arm], _THUMB_YAW[arm])
-    closed = _thumb_targets(prefix, _THUMB_CLOSED[arm], _THUMB_YAW[arm])
-    opened.update({f"{prefix}_index_{part}_joint": _INDEX_OPEN[arm] for part in ("proximal", "intermediate")})
-    closed.update({f"{prefix}_index_{part}_joint": _INDEX_CLOSED[arm] for part in ("proximal", "intermediate")})
+    """Open/close only the index while holding all thumb joints at the calibrated pinch pose."""
+    opened = _thumb_targets(prefix, _THUMB_FIXED[arm], _THUMB_YAW[arm])
+    closed = opened.copy()
+    opened.update({f"{prefix}_index_proximal_joint": _INDEX_OPEN[arm], f"{prefix}_index_intermediate_joint": 0.0})
+    closed.update({f"{prefix}_index_proximal_joint": _INDEX_CLOSED[arm], f"{prefix}_index_intermediate_joint": 0.0})
     return InspireFingerActionCfg(
         asset_name="robot",
         joint_names=[f"{prefix}_(thumb|index)_.*_joint"],
@@ -175,7 +173,7 @@ class G1ShoelaceSceneCfg(ShoelaceSceneCfg):
 
 @configclass
 class G1ShoelaceActionsCfg:
-    """Two Cartesian arms and two synchronous thumb/index commands, totalling 14 actions."""
+    """Two Cartesian arms and two index commands with fixed thumb targets, totalling 14 actions."""
 
     left_arm = _arm_action("left", 0)
     left_gripper = _pinch_action("L", 0)
@@ -193,7 +191,7 @@ class G1ShoelaceObservationsCfg(ObservationsCfg):
             func=f"{__package__}.mdp.inspire_hand:inspire_finger_close_error",
             params={
                 "finger_cfgs": _FINGER_CFGS,
-                "motion_ranges": (0.05, 0.2, 0.05, 0.2),
+                "motion_ranges": (0.12, _INDEX_STROKES[0], 0.12, _INDEX_STROKES[1]),
             },
             clip=(-1.0, 1.0),
         )
@@ -221,8 +219,8 @@ class G1ShoelaceRewardsCfg(RewardsCfg):
 class G1ShoelaceEnvCfg(ShoelaceEnvCfg):
     """G1 Inspire variant sharing the cable, reset, reward and bilateral success definitions.
 
-    The pelvis is fixed while both arms, thumbs and index fingers move. Each hand has one
-    synchronous thumb/index open/close action; the other three fingers retain straight targets.
+    The pelvis is fixed while both arms and index fingers move. Each hand has one
+    index open/close action; the thumb retains its pinch target and the other three fingers stay open.
     The shoe remains kinematic, as in the Franka baseline. Its X axis is the humanoid's lateral axis.
     """
 
@@ -231,10 +229,10 @@ class G1ShoelaceEnvCfg(ShoelaceEnvCfg):
     observations: G1ShoelaceObservationsCfg = G1ShoelaceObservationsCfg()
     rewards: G1ShoelaceRewardsCfg = G1ShoelaceRewardsCfg()
     tcp_body_offsets = _TCP_BODY_OFFSETS
-    """Thumb/index surface offsets in their own body frames; the live mean defines each TCP [m]."""
+    """Nominal closed pinch centres in the left/right wrist frames, independent of finger state [m]."""
     finger_body_offsets = _PAD_OFFSETS
     """The same surface landmarks used by the shared grasp rewards [m]."""
-    grasp_open_apertures = (0.028813161, 0.025744588)
+    grasp_open_apertures = (0.019776298, 0.021167185)
     """Measured left/right surface spacing at the ready pose [m]."""
 
     def __post_init__(self) -> None:
@@ -246,6 +244,7 @@ class G1ShoelaceEnvCfg(ShoelaceEnvCfg):
             getattr(policy, f"{side}_joint_vel").params["asset_cfg"] = clone(joint_cfg)
             getattr(self.events, f"reset_{side}_arm").params["asset_cfg"] = clone(joint_cfg)
         policy.tails_to_tcp.params["robot_cfgs"] = tuple(clone(cfg) for cfg in _ROBOT_CFGS)
+        self.rewards.dense_task.params["approach_robot_cfgs"] = tuple(clone(cfg) for cfg in _ROBOT_CFGS)
         for name in ("pad_to_tail", "finger_tail_relative_velocity"):
             getattr(policy, name).params["finger_cfgs"] = tuple(clone(cfg) for cfg in _FINGER_CFGS)
         for term in (

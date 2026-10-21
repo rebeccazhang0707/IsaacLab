@@ -15,8 +15,6 @@ __all__ = [
     "gripper_close_error",
     "InspireFingerAction",
     "InspireFingerActionCfg",
-    "InspirePinchIKAction",
-    "InspirePinchIKActionCfg",
     "inspire_finger_close_error",
     "install_settled_default_state",
     "pregrasp_progress_reward",
@@ -41,10 +39,9 @@ from .events import (
 from .grasp import grasp_geometry, shoelace_grasp_quality
 from .inspire_hand import (
     InspireFingerAction,
-    InspirePinchIKAction,
     inspire_finger_close_error,
 )
-from .inspire_hand_cfg import InspireFingerActionCfg, InspirePinchIKActionCfg
+from .inspire_hand_cfg import InspireFingerActionCfg
 from .observations import (
     finger_tail_relative_velocity,
     pad_to_tail,

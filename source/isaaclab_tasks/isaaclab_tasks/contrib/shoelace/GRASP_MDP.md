@@ -3,18 +3,26 @@
 Dual-Franka and G1 Inspire share grasp rewards based on two opposing surface reference points per
 hand. Robot-specific configuration supplies four bodies, four body-local offsets and the two ready
 apertures. Rewards do not assume a prismatic joint, a particular closing direction or one designated
-finger joint. The G1 controls retain two hand binary actions, each moving thumb and index together.
+finger joint. The G1 controls retain two hand binary actions, each moving the index while holding
+calibrated thumb targets.
+G1's default straight-finger mechanism removes the six thumb/index downstream mimic
+constraints and holds those joints near zero. Its four surface references are the inner
+face centres of the invisible collision pads, with TCP offsets calibrated at closure.
 
 ## Geometry and observations
 
 - The capture region is the line segment between the two current surface points. Its distance to
-  the three-segment free-tail centre guides approach. A moving midpoint does not reduce capture
-  credit when asymmetric closure still brackets the tail.
+  the three-segment free-tail centre guides Franka coarse approach and both robots' physical
+  pregrasp shaping. A moving midpoint does not reduce capture credit while the tail stays bracketed.
+- G1 coarse approach instead uses the nominal closed pinch centre rigidly attached to each wrist.
+  Its position is shared with IK and `tails_to_tcp`; finger opening/closing alone cannot change this
+  reference. There is no handoff to another approach distance.
 - All four tail-minus-finger velocity vectors are observed separately in robot root frames.
 - Ready-to-closed progress uses actual aperture relative to the ready aperture and cable diameter.
   Remaining outside the capture region removes closure credit; closing an empty hand earns no bonus.
-- G1's controller TCP remains the live surface midpoint with wrist orientation. Franka retains its
-  existing wrist-offset IK controller. Geometry rewards use its pad-face reference points directly.
+- Both robots use standard wrist-offset differential IK. G1 uses a separately calibrated left/right
+  closed-pinch offset with wrist orientation, without finger-motion feedforward or an accumulated
+  world-space position target. Geometry rewards still use the actual pad-face reference points.
 - Actor and critic use the same policy observation group. Task progress and loaded-pull history
   remain internal to rewards and success checks.
 
@@ -54,7 +62,12 @@ with `finger_cfgs`. Set `finger_body_offsets`, `grasp_open_apertures`, `grasp_ta
 the geometry widths on the environment. Observation `tail_tcp_relative_speed` was replaced in the
 policy by `finger_tail_relative_velocity`; `pad_to_tail` is a shared term.
 `inspire_pad_to_tail` and `inspire_pregrasp_progress_reward` were consolidated into the common terms.
-Metrics now report `capture_distance_m` and `surface_midpoint_distance_m` separately.
+Metrics report `approach_distance_m`, `capture_distance_m`, and `surface_midpoint_distance_m`
+separately. The approach metric follows the selected coarse reference, not the grasp geometry.
+G1 configurations using the removed `InspirePinchIKActionCfg` must switch to standard
+`DifferentialInverseKinematicsActionCfg` with the calibrated wrist `body_offset`; its reward's
+`approach_robot_cfgs` and TCP observations must resolve the same wrist bodies and offsets.
+Policies trained with the live-midpoint action/observation contract require retraining.
 The intermediate `tail_direction`, `task_phase_state`, `task_state` group and `tail_tangent_w`
 helper were removed, along with `orientation_weight`. Grasp geometry reports `relative_speed`
 in place of `tangential_speed`.

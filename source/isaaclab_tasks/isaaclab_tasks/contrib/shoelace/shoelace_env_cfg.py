@@ -77,6 +77,10 @@ def _franka_cfg(
         articulation_props=robot.spawn.articulation_props,
         variants=robot.spawn.variants,
         friction_overrides=_FINGER_FRICTION.copy(),
+        collision_props={
+            "/.*": [sim_utils.UsdPhysicsCollisionCfg(collision_enabled=False)],
+            "/.*panda_(left|right)finger/.*": [sim_utils.UsdPhysicsCollisionCfg(collision_enabled=True)],
+        },
     )
     robot.init_state.pos = position
     robot.init_state.rot = rotation

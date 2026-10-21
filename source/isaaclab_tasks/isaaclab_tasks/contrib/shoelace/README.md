@@ -1,5 +1,165 @@
 # Dual-Franka shoelace task
 
+## Task collision geometry
+
+The dual-Franka task enables robot collisions only on `panda_leftfinger` and
+`panda_rightfinger`. The G1 Inspire variant enables the thumb and index finger
+links on both hands; its arms, torso, legs, palms and other fingers have collisions
+disabled. On each thumb distal and index intermediate link, an invisible
+16 x 10 x 3 mm box replaces the authored terminal mesh colliders. The pad faces
+are calibrated parallel with a nominal 2.8 mm closed gap on both hands.
+These task-local USD overrides preserve authored mass, inertia and visual geometry.
+G1's instanced geometry is made editable before applying the overrides.
+
+G1 uses straight fingers by default: thumb intermediate/distal and index intermediate
+joint targets are zero, their mimic constraints are removed, and their limits are
+restricted to +/-0.001 degrees. Only root joints define the pinch pose; the binary
+action moves each index root through 0.25 rad while holding the thumb root targets.
+This changes the simulated mechanism from the coupled physical Inspire hand.
+The source USD is unchanged. Pad contact and loaded-pull retention still require
+validation; a parallel nominal pose alone does not establish a stable grasp.
+
+Both tasks use the shared `shoelace_constants.FINGER_MU` (40) for the grasping
+finger collision shapes. G1 hand drives use stiffness 50 N·m/rad and retain the
+asset's damping 0.2 N·m·s/rad. These rotational gains cannot be compared directly
+with Franka's prismatic finger gains in N/m.
+
+The shoe, G1 pedestal, cable geometry and cable self-collision retain their existing
+settings. Disabling unused robot colliders reduces the candidate pairs used to
+preallocate Newton ADMM contact storage. It also means disabled robot parts can
+pass through the scene, so these tasks do not train whole-arm collision avoidance.
+
+Existing checkpoints retain compatible observations and actions, but should be
+re-evaluated under the simplified contact model. To restore the asset's complete
+robot collision geometry, set `spawn.collision_props = None` on both
+`cfg.scene.robot_left` and `cfg.scene.robot_right`. For G1, the custom
+`spawn_g1_shoelace` spawner also replaces terminal colliders and joint constraints;
+restoring the coupled hand requires restoring its matching targets and TCP calibration.
+
+The internal ADMM collision pipeline uses 1,048,575 triangle-pair and contact-reduction
+slots, the largest capacity supported by Newton with `latest` contact matching.
+The outer collision pipeline and the internal reduction hash table still scale
+with the environment count. Monitor overflow warnings when increasing parallelism;
+this fixed internal capacity is not a guarantee against overflow.
+
+## Reward / metrics 中文速览
+
+以下对应当前 `IsaacContrib-Shoelace-DualFranka` 的默认配置；训练命令覆盖参数后，以该次运行的配置为准。
+任务主线是：**靠近鞋带尾端 → 精细对准并闭合 → 抓稳 → 双手向外拉 → 满足完成条件**。
+这些奖励同时计算，并非依次切换的硬阶段。Reward 决定策略学什么，metrics 用于看清实际做到了什么。
+TCP 指夹爪的控制参考点；尾端位置取对应鞋带末端 3 个自由段的中心均值。
+
+G1 的 TCP 使用名义闭合姿态下两指面中点相对手腕的固定偏移，左右手分别标定。
+当前 wrist-local 偏移为左手 `(0.193129098, -0.063929696, 0.029342429)` m、
+右手 `(0.186283631, 0.070964776, 0.024288309)` m，由直指闭合姿态下碰撞垫指面的正向运动学测得。
+标准 IK、`tails_to_tcp` 观测和粗接近奖励都使用这个固定点，不再使用实时中点动作补偿，
+也不在闭合时切换接近参考或执行 handoff。Dual-Franka 的粗接近仍使用实时 `capture_distance`。
+两种机器人实际抓取、预抓取和成功判定仍依据实时指面、接触和相对速度；固定 TCP 对准不代表已抓住。
+旧 G1 策略需重新训练，动作和观测维度虽不变，但 TCP 语义已变化。
+
+### 6 个 reward 分别做什么
+
+| 配置项 | 默认权重 | 作用与给分方式 |
+| --- | --- | --- |
+| `dense_task` | `10.0` | 主进度奖励：靠近占 30%、获得抓握占 30%、向外拉占 40%。靠近/抓握按前后分数差给分；拉动只奖有效抓握下的新向外纪录。 |
+| `pregrasp` | `1.0` | 补足“快碰到但还没抓住”的引导：15 mm 尺度的精细位置对准占 75%，距离小于 10 mm 时的实际闭合占 25%。按前后差给分，双臂平均后的势能上限为 1。 |
+| `grasp_hold` | `1.0` | 奖励持续抓稳。理想双手抓握初期每秒 +1，只有一手时每秒 +0.25；每回合用完 2 秒的“质量加权保持时间”后，降到原给分速率的 20%。松开再抓不会刷新预算。 |
+| `success` | `5.0` | 满足下述完整成功条件时一次性 +5，并结束回合；单纯超时不给这项奖励。 |
+| `arm_action_rate` | `-0.001` | 惩罚相邻步机械臂动作之差的平方和，抑制动作突变；不包含夹爪开合，也不是除以时间后的加速度。 |
+| `arm_action_magnitude` | `-0.001` | 惩罚机械臂动作本身的平方和，抑制过大指令；使用笛卡尔缩放前的动作，不包含夹爪开合。 |
+
+`dense_task` 的设计要点：
+
+- **靠近**：Franka 使用实时捕获线段到尾端的距离，G1 使用固定 TCP 到尾端的距离，尺度均为 80 mm；
+  **抓握**：用接触、实际闭合和低滑动来评分。
+  两者改善给正分，远离或丢失抓握会扣回对应势能；静止且滤波稳定后，不再给进度分。
+- **鼓励合作**：靠近、抓握、拉动各自有 50%、70%、80% 的份额用于双手合作加成，其余按单手分数均值给分。
+  因此一只手先做对也有收益，两只手一起做好收益更高。
+- **拉动只奖新纪录**：左手朝负 X、右手朝正 X。单手拉动需该手当前原始/滤波抓握分均 ≥ 0.2，
+  双手加成要求两手都满足。无抓握的移动也会更新纪录，所以事后抓住、松开重抓、反复内外摆动不能补领旧距离的奖励。
+- **尺度不是终点**：每手尺度为 `max((0.18 m - 初始两尾 X 间距) / 2, 0.01 m)`。
+  理想双手各拉满一个尺度约得 +4，超过尺度继续创新纪录仍有奖励；最终成功另行判定。
+
+这里的抓握质量 `G ∈ [0, 1]` 是“两指接触 + 实际闭合 + 尾端相对 TCP 低滑速”的组合，采用 0.10 s 滤波。
+默认接触宽度 0.5 mm，容忍最多 1 mm 的接触求解穿透，滑速尺度为 0.08 m/s。
+它是接触代理分数，不是力传感器测出的抓持力；仅发出闭合指令不会自动算抓住。
+`pregrasp` 则只是位置引导：近处空夹也可能拿到少量进度分，但不等于物理抓握或成功。
+`dense_task` 和 `pregrasp` 在 reset 后的第一个有效样本只建立基线，不给初始化进度分。
+
+### 怎样才算成功
+
+成功要求**协作拉动历史达标，同时当前几何达标，且相关状态数值有效**：
+
+1. **确实双手拉过**：两条尾端在双手有效抓握时，各累计至少 **25 mm** 的新向外纪录。
+   计入一次移动要求该步区间前后两端，两手的原始和滤波抓握分都 ≥ 0.2；这个要求比 dense 拉动奖励更严格。
+2. **两尾到位**：相对固定锚点中点，左尾 X ≤ **−90 mm**，右尾 X ≥ **+90 mm**。
+   这是最终位置要求，不是相对 reset 的位移；总间距达到 180 mm 仍不能代替两侧各自到位。
+3. **结喉区域清空到阈值**：以锚点中点为球心、半径 **25 mm** 的区域内，每侧鞋带的自由段中心数均 **≤ 15**。
+   固定锚点不计数；这是局部几何判据，并非严格的拓扑解结判定。
+
+协作拉动历史达标后会保留到 reset，因此最终几何达标时允许已经松手。
+默认回合最长 **10 s**；提前成功就结束，超时也结束。
+
+### Metrics 看什么
+
+下表名称均省略 TensorBoard 前缀 `Metrics/shoelace/`，`left/right` 按机械臂侧命名。
+
+| 指标 | 含义 / 怎么读 |
+| --- | --- |
+| `approach_distance_m` | 双手粗接近距离的均值 [m]：Franka 使用捕获线段，G1 使用固定 TCP。 |
+| `grasp_left`, `grasp_right` | 每侧滤波后的抓握质量 [0, 1]；看哪只手没抓稳。 |
+| `grasp_both` | 每个环境内两手质量的 soft-AND，再取平均；看是否在同一环境里同时抓住，不能由前两条均值直接推出来。 |
+| `pull_left_displacement_m`, `pull_right_displacement_m` | 相对 reset 后首个有效样本的向外位移 [m]；正为向外、负为向内。被动移动也计入，不证明是抓着拉的。 |
+| `pull_x_separation_m` | 两尾当前 X 方向的绝对间距 [m]；看整体展开程度，单独不能判成功。 |
+| `pull_left_score`, `pull_right_score` | 旧版“抓握门控的拉动进度”诊断分数 [0, 1]。静止理想抓握也可约为 0.5；不是距离，也不是当前新纪录拉动奖励。 |
+| `loaded_pull_left_m`, `loaded_pull_right_m` | 在双手有效抓握区间内累计的新向外纪录 [m]；成功要求每个环境的两侧各 ≥ 0.025 m，松手后累计值保留。 |
+| `bilateral_pull_completed` | 当前已有两侧 loaded pull 均达标的环境比例；只代表协作拉动阶段完成。 |
+| `throat_left_segments`, `throat_right_segments` | 每侧仍在结喉球内的自由段中心数均值；实际成功逐环境检查两侧是否各 ≤ 15。 |
+| `geometry_success` | 当前满足“两尾到位 + 每侧结喉计数达标 + 鞋带状态数值有效”的环境比例；不检查协作拉动历史。 |
+| `success_rate` | 每个已结束过回合的环境，取其最近一次回合的完整成功结果，再求平均；不是全部历史回合的累计成功率，首次完成前为 0。 |
+| `valid_fraction` | dense reward 所检查输入无 NaN/Inf 的环境比例，正常为 1；不是有效抓握率。 |
+
+**读日志时的几个区别：**
+
+- `Episode_Reward/<上述6项之一>` 记录该项**已加权回合奖励和 ÷ 配置回合时长**，默认除以 10 s，提前结束也一样。
+  因此成功回合的 `Episode_Reward/success` 是 0.5，实际成功事件仍给 +5；日志再平均后取决于成功比例。
+  RewardManager 对每项乘 `weight × step_dt`；进度项和 success 在函数内除过 `step_dt`，保持奖励和动作惩罚按时间累计。
+- Metrics 先在环境维度取均值，再由 RSL-RL 对 rollout 内的各步取均值；位移不是回合最大位移，不同环境的正负位移可能相互抵消。
+  dense 阶段指标排除无效样本，成功项的 6 个诊断指标对全部环境取均值；当前多 GPU 日志来自 rank 0 本地环境。
+- `dense_task.weight=0` 会停掉该项产生的 metrics，包括 `success_rate`；
+  `geometry_success`、`throat_*_segments`、`loaded_pull_*_m` 和 `bilateral_pull_completed` 由成功终止项产生，仍会记录。
+
+看训练时可依次排查：**距离有没有下降 → 两手是否同时抓稳 → 两侧 loaded pull 是否增长 → 几何是否达标 → success rate 是否提高**。
+位移涨但 loaded pull 不涨，应检查是否被动移动、只有单手抓住，或抓握没有覆盖整个计分区间；
+`geometry_success` 高但成功率低，则需要同时核对协作拉动历史，并注意两者分别是当前状态与最近完成回合的统计。
+
+代码入口：[默认配置](shoelace_env_cfg.py) · [奖励与阶段指标](mdp/rewards.py) ·
+[成功判定与协作指标](mdp/terminations.py) · [几何量定义](mdp/utils.py)。下面保留详细英文说明与迁移说明。
+
+## Newton solver / coupler 配置支持与 PR 跟踪
+
+核查日期：**2026-09-18**。官方 `develop` 为 `93d7bef70`，在审 PR #6733 的 head 为 `d6c3284c6`。
+以下是该次核查的快照；两项在该 develop 版本中均尚未合入。Shoelace 使用 MJWarp 模拟机器人和鞋、
+VBD 模拟鞋带、ADMM 处理跨 solver 接触。当前任务分支已有所需设置，不需要等通用接口 PR 合入才能运行。
+
+| Feature | 为什么 shoelace 需要 | 通用接口需要改动的文件 | 与已有 PR 的重合 | 本分支对应 commit ID |
+| --- | --- | --- | --- | --- |
+| **ADMM 内部碰撞容量配置**：`contact_max_triangle_pairs`、`contact_reduction_hashtable_size_factor` | 大量并行环境产生密集跨 solver 接触，需要调整三角形对缓存和接触归并哈希表容量；外层 collision cfg 无法控制内部容量。主要解决扩容问题，小规模运行未必需要调整。 | [coupler_cfg.py](../../../../isaaclab_contrib/isaaclab_contrib/coupling/coupler_cfg.py)：声明字段；[coupler.py](../../../../isaaclab_contrib/isaaclab_contrib/coupling/coupler.py)：校验并应用配置；[test_coupler.py](../../../../isaaclab_contrib/test/coupling/test_coupler.py)、[test_coupler_runtime.py](../../../../isaaclab_contrib/test/coupling/test_coupler_runtime.py)：验证参数和实际管线容量。**这些已实现。** | 未检索到直接重合的在审 PR，可独立提交。当前适配仍通过重建 Newton 私有内部碰撞管线应用容量设置。 | `cd7b2088ac567f5f2e85428137673375adfd99ae`（简称 `cd7b2088a`），**Scale ADMM contact capacity for Shoelace**。 |
+| **通用 VBD 配置暴露**：`rigid_avbd_alpha`、`rigid_contact_hard`、`rigid_body_contact_buffer_size` | 调节鞋带链关节/接触的误差修正、接触模式和每刚体接触容量，替代当前任务的自定义 cfg 子类。属于配置能力补齐；尚未证明三个任务取值都不可缺少。 | [vbd_manager_cfg.py](../../../../isaaclab_newton/isaaclab_newton/physics/vbd_manager_cfg.py)：补字段；[test_vbd_core.py](../../../../isaaclab_newton/test/physics/test_vbd_core.py)：补参数传递和默认行为验证；任务接入时更新 [shoelace_env_cfg.py](shoelace_env_cfg.py)，改用通用配置。现有 manager 已支持按名称传参。**通用接口尚未实现。** | **[PR #6733 — Expose VBD rigid contact controls](https://github.com/isaac-sim/IsaacLab/pull/6733) 部分覆盖**：包含 hard-contact 开关和每刚体接触容量；提供的是 `rigid_avbd_contact_alpha`，没有全局 `rigid_avbd_alpha` 或 `rigid_compliant_alm`。需适配 VBD 已迁入 `isaaclab_newton` 的目录结构。 | `0424ed9a8bb189fb40ccda1632c01f628dd21fdc`（简称 `0424ed9a8`），**Add dual-Franka shoelace RL task**。该提交引入 `ShoelaceVBDSolverCfg` 的任务内设置，**并非通用 VBD 配置暴露已完成的提交**。 |
+
+两个通用 PR 都应更新 [using-vbd-solver.rst](../../../../../docs/source/overview/core-concepts/physical-backends/newton/using-vbd-solver.rst)，
+并分别添加 `isaaclab_contrib` / `isaaclab_newton` 的 changelog fragment；ADMM 文档和 fragment 已包含在 `cd7b2088a` 中。
+ADMM 随环境数扩容的规则继续放在任务的 [shoelace_env.py](shoelace_env.py)，由
+[test_shoelace_physics.py](../../../test/contrib/test_shoelace_physics.py) 验证。
+`cd7b2088a` 还包含任务接入和训练默认值变更，拆通用 PR 时应按文件选取。
+
+VBD 当前任务值为 `rigid_avbd_alpha=0.0`、`rigid_contact_hard=True`、`rigid_body_contact_buffer_size=256`。
+其中 `rigid_contact_hard=True` 已是当前 Newton 默认值；Newton 1.6 已弃用该旧接触模式开关，
+需协调 `rigid_compliant_alm` 的配置与迁移验证，参见 [Newton SolverVBD 文档](https://newton-physics.github.io/newton/latest/api/_generated/newton.solvers.SolverVBD.html)。
+建议 ADMM 容量支持独立提交，VBD 与 #6733 协调补齐，并保留通用配置的既有默认行为。
+
+## Detailed design and migration notes
+
 For multi-GPU training, `--num_envs` is the number of environments on each GPU.
 RSL-RL collects 8 steps per environment before each PPO update. With 8 GPUs and
 1024 environments per GPU, each iteration collects 65,536 transitions in total.
@@ -41,13 +201,14 @@ expose the standard contact-force sensor. A pair without a collision candidate u
 
 The dense reward covers approaching, grasping, and pulling the tails, with independent credit and a bilateral
 bonus in each phase. Let `H(a, b) = a * b / (a + b - a * b + 1e-6)` be the Hamacher soft-AND,
-`A` the per-arm TCP proximity, `G` the filtered per-arm grasp quality, and `d` each tail's
+`A` the per-arm approach proximity (capture segment for Franka, fixed TCP for G1),
+`G` the filtered per-arm grasp quality, and `d` each tail's
 outward X displacement from the first valid post-reset sample. The left arm pulls toward negative X, and the
 right arm toward positive X. Positions are relative to the fixed cable seam midpoint, so translating the shoe
 or the whole environment does not create progress. The default is:
 
 ```python
-A = 1 - tanh(tail_tcp_distance / 0.08)  # metres
+A = 1 - tanh(approach_distance / 0.08)  # metres; capture segment for Franka, fixed TCP for G1
 approach = 0.5 * A.mean(dim=-1) + 0.5 * H(A[:, 0], A[:, 1])
 grasp = 0.3 * G.mean(dim=-1) + 0.7 * H(G[:, 0], G[:, 1])
 acquisition_potential = 0.3 * approach + 0.3 * grasp
@@ -219,7 +380,7 @@ to the grasp-gated score when checking whether a tail actually moved outward:
 
 | Tag under `Metrics/shoelace/` | Interpretation |
 | --- | --- |
-| `approach_distance_m` | Mean TCP-to-tail distance across both arms [m]; lower is better. |
+| `approach_distance_m` | Mean coarse approach distance across both arms [m]: capture segment for Franka, fixed TCP for G1. |
 | `grasp_left`, `grasp_right` | Filtered contact, closure, and low-slip grasp quality for each arm in [0, 1]. |
 | `grasp_both` | Hamacher soft-AND of both filtered grasp qualities in [0, 1]. |
 | `pull_x_separation_m` | Absolute two-tail X separation [m]; successful per-tail X boundaries imply at least 0.18 m, but this total alone is insufficient. |
