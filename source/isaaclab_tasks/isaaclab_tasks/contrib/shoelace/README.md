@@ -8,6 +8,10 @@ links on both hands; its arms, torso, legs, palms and other fingers have collisi
 disabled. On each thumb distal and index intermediate link, an invisible
 16 x 10 x 3 mm box replaces the authored terminal mesh colliders. The pad faces
 are calibrated parallel with a nominal 2.8 mm closed gap on both hands.
+Both hands use the same finger joint targets. Their pad boxes and surface landmarks
+are mirrored in wrist coordinates. The right-body offsets compensate the source
+USD's asymmetric thumb joint frames and index link offsets; raw link-local numbers
+are therefore not obtained by simply negating the left offsets.
 These task-local USD overrides preserve authored mass, inertia and visual geometry.
 G1's instanced geometry is made editable before applying the overrides.
 
@@ -49,13 +53,16 @@ this fixed internal capacity is not a guarantee against overflow.
 这些奖励同时计算，并非依次切换的硬阶段。Reward 决定策略学什么，metrics 用于看清实际做到了什么。
 TCP 指夹爪的控制参考点；尾端位置取对应鞋带末端 3 个自由段的中心均值。
 
-G1 的 TCP 使用名义闭合姿态下两指面中点相对手腕的固定偏移，左右手分别标定。
+G1 的 TCP 使用名义闭合姿态下两指面中点相对手腕的固定偏移，以左手标定为基准镜像到右手。
 当前 wrist-local 偏移为左手 `(0.193129098, -0.063929696, 0.029342429)` m、
-右手 `(0.186283631, 0.070964776, 0.024288309)` m，由直指闭合姿态下碰撞垫指面的正向运动学测得。
+右手 `(0.193129098, 0.063929696, 0.029342429)` m。
+左右手开合角度一致；双臂初始关节角按镜像轴符号生成，reset 时右臂镜像左臂的随机扰动。
+这保证机器人初始姿态对称，但鞋带尾端本身不对称，左右 TCP 到尾端的距离不保证相等。
 标准 IK、`tails_to_tcp` 观测和粗接近奖励都使用这个固定点，不再使用实时中点动作补偿，
 也不在闭合时切换接近参考或执行 handoff。Dual-Franka 的粗接近仍使用实时 `capture_distance`。
 两种机器人实际抓取、预抓取和成功判定仍依据实时指面、接触和相对速度；固定 TCP 对准不代表已抓住。
 旧 G1 策略需重新训练，动作和观测维度虽不变，但 TCP 语义已变化。
+对称夹垫、右手目标和镜像 reset 改变了旧 G1 checkpoint 的环境定义；复现旧结果应使用旧版本。
 
 ### 6 个 reward 分别做什么
 

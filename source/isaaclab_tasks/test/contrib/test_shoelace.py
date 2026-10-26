@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import torch
 
-from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 import isaaclab.sim as sim_utils
 from isaaclab.managers import RewardManager, RewardTermCfg, SceneEntityCfg, TerminationTermCfg
@@ -85,8 +85,9 @@ def test_robot_collision_selection_preserves_only_grasping_fingers(robot: str, t
 
 
 def test_g1_straight_pad_spawner_clones_mechanics_and_invisible_material_bound_colliders() -> None:
-    """The actual USD import must replace terminal meshes and remove downstream mimic constraints in every clone."""
-    cfg = G1ShoelaceEnvCfg().scene.robot.spawn
+    """The imported colliders preserve mirrored open/closed grips and clone the straight-finger mechanism."""
+    env_cfg = G1ShoelaceEnvCfg()
+    cfg = env_cfg.scene.robot.spawn
     # This USD authoring test needs no active backend to create the pelvis world joint.
     cfg.fix_root_link = None
     stage = Usd.Stage.CreateInMemory()
@@ -119,6 +120,80 @@ def test_g1_straight_pad_spawner_clones_mechanics_and_invisible_material_bound_c
             assert tuple(pad.GetAttribute("xformOp:scale").Get()) == pytest.approx((0.016, 0.010, 0.003))
             material, _ = UsdShade.MaterialBindingAPI(pad).ComputeBoundMaterial(materialPurpose="physics")
             assert UsdPhysics.MaterialAPI(material.GetPrim()).GetDynamicFrictionAttr().Get() == constants.FINGER_MU
+    _assert_g1_mirrored_grips(stage.GetPrimAtPath("/World/env_0/Robot"), env_cfg)
+
+
+def _assert_g1_mirrored_grips(root: Usd.Prim, cfg: G1ShoelaceEnvCfg) -> None:
+    """Check actual USD joint chains and box transforms, independently of the calibration constants."""
+    joints = []
+    for prim in Usd.PrimRange(root):
+        if not prim.IsA(UsdPhysics.RevoluteJoint):
+            continue
+        joint = UsdPhysics.RevoluteJoint(prim)
+        parent, child = joint.GetBody0Rel().GetTargets(), joint.GetBody1Rel().GetTargets()
+        if not parent or not child:
+            continue
+        frames = []
+        for position, rotation in (
+            (joint.GetLocalPos0Attr().Get(), joint.GetLocalRot0Attr().Get()),
+            (joint.GetLocalPos1Attr().Get(), joint.GetLocalRot1Attr().Get()),
+        ):
+            matrix = Gf.Matrix4d().SetRotate(Gf.Quatd(rotation))
+            matrix.SetTranslateOnly(Gf.Vec3d(position))
+            frames.append(np.asarray(matrix).T)
+        joints.append((prim.GetName(), parent[0].name, child[0].name, frames, joint.GetAxisAttr().Get()))
+
+    mirror = np.diag([1.0, -1.0, 1.0, 1.0])
+    for state in ("open", "close"):
+        positions = cfg.scene.robot.init_state.joint_pos.copy()
+        commands = []
+        for side, prefix in (("left", "L"), ("right", "R")):
+            command = getattr(getattr(cfg.actions, f"{side}_gripper"), f"{state}_command_expr")
+            if state == "open":
+                assert all(positions[joint] == target for joint, target in command.items())
+            positions.update(command)
+            commands.append({joint.removeprefix(f"{prefix}_"): target for joint, target in command.items()})
+        assert commands[0] == commands[1]
+
+        bodies = {"torso_link": np.eye(4)}
+        pending = list(joints)
+        while pending:
+            reached = [joint for joint in pending if joint[1] in bodies]
+            if not reached:
+                break
+            for name, parent, child, (parent_frame, child_frame), axis in reached:
+                vector = Gf.Vec3d(*np.eye(3)["XYZ".index(axis)])
+                rotation = Gf.Matrix4d().SetRotate(Gf.Rotation(vector, np.degrees(positions.get(name, 0.0))))
+                bodies[child] = bodies[parent] @ parent_frame @ np.asarray(rotation).T @ np.linalg.inv(child_frame)
+            pending = [joint for joint in pending if joint[2] not in bodies]
+
+        wrists = [bodies[f"{side}_wrist_yaw_link"] for side in ("left", "right")]
+        # Authored shoulder translations differ by 10 micrometres after reflection.
+        np.testing.assert_allclose(wrists[1], mirror @ wrists[0] @ mirror, atol=2.0e-5)
+        faces = []
+        boxes = []
+        for hand, prefix in enumerate(("L", "R")):
+            hand_faces = []
+            hand_boxes = []
+            for finger, suffix in enumerate(("thumb_distal", "index_intermediate")):
+                body_name = f"{prefix}_{suffix}"
+                body = bodies[body_name]
+                prim = root.GetStage().GetPrimAtPath(root.GetPath().AppendPath(f"{body_name}/pinch_box"))
+                box = body @ np.asarray(UsdGeom.Xformable(prim).GetLocalTransformation()).T
+                face = box[:3, 3] + (0.5 if finger == 0 else -0.5) * box[:3, 2]
+                landmark = body @ np.r_[cfg.finger_body_offsets[2 * hand + finger], 1.0]
+                np.testing.assert_allclose(landmark[:3], face, atol=1.0e-7)
+                hand_faces.append(face)
+                hand_boxes.append(box)
+            faces.append(np.asarray(hand_faces))
+            boxes.append(hand_boxes)
+            aperture = np.linalg.norm(hand_faces[1] - hand_faces[0])
+            assert aperture == pytest.approx(cfg.grasp_open_apertures[hand] if state == "open" else 0.0028, abs=1e-6)
+            if state == "close":
+                tcp = wrists[hand] @ np.r_[cfg.tcp_body_offsets[hand][0], 1.0]
+                np.testing.assert_allclose(tcp[:3], faces[hand].mean(axis=0), atol=1.0e-7)
+        for left, right in zip(boxes[0], boxes[1], strict=True):
+            np.testing.assert_allclose(right, mirror @ left @ mirror, atol=2.0e-5)
 
 
 def test_binary_gripper_switch_cost_counts_commands_and_ignores_resets() -> None:

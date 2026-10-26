@@ -25,6 +25,15 @@ from .shoelace_assets import ShoelaceUsdCfg
 from .shoelace_env_cfg import ObservationsCfg, RewardsCfg, ShoelaceEnvCfg, ShoelaceSceneCfg
 
 _ARM_JOINTS = r"{side}_(shoulder_.*|elbow|wrist_.*)_joint"
+_ARM_MIRROR_SIGNS = {
+    "shoulder_pitch_joint": 1.0,
+    "shoulder_roll_joint": -1.0,
+    "shoulder_yaw_joint": -1.0,
+    "elbow_joint": 1.0,
+    "wrist_roll_joint": -1.0,
+    "wrist_pitch_joint": 1.0,
+    "wrist_yaw_joint": -1.0,
+}
 # Finger targets and near-tip surface landmarks from a constrained fit around a 2.8 mm target.
 # The nominal closed surface midpoint defines a fixed wrist TCP; actual grasp scoring stays live.
 _INDEX_CLOSED = INDEX_CLOSED
@@ -66,25 +75,25 @@ def _robot_cfg() -> ArticulationCfg:
     )
     robot.init_state.pos = (0.0, -0.38, 0.795)
     robot.init_state.rot = (0.0, 0.0, 0.7071067811865476, 0.7071067811865476)
-    # IK-measured open-hand pregrasp over the nominal settled free tails, 60 mm above them.
+    # Mirror the left pregrasp through the robot's sagittal plane. The original left
+    # pose was fitted 60 mm above its nominal tail; asymmetric tails need not align equally.
     robot.init_state.joint_pos = {
         ".*(hip|knee|ankle|waist).*": 0.0,
         "[LR]_(middle|ring|pinky)_.*_joint": 0.0,
-        "left_shoulder_pitch_joint": -0.012014,
-        "left_shoulder_roll_joint": 0.083006,
-        "left_shoulder_yaw_joint": -0.022565,
-        "left_elbow_joint": -0.125478,
-        "left_wrist_roll_joint": -0.105378,
-        "left_wrist_pitch_joint": 0.257075,
-        "left_wrist_yaw_joint": -0.155942,
-        "right_shoulder_pitch_joint": -0.224297,
-        "right_shoulder_roll_joint": -0.062120,
-        "right_shoulder_yaw_joint": 0.027560,
-        "right_elbow_joint": -0.006563,
-        "right_wrist_roll_joint": 0.079811,
-        "right_wrist_pitch_joint": 0.361425,
-        "right_wrist_yaw_joint": 0.140190,
     }
+    left_arm_positions = {
+        "shoulder_pitch_joint": -0.012014,
+        "shoulder_roll_joint": 0.083006,
+        "shoulder_yaw_joint": -0.022565,
+        "elbow_joint": -0.125478,
+        "wrist_roll_joint": -0.105378,
+        "wrist_pitch_joint": 0.257075,
+        "wrist_yaw_joint": -0.155942,
+    }
+    for joint, position in left_arm_positions.items():
+        # Reflection reverses axial rotations about X/Z; pitch and elbow rotate about Y.
+        robot.init_state.joint_pos[f"left_{joint}"] = position
+        robot.init_state.joint_pos[f"right_{joint}"] = _ARM_MIRROR_SIGNS[joint] * position
     for arm, prefix in enumerate(("L", "R")):
         robot.init_state.joint_pos.update(_thumb_targets(prefix, _THUMB_FIXED[arm], _THUMB_YAW[arm]))
         robot.init_state.joint_pos[f"{prefix}_index_proximal_joint"] = _INDEX_OPEN[arm]
@@ -232,7 +241,7 @@ class G1ShoelaceEnvCfg(ShoelaceEnvCfg):
     """Nominal closed pinch centres in the left/right wrist frames, independent of finger state [m]."""
     finger_body_offsets = _PAD_OFFSETS
     """The same surface landmarks used by the shared grasp rewards [m]."""
-    grasp_open_apertures = (0.019776298, 0.021167185)
+    grasp_open_apertures = (0.019776298,) * 2
     """Measured left/right surface spacing at the ready pose [m]."""
 
     def __post_init__(self) -> None:
@@ -243,6 +252,18 @@ class G1ShoelaceEnvCfg(ShoelaceEnvCfg):
             getattr(policy, f"{side}_joint_pos").params["asset_cfg"] = joint_cfg
             getattr(policy, f"{side}_joint_vel").params["asset_cfg"] = clone(joint_cfg)
             getattr(self.events, f"reset_{side}_arm").params["asset_cfg"] = clone(joint_cfg)
+        # The left reset samples the original noise distribution; the following right
+        # reset mirrors that sample instead of independently perturbing the other arm.
+        self.events.reset_right_arm.func = f"{__package__}.mdp.events:mirror_arm_joints"
+        self.events.reset_right_arm.params = {
+            "source_cfg": SceneEntityCfg(
+                "robot", joint_names=[f"left_{joint}" for joint in _ARM_MIRROR_SIGNS], preserve_order=True
+            ),
+            "asset_cfg": SceneEntityCfg(
+                "robot", joint_names=[f"right_{joint}" for joint in _ARM_MIRROR_SIGNS], preserve_order=True
+            ),
+            "mirror_signs": tuple(_ARM_MIRROR_SIGNS.values()),
+        }
         policy.tails_to_tcp.params["robot_cfgs"] = tuple(clone(cfg) for cfg in _ROBOT_CFGS)
         self.rewards.dense_task.params["approach_robot_cfgs"] = tuple(clone(cfg) for cfg in _ROBOT_CFGS)
         for name in ("pad_to_tail", "finger_tail_relative_velocity"):

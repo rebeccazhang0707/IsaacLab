@@ -20,7 +20,7 @@ face centres of the invisible collision pads, with TCP offsets calibrated at clo
 - All four tail-minus-finger velocity vectors are observed separately in robot root frames.
 - Ready-to-closed progress uses actual aperture relative to the ready aperture and cable diameter.
   Remaining outside the capture region removes closure credit; closing an empty hand earns no bonus.
-- Both robots use standard wrist-offset differential IK. G1 uses a separately calibrated left/right
+- Both robots use standard wrist-offset differential IK. G1 uses a left-calibrated, mirrored right
   closed-pinch offset with wrist orientation, without finger-motion feedforward or an accumulated
   world-space position target. Geometry rewards still use the actual pad-face reference points.
 - Actor and critic use the same policy observation group. Task progress and loaded-pull history

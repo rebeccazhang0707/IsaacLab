@@ -13,23 +13,27 @@ import isaaclab.sim as sim_utils
 
 from .shoelace_assets import ShoelaceUsdCfg, spawn_shoelace_usd
 
-# Calibrated in wrist coordinates with downstream finger joints held at zero.
-INDEX_CLOSED = (1.225962774, 1.348051220)
-THUMB_PITCH = (0.4999, 0.408370270)
-THUMB_YAW = (1.233697987, 1.297461830)
-TCP_BODY_OFFSETS = (((0.193129098, -0.063929696, 0.029342429),), ((0.186283631, 0.070964776, 0.024288309),))
+# Use the left-hand closure for both hands, with downstream finger joints held at zero.
+INDEX_CLOSED = (1.225962774,) * 2
+THUMB_PITCH = (0.4999,) * 2
+THUMB_YAW = (1.233697987,) * 2
+_LEFT_TCP = (0.193129098, -0.063929696, 0.029342429)
+TCP_BODY_OFFSETS = ((_LEFT_TCP,), ((_LEFT_TCP[0], -_LEFT_TCP[1], _LEFT_TCP[2]),))
+# The USD's thumb joint frames and index link lengths are not exact mirrors. Right-body
+# offsets compensate those differences so the actual pad faces mirror in wrist coordinates.
 PAD_OFFSETS = (
     (0.014079444, -0.015321529, -0.006426900),
     (-0.004842526, -0.035955938, -0.002620689),
-    (0.011255558, 0.013833699, -0.010036920),
-    (-0.004698405, 0.041790697, -0.006952743),
+    (0.013913836, 0.015810763, -0.012259643),
+    (-0.004651628, 0.035971055, -0.002620619),
 )
 STRAIGHT_JOINT_NAMES = tuple(
     f"{side}_{part}_joint"
     for side in ("L", "R")
     for part in ("thumb_intermediate", "thumb_distal", "index_intermediate")
 )
-# Body, box centre [m], xyzw orientation. Opposing faces have a nominal 2.8 mm closed gap.
+# Body, box centre [m], xyzw orientation. Both hands share a mirrored 2.8 mm closed gap.
+# Mirror the complete box transform in the wrist frame, then express it in its owning body.
 _PINCH_BOXES = (
     (
         "L_thumb_distal",
@@ -43,13 +47,13 @@ _PINCH_BOXES = (
     ),
     (
         "R_thumb_distal",
-        (0.011382208, 0.012385734, -0.009666304),
-        (0.789644536, 0.000454291, -0.053111143, -0.611261407),
+        (0.014040119, 0.014319045, -0.012353611),
+        (-0.682923007, -0.047886525, 0.010532298, 0.728843000),
     ),
     (
         "R_index_intermediate",
-        (-0.003287404, 0.041405200, -0.006620379),
-        (0.507093701, 0.363411431, 0.492804199, 0.606574094),
+        (-0.003204711, 0.035619934, -0.002802677),
+        (0.581726834, 0.471465978, 0.401988922, 0.526990160),
     ),
 )
 
