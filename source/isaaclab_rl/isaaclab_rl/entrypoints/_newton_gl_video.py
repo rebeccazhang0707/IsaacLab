@@ -87,8 +87,15 @@ class _NewtonGLVideoGrid(NewtonGLVisualizer):
     def _render_view(self, eye: np.ndarray, lookat: np.ndarray, *, update_state: bool) -> np.ndarray:
         """Upload geometry once per mosaic, then render each camera with the same GL materials."""
         self._apply_camera_pose((tuple(eye), tuple(lookat)))
-        # Clip distant environment copies while retaining geometry around the target.
-        self._viewer.camera.far = float(np.linalg.norm(eye - lookat)) + 0.6
+        # Only crop distant copies when multiple worlds are visible. Cropping a single
+        # visible world unnecessarily cuts off its floor and larger scene decorations.
+        visible_env_count = (
+            len(self._env_ids)
+            if self._env_ids is not None
+            else self._scene_data_provider.get_interactive_scene().num_envs
+        )
+        if visible_env_count > 1:
+            self._viewer.camera.far = float(np.linalg.norm(eye - lookat)) + 0.6
         if update_state:
             return super().render_rgb_array()
         viewer = self._viewer

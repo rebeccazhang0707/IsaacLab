@@ -75,6 +75,18 @@ def spawn_g1_shoelace(
     """
     root = spawn_shoelace_usd(prim_path, cfg, translation, orientation, **kwargs)
     stage = root.GetStage()
+    # Source fingertip spheres are visual markers, separate from the collision pads.
+    for side in ("L", "R"):
+        for link in (
+            "index_intermediate",
+            "middle_intermediate",
+            "pinky_intermediate",
+            "ring_intermediate",
+            "thumb_distal",
+        ):
+            tip = stage.GetPrimAtPath(root.GetPath().AppendPath(f"{side}_{link}/visuals/mesh_1/sphere"))
+            if tip.IsValid():
+                UsdGeom.Imageable(tip).MakeInvisible()
     straight_joints = set()
     for prim in Usd.PrimRange(root):
         if prim.IsA(UsdPhysics.RevoluteJoint) and prim.GetName() in STRAIGHT_JOINT_NAMES:

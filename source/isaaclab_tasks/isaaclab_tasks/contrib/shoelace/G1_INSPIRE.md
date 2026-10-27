@@ -28,6 +28,7 @@ configuration uses the left closure for both hands and compensates the right pad
   The shoe is kinematic and therefore needs no physical support. The decorative table has
   no collisions; robot poses, shoe resets, actions, rewards and solver settings are unchanged.
 - Set `scene.packing_table=None` to omit the decorative workstation.
+- The source asset's ten visual fingertip spheres are hidden; the invisible pinch pads are unchanged.
 - The pelvis starts 79.5 cm above the ground and 38 cm behind the shoe.
 - The 14 actions are left relative TCP pose (6), left open-close (1), right relative TCP pose (6),
   and right open-close (1). Negative finger actions close; zero and positive actions open.
