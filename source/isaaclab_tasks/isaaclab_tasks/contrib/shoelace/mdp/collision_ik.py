@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import torch
@@ -14,6 +15,7 @@ import torch
 from pxr import Usd, UsdPhysics
 
 from isaaclab.envs.mdp.actions.task_space_actions import DifferentialInverseKinematicsAction
+from isaaclab.managers import ManagerTermBase, TerminationTermCfg
 from isaaclab.sim import get_current_stage
 from isaaclab.utils.math import quat_apply, quat_conjugate, quat_mul
 
@@ -224,18 +226,28 @@ class G1CollisionAwareIKAction(DifferentialInverseKinematicsAction):
         self._asset.set_joint_position_target_index(target=selected[:, self._action_order], joint_ids=self._joint_ids)
 
 
-def g1_arm_body_collision(env: ManagerBasedRLEnv, penetration_limit: float = 0.005) -> torch.Tensor:
-    """Terminate actual arm/torso proxy penetration beyond tolerance; report guard activity."""
-    actions = [env.action_manager.get_term(name) for name in ("left_arm", "right_arm")]
-    distances = torch.stack(
-        [
-            action.clearance(action._asset.data.joint_pos.torch[:, action._chain_joint_ids]).amin(dim=1)
-            for action in actions
-        ],
-        dim=1,
-    )
-    env.extras.setdefault("log", {}).update(
-        {
+class g1_arm_body_collision(ManagerTermBase):
+    """Terminate actual arm/torso proxy penetration and retain metrics across resets."""
+
+    def __init__(self, cfg: TerminationTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self._metrics: dict[str, torch.Tensor] = {}
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        """Restore the latest guard metrics after the environment clears episode logs."""
+        self._env.extras.setdefault("log", {}).update(self._metrics)
+
+    def __call__(self, env: ManagerBasedRLEnv, penetration_limit: float = 0.005) -> torch.Tensor:
+        """Check measured joint poses after physics, independently of commanded targets."""
+        actions = [env.action_manager.get_term(name) for name in ("left_arm", "right_arm")]
+        distances = torch.stack(
+            [
+                action.clearance(action._asset.data.joint_pos.torch[:, action._chain_joint_ids]).amin(dim=1)
+                for action in actions
+            ],
+            dim=1,
+        )
+        self._metrics = {
             "Metrics/collision_ik/min_clearance_m": distances.amin(dim=1).mean().detach(),
             "Metrics/collision_ik/intervened_fraction": torch.stack([a.intervened for a in actions])
             .float()
@@ -243,5 +255,5 @@ def g1_arm_body_collision(env: ManagerBasedRLEnv, penetration_limit: float = 0.0
             .detach(),
             "Metrics/collision_ik/blocked_fraction": torch.stack([a.blocked for a in actions]).float().mean().detach(),
         }
-    )
-    return (~torch.isfinite(distances).all(dim=1)) | (distances < -penetration_limit).any(dim=1)
+        env.extras.setdefault("log", {}).update(self._metrics)
+        return (~torch.isfinite(distances).all(dim=1)) | (distances < -penetration_limit).any(dim=1)
