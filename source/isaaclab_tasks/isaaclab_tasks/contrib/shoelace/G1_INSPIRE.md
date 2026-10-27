@@ -1,7 +1,7 @@
 # G1 Inspire shoelace scene
 
 The task `IsaacContrib-Shoelace-G1Inspire` uses a fixed pelvis, two Cartesian arm controllers,
-and one binary index-finger command per hand. The shoe and pedestal are kinematic.
+and one binary index-finger command per hand. The shoe is kinematic.
 
 ## Symmetry contract
 
@@ -20,7 +20,14 @@ configuration uses the left closure for both hands and compensates the right pad
 
 ## Scene and controls
 
-- The pedestal is 78 cm high, with a 6 by 6 cm column and an 8 by 26 cm top.
+- A visual-only PackingTable workstation is uniformly scaled to a 78 cm tabletop, with its
+  tray moved to the right rear to leave the shoe and hands clear. It uses the same asset as
+  the G1 pick-place task. Imported table, crate and tray physics are disabled.
+- The shoe remains at 78 cm, directly above the tabletop, with about 1 mm sole clearance.
+  The previous shoe fixture and support column, including their collisions, are removed.
+  The shoe is kinematic and therefore needs no physical support. The decorative table has
+  no collisions; robot poses, shoe resets, actions, rewards and solver settings are unchanged.
+- Set `scene.packing_table=None` to omit the decorative workstation.
 - The pelvis starts 79.5 cm above the ground and 38 cm behind the shoe.
 - The 14 actions are left relative TCP pose (6), left open-close (1), right relative TCP pose (6),
   and right open-close (1). Negative finger actions close; zero and positive actions open.

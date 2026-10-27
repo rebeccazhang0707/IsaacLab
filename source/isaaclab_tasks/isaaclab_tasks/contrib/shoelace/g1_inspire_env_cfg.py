@@ -3,21 +3,23 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Fixed-base G1 Inspire hands manipulating a shoe on a narrow pedestal."""
+"""Fixed-base G1 Inspire hands manipulating a shoe at a packing workstation."""
 
 from isaaclab_newton.sim.schemas import MujocoRigidBodyCfg
 from isaaclab_visualizers.newton import NewtonGLVisualizerCfg
 
 import isaaclab.envs.mdp as env_mdp
 import isaaclab.sim as sim_utils
-from isaaclab.assets import ArticulationCfg, RigidObjectCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.controllers import DifferentialIKControllerCfg
 from isaaclab.managers import ObservationTermCfg, RewardTermCfg, SceneEntityCfg
 from isaaclab.utils import clone, configclass
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from isaaclab_assets.robots.unitree import G1_INSPIRE_FTP_CFG
 
 from . import shoelace_constants as physics
+from .g1_factory_scene import PACKING_TABLE_SCALE, spawn_packing_workstation
 from .g1_inspire_hand import INDEX_CLOSED, PAD_OFFSETS, TCP_BODY_OFFSETS, THUMB_PITCH, THUMB_YAW, spawn_g1_shoelace
 from .mdp.inspire_hand_cfg import InspireFingerActionCfg
 from .mdp.rewards import binary_gripper_switch_rate
@@ -141,32 +143,20 @@ def _pinch_action(prefix: str, arm: int) -> InspireFingerActionCfg:
 
 @configclass
 class G1ShoelaceSceneCfg(ShoelaceSceneCfg):
-    """One humanoid and an 8 by 26 cm shoe support, with room on both sides."""
+    """One humanoid and a kinematic shoe on a visual packing workstation."""
 
     robot_left = None
     robot_right = None
     robot = _robot_cfg()
-    pedestal_column = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/PedestalColumn",
-        spawn=sim_utils.CuboidCfg(
-            size=(0.06, 0.06, 0.76),
-            rigid_props=sim_utils.UsdPhysicsRigidBodyCfg(kinematic_enabled=True),
-            mass_props=sim_utils.MassCfg(mass=10.0),
-            collision_props=sim_utils.UsdPhysicsCollisionCfg(),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.25, 0.28, 0.30)),
+    packing_table = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/PackingTable",
+        spawn=sim_utils.UsdFileCfg(
+            func=spawn_packing_workstation,
+            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/PackingTable/packing_table.usd",
+            scale=(PACKING_TABLE_SCALE,) * 3,
+            make_uninstanceable=True,
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38)),
-    )
-    pedestal_top = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/PedestalTop",
-        spawn=sim_utils.CuboidCfg(
-            size=(0.08, 0.26, 0.02),
-            rigid_props=sim_utils.UsdPhysicsRigidBodyCfg(kinematic_enabled=True),
-            mass_props=sim_utils.MassCfg(mass=1.0),
-            collision_props=sim_utils.UsdPhysicsCollisionCfg(),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.45, 0.35, 0.23)),
-        ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.77)),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.10, 0.0)),
     )
 
     def __post_init__(self) -> None:
@@ -278,9 +268,13 @@ class G1ShoelaceEnvCfg(ShoelaceEnvCfg):
                 finger_cfgs=tuple(clone(cfg) for cfg in _FINGER_CFGS),
             )
         self.events.reset_shoe.params["position_range"] = {"x": (-0.01, 0.01), "y": (-0.01, 0.01)}
-        self.sim.physics.solver_cfg.entries[0].bodies = [
-            r"/World/envs/env_[^/]+/(Robot|ShoelaceScene/Shoe|Pedestal(Column|Top))"
-        ]
+        self.sim.physics.solver_cfg.entries[0].bodies = [r"/World/envs/env_[^/]+/(Robot|ShoelaceScene/Shoe)"]
         self.sim.visualizer_cfgs = [
-            NewtonGLVisualizerCfg(eye=(1.1, 1.3, 1.15), lookat=(0.0, -0.15, 0.8), focal_length=20.0, max_visible_envs=1)
+            NewtonGLVisualizerCfg(
+                eye=(1.6, 1.8, 1.5),
+                lookat=(0.0, 0.0, 0.7),
+                focal_length=20.0,
+                max_visible_envs=1,
+                background_color=(0.20, 0.24, 0.29),
+            )
         ]
