@@ -233,6 +233,8 @@ class G1ShoelaceEnvCfg(ShoelaceEnvCfg):
     """The same surface landmarks used by the shared grasp rewards [m]."""
     grasp_open_apertures = (0.019776298,) * 2
     """Measured left/right surface spacing at the ready pose [m]."""
+    grasp_capture_std: float = 0.004
+    """Tail capture width for the Inspire pinch pads in grasp rewards and success [m]."""
 
     def __post_init__(self) -> None:
         """Bind the shared managers to one articulation with increasing finger closure angles."""
