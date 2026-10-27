@@ -12,7 +12,7 @@ import isaaclab.envs.mdp as env_mdp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.controllers import DifferentialIKControllerCfg
-from isaaclab.managers import ObservationTermCfg, RewardTermCfg, SceneEntityCfg
+from isaaclab.managers import ObservationTermCfg, RewardTermCfg, SceneEntityCfg, TerminationTermCfg
 from isaaclab.utils import clone, configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
@@ -21,10 +21,11 @@ from isaaclab_assets.robots.unitree import G1_INSPIRE_FTP_CFG
 from . import shoelace_constants as physics
 from .g1_factory_scene import PACKING_TABLE_SCALE, spawn_packing_workstation
 from .g1_inspire_hand import INDEX_CLOSED, PAD_OFFSETS, TCP_BODY_OFFSETS, THUMB_PITCH, THUMB_YAW, spawn_g1_shoelace
+from .mdp.collision_ik_cfg import G1CollisionAwareIKActionCfg
 from .mdp.inspire_hand_cfg import InspireFingerActionCfg
 from .mdp.rewards import binary_gripper_switch_rate
 from .shoelace_assets import ShoelaceUsdCfg
-from .shoelace_env_cfg import ObservationsCfg, RewardsCfg, ShoelaceEnvCfg, ShoelaceSceneCfg
+from .shoelace_env_cfg import ObservationsCfg, RewardsCfg, ShoelaceEnvCfg, ShoelaceSceneCfg, TerminationsCfg
 
 _ARM_JOINTS = r"{side}_(shoulder_.*|elbow|wrist_.*)_joint"
 _ARM_MIRROR_SIGNS = {
@@ -105,7 +106,8 @@ def _robot_cfg() -> ArticulationCfg:
 
 def _arm_action(side: str, arm: int) -> env_mdp.DifferentialInverseKinematicsActionCfg:
     """Control the nominal closed pinch point rigidly attached to the wrist."""
-    return env_mdp.DifferentialInverseKinematicsActionCfg(
+    return G1CollisionAwareIKActionCfg(
+        side=side,
         asset_name="robot",
         joint_names=[_ARM_JOINTS.format(side=side)],
         body_name=f"{side}_wrist_yaw_link",
@@ -215,6 +217,16 @@ class G1ShoelaceRewardsCfg(RewardsCfg):
 
 
 @configclass
+class G1ShoelaceTerminationsCfg(TerminationsCfg):
+    """Reject simulated arm/torso overlap that exceeds the kinematic guard's tolerance."""
+
+    arm_body_collision = TerminationTermCfg(
+        func=f"{__package__}.mdp.collision_ik:g1_arm_body_collision",
+        params={"penetration_limit": 0.005},
+    )
+
+
+@configclass
 class G1ShoelaceEnvCfg(ShoelaceEnvCfg):
     """G1 Inspire variant sharing the cable, reset, reward and bilateral success definitions.
 
@@ -227,6 +239,7 @@ class G1ShoelaceEnvCfg(ShoelaceEnvCfg):
     actions: G1ShoelaceActionsCfg = G1ShoelaceActionsCfg()
     observations: G1ShoelaceObservationsCfg = G1ShoelaceObservationsCfg()
     rewards: G1ShoelaceRewardsCfg = G1ShoelaceRewardsCfg()
+    terminations: G1ShoelaceTerminationsCfg = G1ShoelaceTerminationsCfg()
     tcp_body_offsets = _TCP_BODY_OFFSETS
     """Nominal closed pinch centres in the left/right wrist frames, independent of finger state [m]."""
     finger_body_offsets = _PAD_OFFSETS

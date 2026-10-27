@@ -22,6 +22,7 @@ from isaaclab.utils.string import resolve_matching_names
 from isaaclab_tasks.contrib.shoelace import shoelace_constants as constants
 from isaaclab_tasks.contrib.shoelace.g1_inspire_env_cfg import G1ShoelaceEnvCfg
 from isaaclab_tasks.contrib.shoelace.g1_inspire_hand import STRAIGHT_JOINT_NAMES
+from isaaclab_tasks.contrib.shoelace.mdp.collision_ik import project_bounded_step, sphere_box_distance
 from isaaclab_tasks.contrib.shoelace.mdp.events import reset_shoe_position
 from isaaclab_tasks.contrib.shoelace.mdp.grasp import shoelace_grasp_quality
 from isaaclab_tasks.contrib.shoelace.mdp.observations import (
@@ -39,6 +40,37 @@ from isaaclab_tasks.contrib.shoelace.mdp.terminations import shoelace_bilateral_
 from isaaclab_tasks.contrib.shoelace.shoelace_assets import ShoelaceUsdCfg
 from isaaclab_tasks.contrib.shoelace.shoelace_env_cfg import ShoelaceEnvCfg
 from isaaclab_tasks.contrib.shoelace.shoelace_physics import configure_shoelace_builder
+
+
+def test_arm_torso_distance_reports_surface_clearance_and_outward_gradients() -> None:
+    """Distinguish face, corner and interior distances, including mirrored normals."""
+    points = torch.tensor([[1.5, 0.0, 0.0], [1.3, 1.4, 0.0], [0.0, -0.2, 0.0]], dtype=torch.float64)
+    radii = torch.full((3,), 0.1, dtype=torch.float64)
+    center, extent = torch.zeros(3, dtype=torch.float64), torch.ones(3, dtype=torch.float64)
+    distance, gradient = sphere_box_distance(points, radii, center, extent)
+    torch.testing.assert_close(distance, torch.tensor([0.4, 0.4, -0.9], dtype=torch.float64))
+    torch.testing.assert_close(
+        gradient, torch.tensor([[1.0, 0.0, 0.0], [0.6, 0.8, 0.0], [0.0, -1.0, 0.0]], dtype=torch.float64)
+    )
+    for axis in range(3):
+        perturbation = torch.zeros_like(points)
+        perturbation[:, axis] = 1.0e-6
+        plus, _ = sphere_box_distance(points + perturbation, radii, center, extent)
+        minus, _ = sphere_box_distance(points - perturbation, radii, center, extent)
+        torch.testing.assert_close((plus - minus) / 2.0e-6, gradient[:, axis])
+
+
+def test_arm_step_projection_respects_coupled_clearance_and_joint_bounds() -> None:
+    """A command into two surfaces is corrected; degenerate constraints remain finite."""
+    delta = torch.tensor([[-0.5, -0.2], [0.1, -0.1]])
+    gradient = torch.tensor([[[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]], [[0.0, 0.0]] * 3])
+    required = torch.tensor([[0.1, -0.1, 0.1], [0.1, 0.1, 0.1]])
+    lower, upper = torch.full_like(delta, -0.2), torch.full_like(delta, 0.2)
+    result = project_bounded_step(delta, gradient, required, lower, upper, 12)
+    assert torch.isfinite(result).all()
+    assert ((result >= lower) & (result <= upper)).all()
+    assert (gradient[0] @ result[0] >= required[0] - 1.0e-6).all()
+    torch.testing.assert_close(result[1], delta[1])
 
 
 @pytest.mark.parametrize("robot", ["franka", "g1"])
