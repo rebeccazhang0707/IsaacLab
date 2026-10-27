@@ -3,4 +3,3 @@
   backtracking against arm spheres and a torso box. Actual proxy penetration beyond
   5 mm terminates the episode. Existing policies retain their observation/action
   dimensions but require re-evaluation under the changed control response.
-  Guard diagnostics are retained when parallel environments reset.
