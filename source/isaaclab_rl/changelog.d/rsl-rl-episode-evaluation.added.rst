@@ -1,6 +1,3 @@
-Added
-^^^^^
-
 * Added fixed-episode RSL-RL playback evaluation with per-environment quotas, success-rate
   reporting, and per-episode JSON results for manager-based environments.
 * Added labelled Newton GL viewport mosaics during RSL-RL playback, with an optional

@@ -195,7 +195,9 @@ class FingerTailContactSensor(SensorBase):
         chains = _find_chains(model.body_label, model.body_world.numpy(), self._num_envs, "edge_body")
         if any(not left or not right for left, right in chains):
             raise RuntimeError("Finger-tail contact sensor requires both shoelace segment chains in every world")
-        self._contacts = FingerTailContacts(model, chains, self._backend_manager, self.cfg.robot_prim_names, self.cfg.finger_body_names)
+        self._contacts = FingerTailContacts(
+            model, chains, self._backend_manager, self.cfg.robot_prim_names, self.cfg.finger_body_names
+        )
         self._contacts.initialize()
 
     def _update_buffers_impl(self, env_mask: wp.array) -> None:

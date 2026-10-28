@@ -122,7 +122,9 @@ class G1CollisionAwareIKAction(DifferentialInverseKinematicsAction):
         self._chain_joint_ids = [self._asset.joint_names.index(name) for name in names]
         self._chain_body_ids = [self._asset.body_names.index(f"{cfg.side}_{part}_link") for part in _JOINT_PARTS]
         self._torso_body_id = self._asset.body_names.index(cfg.torso_body)
-        root = get_current_stage().GetPrimAtPath(f"/World/envs/env_0/{self._asset.cfg.prim_path.rsplit('/', 1)[-1]}")
+        root = get_current_stage().GetPrimAtPath(
+            f"{env.scene.env_prim_paths[0]}/{self._asset.cfg.prim_path.rsplit('/', 1)[-1]}"
+        )
         joints = {
             p.GetName(): UsdPhysics.RevoluteJoint(p) for p in Usd.PrimRange(root) if p.IsA(UsdPhysics.RevoluteJoint)
         }

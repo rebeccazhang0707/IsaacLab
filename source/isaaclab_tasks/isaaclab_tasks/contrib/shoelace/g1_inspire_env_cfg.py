@@ -6,7 +6,7 @@
 """Fixed-base G1 Inspire hands manipulating a shoe at a packing workstation."""
 
 from isaaclab_newton.sim.schemas import MujocoRigidBodyCfg
-from isaaclab_visualizers.newton import NewtonGLVisualizerCfg
+from isaaclab_visualizers.newton import NewtonGLBackendCfg
 
 import isaaclab.envs.mdp as env_mdp
 import isaaclab.sim as sim_utils
@@ -15,6 +15,7 @@ from isaaclab.controllers import DifferentialIKControllerCfg
 from isaaclab.managers import ObservationTermCfg, RewardTermCfg, SceneEntityCfg, TerminationTermCfg
 from isaaclab.utils import clone, configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab.visualizers import VisualizerCfg
 
 from isaaclab_assets.robots.unitree import G1_INSPIRE_FTP_CFG
 
@@ -235,7 +236,7 @@ class G1ShoelaceEnvCfg(ShoelaceEnvCfg):
     The shoe remains kinematic, as in the Franka baseline. Its X axis is the humanoid's lateral axis.
     """
 
-    scene: G1ShoelaceSceneCfg = G1ShoelaceSceneCfg(num_envs=4, env_spacing=2.5, replicate_physics=True)
+    scene: G1ShoelaceSceneCfg = G1ShoelaceSceneCfg(num_envs=4, env_spacing=2.5)
     actions: G1ShoelaceActionsCfg = G1ShoelaceActionsCfg()
     observations: G1ShoelaceObservationsCfg = G1ShoelaceObservationsCfg()
     rewards: G1ShoelaceRewardsCfg = G1ShoelaceRewardsCfg()
@@ -283,9 +284,10 @@ class G1ShoelaceEnvCfg(ShoelaceEnvCfg):
                 finger_cfgs=tuple(clone(cfg) for cfg in _FINGER_CFGS),
             )
         self.events.reset_shoe.params["position_range"] = {"x": (-0.01, 0.01), "y": (-0.01, 0.01)}
-        self.sim.physics.solver_cfg.entries[0].bodies = [r"/World/envs/env_[^/]+/(Robot|ShoelaceScene/Shoe)"]
+        self.sim.physics.solver_cfg.entries[0].bodies = [r"{ENV_REGEX_NS}/(Robot|ShoelaceScene/Shoe)"]
         self.sim.visualizer_cfgs = [
-            NewtonGLVisualizerCfg(
+            VisualizerCfg(
+                backend=NewtonGLBackendCfg(),
                 eye=(1.6, 1.8, 1.5),
                 lookat=(0.0, 0.0, 0.7),
                 focal_length=20.0,

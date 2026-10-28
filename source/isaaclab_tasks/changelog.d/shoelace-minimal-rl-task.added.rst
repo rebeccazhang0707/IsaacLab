@@ -1,6 +1,3 @@
-Added
-^^^^^
-
 * Added a minimal trainable Newton dual-Franka shoelace task with deterministic resets, task-local finger-tail
   contact observations, a two-phase acquisition-and-pull reward with Hamacher soft-AND, and an X-separation
   success condition.

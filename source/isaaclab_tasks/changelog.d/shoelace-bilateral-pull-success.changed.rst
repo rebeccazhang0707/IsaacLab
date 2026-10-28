@@ -1,6 +1,3 @@
-Changed
-^^^^^^^
-
 * **Breaking:** Required bilateral loaded pulling before geometric completion in the dual-Franka shoelace
   task. Each tail accumulated at least 0.025 m of new outward records with valid grasps on both hands;
   passive movement, late closure, repeated excursions, and invalid observation gaps did not count.
@@ -22,13 +19,3 @@ Changed
 * Consolidated grasp parameter defaults and removed redundant private helper layers without changing
   formulas or configuration values. Per-term parameter overrides remained independent; existing public
   configuration keys required no migration.
-
-Added
-^^^^^
-
-* Added current geometry-completion and bilateral-pull-completion fractions and per-arm loaded-pull
-  distance metrics. Exposed ``mdp.shoelace_grasp_quality`` as the single implementation of the contact,
-  actual-closure, and low-slip grasp criterion for acquisition, retention, and success. Kept the formula
-  unchanged and retained independent filters and episode histories for each term.
-* Added per-arm throat capsule-count metrics and optional per-arm counts from ``untying_metrics`` while
-  preserving its default total-count output and robot-arm ordering.

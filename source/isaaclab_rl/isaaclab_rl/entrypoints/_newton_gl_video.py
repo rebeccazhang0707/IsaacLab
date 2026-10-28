@@ -10,24 +10,27 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from isaaclab_visualizers.newton import NewtonGLVisualizer, NewtonGLVisualizerCfg
+import warp as wp
+from isaaclab_visualizers.newton import NewtonGLBackendCfg, NewtonGLVisualizer
 from PIL import Image, ImageDraw, ImageFont
 
 from isaaclab.utils.configclass import configclass
+from isaaclab.visualizers import VisualizerCfg
+from isaaclab.visualizers.visualizer_cfg import WindowCfg
 
 
 @configclass
-class _NewtonGLVideoGridCfg(NewtonGLVisualizerCfg):
+class _NewtonGLVideoGridCfg(VisualizerCfg):
     """Private playback configuration; each tile uses the OpenGL framebuffer."""
 
-    class_type: str = "isaaclab_rl.entrypoints._newton_gl_video:_NewtonGLVideoGrid"
+    backend: NewtonGLBackendCfg = NewtonGLBackendCfg(
+        class_type="isaaclab_rl.entrypoints._newton_gl_video:_NewtonGLVideoGrid", enable_picking=False
+    )
     headless: bool = True
     streaming_view: bool = False
     enable_live_plots: bool = False
-    enable_picking: bool = False
     enable_markers: bool = False
-    window_width: int = 960
-    window_height: int = 540
+    window: WindowCfg = WindowCfg(size=(960, 540))
     focal_length: float = 24.0
     grid_num_envs: int = 16
     grid_eye: tuple[float, float, float] = (0.0, -0.8, 0.85)
@@ -48,16 +51,16 @@ class _NewtonGLVideoGrid(NewtonGLVisualizer):
 
     def render_rgb_array(self) -> np.ndarray:
         """Return the GL mosaic, optionally replacing the bottom-right 2 by 2 cells."""
-        if self._viewer is None or self._scene_data_provider is None:
+        if self._viewer is None or self._sim is None:
             raise RuntimeError("The GL video grid is not initialized.")
-        scene = self._scene_data_provider.get_interactive_scene()
+        scene = self._sim.get_scene_data_provider().get_interactive_scene()
         origins = scene.env_origins
         origins = getattr(origins, "torch", origins).cpu().numpy()
         columns = math.ceil(math.sqrt(self.cfg.grid_num_envs))
         rows = math.ceil(self.cfg.grid_num_envs / columns)
         tile_width, tile_height = 1920 // columns, 1080 // rows
         canvas = Image.new("RGB", (1920, 1080), (21, 27, 34))
-        previous_pose = self._last_camera_pose
+        previous_pose = (self.cfg.eye, self.cfg.lookat)
         previous_far = self._viewer.camera.far
         try:
             first_view = True
@@ -81,26 +84,39 @@ class _NewtonGLVideoGrid(NewtonGLVisualizer):
         finally:
             self._viewer.camera.far = previous_far
             if previous_pose is not None:
-                self._apply_camera_pose(previous_pose)
+                self.set_camera_view(*previous_pose)
         return np.asarray(canvas)
 
     def _render_view(self, eye: np.ndarray, lookat: np.ndarray, *, update_state: bool) -> np.ndarray:
         """Upload geometry once per mosaic, then render each camera with the same GL materials."""
-        self._apply_camera_pose((tuple(eye), tuple(lookat)))
+        self.set_camera_view(tuple(eye), tuple(lookat))
         # Only crop distant copies when multiple worlds are visible. Cropping a single
         # visible world unnecessarily cuts off its floor and larger scene decorations.
         visible_env_count = (
             len(self._env_ids)
             if self._env_ids is not None
-            else self._scene_data_provider.get_interactive_scene().num_envs
+            else self._sim.get_scene_data_provider().get_interactive_scene().num_envs
         )
         if visible_env_count > 1:
             self._viewer.camera.far = float(np.linalg.norm(eye - lookat)) + 0.6
         if update_state:
-            return super().render_rgb_array()
+            self._render_frame()
+            return self._viewer.get_frame().numpy()
         viewer = self._viewer
         viewer.renderer.render(viewer.camera, viewer.objects, viewer.lines, viewer.wireframe_shapes, viewer.arrows)
         return viewer.get_frame().numpy()
+
+    def _capture_frame(self, output: wp.array | None) -> wp.array:
+        """Provide the mosaic through the shared image view used by video recorders."""
+        if not self._sim.is_rendering:
+            self._sim.forward()
+            if self.supports_markers():
+                self._sim.vis_marker_registry.dispatch_callbacks()
+        frame = wp.array(self.render_rgb_array(), dtype=wp.uint8, device=self._sim.device)
+        if output is not None and output.shape == frame.shape:
+            wp.copy(output, frame)
+            return output
+        return frame
 
     @staticmethod
     def _label_frame(frame: np.ndarray, size: tuple[int, int], label: str, *, closeup: bool = False) -> Image.Image:

@@ -295,22 +295,33 @@ def test_gl_video_grid_places_closeup_in_bottom_right(monkeypatch, closeup_env):
     import numpy as np
     import torch
 
+    from isaaclab.visualizers.image_view import ImageView
+    from isaaclab.visualizers.visualizer_cfg import ImageViewCfg, PerspectiveCameraCfg
+
     from isaaclab_rl.entrypoints._newton_gl_video import _NewtonGLVideoGrid, _NewtonGLVideoGridCfg
 
     grid = object.__new__(_NewtonGLVideoGrid)
     grid.cfg = _NewtonGLVideoGridCfg(closeup_env=closeup_env, closeup_offset=(0.0, 0.0, 1.0))
     origins = torch.zeros((16, 3))
     origins[:, 0] = torch.arange(16)
-    grid._scene_data_provider = SimpleNamespace(get_interactive_scene=lambda: SimpleNamespace(env_origins=origins))
+    grid._sim = SimpleNamespace(
+        is_rendering=True,
+        device="cpu",
+        get_scene_data_provider=lambda: SimpleNamespace(
+            get_interactive_scene=lambda: SimpleNamespace(env_origins=origins)
+        ),
+    )
     grid._viewer = SimpleNamespace(camera=SimpleNamespace(far=1000.0))
-    grid._last_camera_pose = None
+    monkeypatch.setattr(grid, "set_camera_view", lambda *args: None)
 
     def render_view(eye, lookat, *, update_state):
         color = (250, 200, 0) if lookat[2] == 1.0 else (int(lookat[0]) + 1, 20, 40)
         return np.full((30, 40, 3), color, dtype=np.uint8)
 
     monkeypatch.setattr(grid, "_render_view", render_view)
-    frame = grid.render_rgb_array()
+    view = ImageView(ImageViewCfg(source=PerspectiveCameraCfg()))
+    view.render = grid._capture_frame
+    frame = view.read_rgb(0)
     assert frame.shape == (1080, 1920, 3)
     for env_id in range(16):
         row, column = divmod(env_id, 4)
@@ -318,4 +329,3 @@ def test_gl_video_grid_places_closeup_in_bottom_right(monkeypatch, closeup_env):
         if closeup_env is not None and env_id in (10, 11, 14, 15):
             expected = (250, 200, 0)
         np.testing.assert_array_equal(frame[row * 270 + 135, column * 480 + 240], expected)
-

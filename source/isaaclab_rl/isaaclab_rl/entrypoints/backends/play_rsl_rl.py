@@ -11,13 +11,12 @@ import argparse
 import contextlib
 import json
 import logging
+import os
 import time
 from datetime import datetime
 from pathlib import Path
 
 import torch
-import os
-
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
 from isaaclab.app import add_launcher_args, launch_simulation
@@ -70,8 +69,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--external_callback", default=None, help="Fully qualified path to an externally defined callback."
     )
-    parser.add_argument("--eval_episodes", type=int, default=None, help="Evaluate exactly this many episodes, then exit.")
-    parser.add_argument("--eval_success_term", default="success", help="Manager termination term used to count successes.")
+    parser.add_argument(
+        "--eval_episodes", type=int, default=None, help="Evaluate exactly this many episodes, then exit."
+    )
+    parser.add_argument(
+        "--eval_success_term", default="success", help="Manager termination term used to count successes."
+    )
     parser.add_argument(
         "--eval_output", type=str, default=None, help="Evaluation JSON path (default: checkpoint directory/eval)."
     )
@@ -79,14 +82,22 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--video_grid", action="store_true", help="Record a headless Newton GL camera grid, one tile per environment."
     )
     parser.add_argument(
-        "--video_eye", type=float, nargs=3, default=(4.0, -4.0, 3.0), help="Grid camera offset from each env origin [m]."
+        "--video_eye",
+        type=float,
+        nargs=3,
+        default=(4.0, -4.0, 3.0),
+        help="Grid camera offset from each env origin [m].",
     )
     parser.add_argument("--video_lookat", type=float, nargs=3, default=(0.0, 0.0, 0.0), help="Grid look-at offset [m].")
     parser.add_argument(
         "--video_closeup_env", type=int, default=None, help="Replace the bottom-right 2x2 tiles with this env."
     )
     parser.add_argument(
-        "--video_closeup_eye", type=float, nargs=3, default=(0.0, -0.35, 0.525), help="Closeup eye offset from target [m]."
+        "--video_closeup_eye",
+        type=float,
+        nargs=3,
+        default=(0.0, -0.35, 0.525),
+        help="Closeup eye offset from target [m].",
     )
     parser.add_argument(
         "--video_closeup_offset",
@@ -108,7 +119,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     if args_cli.video_closeup_env is not None and not args_cli.video_grid:
         parser.error("--video_closeup_env requires --video_grid.")
     if args_cli.video_grid:
-        if args_cli.visualizer not in (None, ["newton_gl"]):
+        if getattr(args_cli, "visualizer", None) not in (None, [], ["newton_gl"]):
             parser.error("--video_grid requires --visualizer newton_gl (or no explicit visualizer).")
         args_cli.video = "viz:newton_gl"
         args_cli.visualizer = ["newton_gl"]
@@ -228,7 +239,8 @@ def run(argv: list[str]) -> None:
 
             evaluator = (
                 EpisodeSuccessEvaluator(env.num_envs, args_cli.eval_episodes, env.unwrapped.device)
-                if args_cli.eval_episodes is not None else None
+                if args_cli.eval_episodes is not None
+                else None
             )
 
             def step() -> None:
@@ -247,7 +259,8 @@ def run(argv: list[str]) -> None:
             dt = env.unwrapped.step_dt
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             eval_output = (
-                Path(args_cli.eval_output) if args_cli.eval_output
+                Path(args_cli.eval_output)
+                if args_cli.eval_output
                 else Path(log_dir) / "eval" / f"{Path(resume_path).stem}_{timestamp}.json"
             )
             logger.info("Evaluating %s episodes; results: %s", evaluator.num_episodes, eval_output)
@@ -278,4 +291,6 @@ def run(argv: list[str]) -> None:
                 }
                 eval_output.parent.mkdir(parents=True, exist_ok=True)
                 eval_output.write_text(json.dumps(result, indent=2) + "\n")
-                logger.info("Saved %s evaluation results: %s", "complete" if evaluator.complete else "partial", eval_output)
+                logger.info(
+                    "Saved %s evaluation results: %s", "complete" if evaluator.complete else "partial", eval_output
+                )

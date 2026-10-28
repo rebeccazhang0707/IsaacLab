@@ -1,6 +1,3 @@
-Fixed
-^^^^^
-
 * Removed premature saturation of dual-Franka shoelace high-water pull rewards at the per-arm
   separation scale. New outward records continued earning grasp-qualified independent credit,
   and bilateral credit extended with the trailing arm's progress. Below-scale shaping, grasp
