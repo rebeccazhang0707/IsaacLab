@@ -62,7 +62,7 @@ class InspireFingerAction(BinaryJointPositionAction):
         self._processed_actions[indices] = self._open_command + self._progress[indices] * self._delta
 
 
-def inspire_finger_close_error(
+def inspire_finger_tracking_error(
     env: ManagerBasedEnv,
     finger_cfgs: tuple[SceneEntityCfg, ...],
     motion_ranges: tuple[float, ...],

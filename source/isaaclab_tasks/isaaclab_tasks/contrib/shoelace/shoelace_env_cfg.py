@@ -189,8 +189,8 @@ class ObservationsCfg:
             params={"asset_cfg": SceneEntityCfg("robot_right", joint_names=["panda_joint.*"])},
             scale=0.05,
         )
-        gripper_close_error = ObsTerm(
-            func=mdp.gripper_close_error,
+        finger_tracking_error = ObsTerm(
+            func=mdp.gripper_closing_tracking_error,
             params={"robot_cfgs": ROBOT_CFGS},
             clip=(0.0, physics.GRIPPER_OPEN_POSITION - physics.GRIPPER_CLOSED_POSITION),
             scale=1.0 / (physics.GRIPPER_OPEN_POSITION - physics.GRIPPER_CLOSED_POSITION),

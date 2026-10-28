@@ -188,8 +188,8 @@ class G1ShoelaceObservationsCfg(ObservationsCfg):
 
     @configclass
     class PolicyCfg(ObservationsCfg.PolicyCfg):
-        gripper_close_error = ObservationTermCfg(
-            func=f"{__package__}.mdp.inspire_hand:inspire_finger_close_error",
+        finger_tracking_error = ObservationTermCfg(
+            func=f"{__package__}.mdp.inspire_hand:inspire_finger_tracking_error",
             params={
                 "finger_cfgs": _FINGER_CFGS,
                 "motion_ranges": (0.12, _INDEX_STROKES[0], 0.12, _INDEX_STROKES[1]),

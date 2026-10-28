@@ -27,7 +27,7 @@ from isaaclab_tasks.contrib.shoelace.mdp.events import reset_shoe_position
 from isaaclab_tasks.contrib.shoelace.mdp.grasp import shoelace_grasp_quality
 from isaaclab_tasks.contrib.shoelace.mdp.observations import (
     finger_tail_relative_velocity,
-    gripper_close_error,
+    gripper_closing_tracking_error,
     tail_tcp_relative_speed,
     tails_to_tcp,
 )
@@ -298,7 +298,7 @@ def test_finger_tracking_residual_supports_both_joint_directions(
         },
     )
     robot_cfgs = tuple(SceneEntityCfg("robot", joint_ids=[index], body_ids=[index]) for index in range(2))
-    residual = gripper_close_error(env, robot_cfgs, closing_direction=direction) / (closed - opened).abs()
+    residual = gripper_closing_tracking_error(env, robot_cfgs, closing_direction=direction) / (closed - opened).abs()
     torch.testing.assert_close(residual, torch.tensor([[1.0, 1.0], [0.5, 0.5], [0.0, 0.0]]))
 
 

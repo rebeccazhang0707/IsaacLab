@@ -105,12 +105,12 @@ def finger_tail_relative_velocity(
     return torch.stack(vectors, dim=1).flatten(start_dim=1)
 
 
-def gripper_close_error(
+def gripper_closing_tracking_error(
     env: ManagerBasedEnv,
     robot_cfgs: tuple[SceneEntityCfg, SceneEntityCfg],
     closing_direction: float = -1.0,
 ) -> torch.Tensor:
-    """Return finger closure residuals [m or rad, depending on joint type].
+    """Return current joint-target tracking errors only in the closing direction [m or rad].
 
     Args:
         env: Task environment.
